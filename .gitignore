@@ -1,0 +1,30 @@
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Local config and secrets
+.env
+.env.local
+*.local.yaml
+
+# Local notes (committed plan/docs live in /docs)
+/SCRATCH.md
+/scratch/
+
+# Hook / tool logs dropped into cwd
+/logs/
