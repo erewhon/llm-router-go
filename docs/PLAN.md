@@ -57,9 +57,9 @@ external import — keeps the import surface honest.
 
 - [x] Scaffold repo, justfile, license, plan
 - [ ] Wire CI (GitHub Actions): `go build ./... && go test ./...` on amd64 + arm64
-- [ ] Add `internal/config/` — port `models.yaml` Pydantic schema to Go structs
-      with `gopkg.in/yaml.v3`. Add round-trip tests against the real
-      `~/Projects/erewhon/llm-router/models.yaml`.
+- [x] Add `internal/config/` — port `models.yaml` Pydantic schema to Go structs
+      with `gopkg.in/yaml.v3`. Tests cover defaults, validation, routing
+      helpers, and a load of the real `~/Projects/erewhon/llm-router/models.yaml`.
 - [ ] Add `internal/logx/` — `slog` setup with JSON output + level flag.
 - [ ] Add `internal/httpx/` — request-id middleware, structured access log,
       graceful shutdown helper. Used by all three binaries.
