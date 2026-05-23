@@ -1,0 +1,85 @@
+# /etc/systemd/system/llm-router-go-agent.service
+#
+# Go rewrite of the LLM Router node agent. Shadow-runs alongside the
+# Python llm-router-agent service (port 8100) while we validate parity.
+# This unit listens on :8101.
+#
+# Install (typically driven by deploy/scripts/deploy-node-agent.sh):
+#   sudo install -m 644 llm-router-go-agent.service \
+#       /etc/systemd/system/llm-router-go-agent.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl start llm-router-go-agent   # one-shot
+#   sudo systemctl enable --now llm-router-go-agent  # on boot
+#
+# Requires the existing `llm-router` system user (created for the
+# Python agent — `useradd --system --shell /usr/sbin/nologin llm-router`).
+
+[Unit]
+Description=LLM Router Node Agent (Go rewrite)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llm-router
+Group=llm-router
+
+ExecStart=/usr/local/bin/llm-router-go-agent \
+    --addr=:8101 \
+    --models-yaml=/home/erewhon/Projects/erewhon/llm-router/models.yaml \
+    --log-format=json \
+    --log-level=info
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# --- State directories (systemd creates and chowns these) ---
+# /var/lib/llm-router-go — reserved for future persistent state.
+StateDirectory=llm-router-go
+# /run/llm-router-go — ephemeral runtime data (unused today).
+RuntimeDirectory=llm-router-go
+
+# --- Filesystem sandboxing ---
+# Read-only /usr, /boot, /etc; writes only to StateDirectory/RuntimeDirectory.
+ProtectSystem=strict
+# Mask /home with a tmpfs, then bind-mount only what the binary needs.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/erewhon/Projects/erewhon/llm-router/models.yaml
+PrivateTmp=yes
+
+# --- Kernel protections ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# --- Capability and privilege restrictions ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- System call restrictions ---
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount
+SystemCallArchitectures=native
+
+# --- Namespace and address restrictions ---
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# --- Memory ---
+LockPersonality=yes
+UMask=0077
+
+# --- Network isolation: localhost + LAN ---
+IPAddressAllow=127.0.0.0/8 ::1/128 192.168.42.0/24
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

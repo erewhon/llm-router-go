@@ -133,9 +133,26 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
 
 #### Phase 1d — deploy
 
-- [ ] systemd unit for the node-agent binary.
-- [ ] `deploy/scripts/sync-node-agent.sh` — rsync + restart.
-- [ ] Shadow deploy on euclid: run on `:8101`, dashboard compares both.
+- [x] systemd unit (`deploy/systemd/llm-router-go-agent.service`):
+      same sandbox profile as the Python agent (ProtectSystem=strict,
+      ProtectHome=tmpfs, SystemCallFilter, RestrictAddressFamilies,
+      IPAddressAllow LAN-only) but with a much smaller bind-mount
+      surface — only models.yaml; no .venv, no src tree.
+- [x] `deploy/scripts/deploy-node-agent.sh`: detects target arch over
+      ssh, cross-compiles statically (`CGO_ENABLED=0`), rsyncs the
+      binary + unit, installs via sudo, daemon-reloads. Optional
+      `--start`.
+- [x] **Shadow deploy on archimedes** (`:8101`, version `a6316b2`):
+      `/health` and `/models` match the Python agent for every field
+      the Go agent populates in 1b — same `running_models`, same
+      `total_requests`, same per-model states. Map iteration order
+      differs (not part of the contract) and `avg_tok_per_s` is
+      omitted instead of `null` (semantically equivalent).
+- [x] Memory footprint: Go agent ~4.5 MB resident vs Python's ~217 MB
+      (48× less).
+- [ ] Shadow deploy on hypatia, delphi, euclid (same script).
+- [ ] Enable on boot once parity is observed for 24h on each node:
+      `sudo systemctl enable llm-router-go-agent`.
 
 **Cutover criterion**: 24h shadow run with `/health` + `/models` JSON
 matching the Python agent's output (modulo timestamps) within tolerance,

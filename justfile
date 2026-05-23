@@ -58,3 +58,11 @@ clean:
 # print version that would be embedded into a build
 print-version:
     @echo {{ version }}
+
+# deploy node-agent to a host: cross-compile + rsync + install (does NOT start)
+deploy-node-agent host:
+    deploy/scripts/deploy-node-agent.sh {{ host }}
+
+# deploy and start node-agent on a host
+deploy-node-agent-start host:
+    deploy/scripts/deploy-node-agent.sh {{ host }} --start
