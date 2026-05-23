@@ -56,13 +56,18 @@ external import — keeps the import surface honest.
 ### Phase 0 — Foundations (this week)
 
 - [x] Scaffold repo, justfile, license, plan
-- [ ] Wire CI (GitHub Actions): `go build ./... && go test ./...` on amd64 + arm64
+- [x] Wire CI (GitHub Actions): `go vet`/`go test -race` on amd64, build-only
+      cross-compile check on arm64.
 - [x] Add `internal/config/` — port `models.yaml` Pydantic schema to Go structs
       with `gopkg.in/yaml.v3`. Tests cover defaults, validation, routing
       helpers, and a load of the real `~/Projects/erewhon/llm-router/models.yaml`.
-- [ ] Add `internal/logx/` — `slog` setup with JSON output + level flag.
-- [ ] Add `internal/httpx/` — request-id middleware, structured access log,
-      graceful shutdown helper. Used by all three binaries.
+- [x] Add `internal/logx/` — `slog` JSON/text logger, parsable level, and a
+      `ContextAttrFunc` hook so other packages (httpx) can attach
+      context-scoped attrs without logx importing them.
+- [x] Add `internal/httpx/` — request-id middleware (read or generate,
+      capped + echoed), structured access log, panic recovery, graceful
+      shutdown helper. `responseWriter` preserves `http.Flusher` so SSE
+      pass-through stays intact through the middleware chain.
 
 ### Phase 1 — node-agent (1–2 weeks)
 
