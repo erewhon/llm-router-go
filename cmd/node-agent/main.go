@@ -18,6 +18,7 @@ import (
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/nodeagent"
 	"github.com/erewhon/llm-router-go/internal/nodeagent/backends/sglang"
+	"github.com/erewhon/llm-router-go/internal/nodeagent/gpu"
 )
 
 // version is overridden via -ldflags="-X main.version=$(git describe ...)".
@@ -74,11 +75,18 @@ func run(args []string) int {
 		return 1
 	}
 
+	nodeDef := registry.Nodes[*nodeName]
 	agent, err := nodeagent.New(registry, *nodeName, logger, version,
 		// SGLang on the Sparks (and the legacy vLLM image) both advertise
 		// over the same OpenAI-shaped /v1/models + Prometheus /metrics
 		// protocol, so one driver covers BackendVLLM today.
 		nodeagent.WithBackend(config.BackendVLLM, sglang.New(*probeHost)),
+		// GPU snapshot for /health. The vendor comes from the registry;
+		// the per-node vram_gb is used as a fallback when xpu-smi
+		// discovery can't determine total VRAM on Arc.
+		nodeagent.WithGPUReader(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
+			FallbackTotalVRAMGB: nodeDef.VRAMGB,
+		})),
 	)
 	if err != nil {
 		logger.Error("agent init failed", "node", *nodeName, "err", err)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/nodeagent/backends"
+	"github.com/erewhon/llm-router-go/internal/nodeagent/gpu"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -26,9 +27,10 @@ type Agent struct {
 	node     string
 	logger   *slog.Logger
 	version  string
-	started  time.Time
-	backends map[config.BackendType]backends.Backend
-	metrics  http.Handler
+	started   time.Time
+	backends  map[config.BackendType]backends.Backend
+	gpuReader gpu.Reader
+	metrics   http.Handler
 }
 
 // Option configures an Agent at construction time.
@@ -45,6 +47,12 @@ func WithBackend(t config.BackendType, b backends.Backend) Option {
 		}
 		a.backends[t] = b
 	}
+}
+
+// WithGPUReader installs the GPU snapshot source used by /health. When
+// unset, /health omits the gpu_type / vram / busy_pct fields.
+func WithGPUReader(r gpu.Reader) Option {
+	return func(a *Agent) { a.gpuReader = r }
 }
 
 // New constructs an Agent. The node name must exist in registry.Nodes.
@@ -111,6 +119,16 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if free, total, err := diskUsageGB("/"); err == nil {
 		resp.DiskFreeGB = &free
 		resp.DiskTotalGB = &total
+	}
+
+	if a.gpuReader != nil {
+		if info, err := a.gpuReader.Read(r.Context()); err == nil {
+			gt := string(info.GpuType)
+			resp.GPUType = &gt
+			resp.TotalVRAMGB = &info.TotalVRAMGB
+			resp.FreeVRAMGB = &info.FreeVRAMGB
+			resp.GPUBusyPct = info.GPUBusyPct
+		}
 	}
 
 	for name, svc := range nodeDef.Services {

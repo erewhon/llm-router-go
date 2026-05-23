@@ -126,10 +126,23 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
 
 #### Phase 1c — GPU/system metrics
 
-- [ ] `internal/nodeagent/gpu`: nvidia-smi parsing on Sparks,
-      intel_gpu_top / sysfs on euclid Arc, AMD on delphi.
-- [ ] Wire GPU fields (`gpu_type`, `total_vram_gb`, `free_vram_gb`,
-      `gpu_busy_pct`) into `/health` responses.
+- [x] `internal/nodeagent/gpu`: one `Reader` per vendor, dispatch by the
+      registry's `GpuType`. NVIDIA tries `nvidia-smi --query-gpu` and
+      falls back to `/proc/meminfo` when memory is reported as `[N/A]`
+      (GB10 unified memory). AMD reads
+      `/sys/class/drm/card*/device/mem_info_vram_{total,used}` and
+      `gpu_busy_percent` directly — no subprocesses. Intel parses
+      `xpu-smi stats`/`discovery` and uses the registry's per-node
+      `vram_gb` as a fallback when discovery is silent.
+- [x] Wired into `/health` via `nodeagent.WithGPUReader`. Same field
+      names + JSON shape as the Python agent.
+- [x] Validated across all three vendors:
+      archimedes (nvidia/unified) total exact / free off by 6 MB
+      (snapshot timing); delphi (amd/sysfs) exact match; euclid
+      (intel/xpu-smi+fallback) total via fallback, free matches the
+      xpu-smi figure. The Go path also responds in ms where the
+      Python agent on euclid currently hangs on `/health` — Python is
+      stuck in a slow `xpu-smi` subprocess.
 
 #### Phase 1d — deploy
 
