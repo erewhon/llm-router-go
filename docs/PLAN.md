@@ -194,12 +194,21 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
 
 #### Phase 2b — tool execution
 
+- [x] `internal/toolproxy/tools/` package: Tool struct (name, OpenAI
+      function description, JSON-schema parameters, Run hook) and
+      Registry (registration with stable order, name/has/execute
+      lookups, JSON-shape Definitions()) ready to wire into the proxy.
+- [x] `calculator` tool — gval-backed safe expression evaluator with
+      the same function set the Python tool exposes (sqrt/sin/cos/tan/
+      asin/acos/atan/log/log10/log2/exp/abs/round/ceil/floor/factorial)
+      and constants (pi/e/tau/inf). Factorial rejects negatives, non-
+      integers, and arguments > 170 (float64 overflow).
 - [ ] SOCKS5 dialer via `golang.org/x/net/proxy` for the VPN container.
-- [ ] Tool registry under `internal/toolproxy/tools/`:
+- [ ] Network tools:
   - [ ] `web_search` (DuckDuckGo via VPN-SOCKS5).
   - [ ] `fetch_url` (also through VPN).
-  - [ ] `calculator`.
   - [ ] `tavily` (paid fallback, direct net).
+- [ ] Wire Registry into Proxy via `WithTools(...)`.
 - [ ] Stream interception: detect assistant `tool_calls` in the
       response stream, run tools, continue the chat with results.
 
