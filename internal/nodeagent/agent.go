@@ -153,6 +153,7 @@ func (a *Agent) handleModelList(w http.ResponseWriter, r *http.Request) {
 			State:           st.State,
 			HFRepo:          m.HFRepo,
 			Backend:         string(m.Backend),
+			APIClass:        m.APIClass,
 			AlwaysOn:        m.AlwaysOn,
 			VRAMGB:          m.VRAMGB,
 			RequestsRunning: st.RequestsRunning,
@@ -174,13 +175,14 @@ func (a *Agent) handleModelStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st := a.probe(r.Context(), id, m)
 	writeJSON(w, ModelStatusResponse{
-		ModelID: id,
-		State:   st.State,
-		PID:     st.PID,
-		Port:    st.Port,
-		Backend: string(m.Backend),
-		HFRepo:  m.HFRepo,
-		Error:   st.Error,
+		ModelID:  id,
+		State:    st.State,
+		PID:      st.PID,
+		Port:     st.Port,
+		Backend:  string(m.Backend),
+		APIClass: m.APIClass,
+		HFRepo:   m.HFRepo,
+		Error:    st.Error,
 	})
 }
 

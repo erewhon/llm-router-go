@@ -91,10 +91,71 @@ func TestDefaultsApplied(t *testing.T) {
 	if len(m.Capabilities) != 1 || m.Capabilities[0] != CapText {
 		t.Errorf("default capabilities = %v, want [text]", m.Capabilities)
 	}
+	if m.APIClass != APIClassChat {
+		t.Errorf("default api_class = %q, want chat", m.APIClass)
+	}
 
 	// NodeDefinition default for agent_port:
 	if got := r.Nodes["delphi"].AgentPort; got != 8100 {
 		t.Errorf("default agent_port = %d, want 8100", got)
+	}
+}
+
+func TestAPIClass_ExplicitValuesRoundtrip(t *testing.T) {
+	yaml := `
+nodes:
+  delphi: {host: delphi.local, gpu: amd, vram_gb: 64}
+models:
+  flux:
+    hf_repo: FLUX.1-dev
+    backend: external
+    node: delphi
+    api_base: http://delphi.local:5396
+    api_class: image_gen
+  ace:
+    hf_repo: ACE-Step/ACE-Step-v1.5
+    backend: external
+    node: delphi
+    api_base: http://delphi.local:5403
+    api_class: music_gen
+  whisper:
+    hf_repo: whisper-large-v3-turbo
+    backend: external
+    node: delphi
+    api_base: http://delphi.local:5394
+    api_class: stt
+`
+	r, err := LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	cases := map[string]APIClass{
+		"flux":    APIClassImageGen,
+		"ace":     APIClassMusicGen,
+		"whisper": APIClassSTT,
+	}
+	for id, want := range cases {
+		if got := r.Models[id].APIClass; got != want {
+			t.Errorf("%s api_class = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestAPIClass_UnknownValueRejected(t *testing.T) {
+	yaml := `
+nodes:
+  delphi: {host: delphi.local, gpu: amd, vram_gb: 64}
+models:
+  oddball:
+    hf_repo: weird
+    backend: external
+    node: delphi
+    api_base: http://delphi.local:9999
+    api_class: video_gen  # not a known class
+`
+	_, err := LoadBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), `unknown api_class "video_gen"`) {
+		t.Fatalf("expected unknown api_class error, got %v", err)
 	}
 }
 

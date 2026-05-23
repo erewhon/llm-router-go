@@ -58,6 +58,7 @@ models:
     backend: external
     node: archimedes
     api_base: http://archimedes.local:5404/v1
+    api_class: embeddings
 `
 
 func newTestAgent(t *testing.T, node string) (*Agent, http.Handler) {
@@ -167,9 +168,14 @@ func TestModelList(t *testing.T) {
 	if q.HFRepo != "Qwen/Qwen3.6-27B-FP8" || !q.AlwaysOn || q.VRAMGB != 27 {
 		t.Errorf("qwen-local entry mis-populated: %+v", q)
 	}
+	if q.APIClass != config.APIClassChat {
+		t.Errorf("qwen-local api_class = %q, want chat (default)", q.APIClass)
+	}
 
 	if oa, ok := byID["openarc-local"]; !ok || oa.State != StateRunning {
 		t.Errorf("openarc-local should be present and RUNNING (external): %+v", oa)
+	} else if oa.APIClass != config.APIClassEmbeddings {
+		t.Errorf("openarc-local api_class = %q, want embeddings", oa.APIClass)
 	}
 }
 

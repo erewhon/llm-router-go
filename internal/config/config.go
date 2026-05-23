@@ -51,6 +51,35 @@ const (
 	ServiceComfyUI ServiceType = "comfyui"
 )
 
+// APIClass declares which OpenAI endpoint family (or non-OpenAI custom
+// protocol) a model speaks. The Go router uses this to decide where to
+// forward a request; the agent surfaces it in /models so dashboards
+// can group/filter. Default is APIClassChat — every local engine
+// (vllm, sglang, llamacpp, lmstudio) speaks chat-completions.
+type APIClass string
+
+const (
+	APIClassChat       APIClass = "chat"
+	APIClassEmbeddings APIClass = "embeddings"
+	APIClassRerank     APIClass = "rerank"
+	APIClassImageGen   APIClass = "image_gen"
+	APIClassImageEdit  APIClass = "image_edit"
+	APIClassTTS        APIClass = "tts"
+	APIClassSTT        APIClass = "stt"
+	APIClassMusicGen   APIClass = "music_gen"
+)
+
+var validAPIClasses = map[APIClass]struct{}{
+	APIClassChat:       {},
+	APIClassEmbeddings: {},
+	APIClassRerank:     {},
+	APIClassImageGen:   {},
+	APIClassImageEdit:  {},
+	APIClassTTS:        {},
+	APIClassSTT:        {},
+	APIClassMusicGen:   {},
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -122,18 +151,21 @@ type ModelDefinition struct {
 	APIPort              int                      `yaml:"api_port,omitempty"`
 	APIBase              string                   `yaml:"api_base,omitempty"`
 	APIKey               string                   `yaml:"api_key,omitempty"`
+	APIClass             APIClass                 `yaml:"api_class,omitempty"`
 	InputCostPerMillion  *float64                 `yaml:"input_cost_per_million,omitempty"`
 	OutputCostPerMillion *float64                 `yaml:"output_cost_per_million,omitempty"`
 }
 
-// UnmarshalYAML default-initialises Backend, Enabled, and Capabilities to
-// match the Pydantic schema's defaults (vllm / true / [text]).
+// UnmarshalYAML default-initialises Backend, Enabled, Capabilities, and
+// APIClass to match the Pydantic schema (Backend=vllm, Enabled=true,
+// Capabilities=[text]) plus the new Go-only field default APIClass=chat.
 func (m *ModelDefinition) UnmarshalYAML(node *yaml.Node) error {
 	type alias ModelDefinition
 	aux := alias{
 		Backend:      BackendVLLM,
 		Enabled:      true,
 		Capabilities: []ModelCapability{CapText},
+		APIClass:     APIClassChat,
 	}
 	if err := node.Decode(&aux); err != nil {
 		return err
@@ -195,6 +227,9 @@ func (r *ModelRegistry) Validate() error {
 }
 
 func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
+	if _, ok := validAPIClasses[m.APIClass]; !ok {
+		return fmt.Errorf("model %q: unknown api_class %q", id, m.APIClass)
+	}
 	if m.Backend == BackendExternal {
 		if m.APIBase == "" {
 			return fmt.Errorf("model %q: external backend requires api_base", id)

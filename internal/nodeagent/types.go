@@ -1,6 +1,9 @@
 package nodeagent
 
-import "github.com/erewhon/llm-router-go/internal/nodeagent/backends"
+import (
+	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/nodeagent/backends"
+)
 
 // JSON request/response types for the node-agent API. Field tags mirror
 // the Python Pydantic schema in src/llm_router/node_agent/models.py so
@@ -42,24 +45,26 @@ type ServiceStatus struct {
 }
 
 type ModelStatusResponse struct {
-	ModelID string     `json:"model_id"`
-	State   ModelState `json:"state"`
-	PID     *int       `json:"pid,omitempty"`
-	Port    *int       `json:"port,omitempty"`
-	Backend string     `json:"backend,omitempty"`
-	HFRepo  string     `json:"hf_repo,omitempty"`
-	Error   string     `json:"error,omitempty"`
+	ModelID  string          `json:"model_id"`
+	State    ModelState      `json:"state"`
+	PID      *int            `json:"pid,omitempty"`
+	Port     *int            `json:"port,omitempty"`
+	Backend  string          `json:"backend,omitempty"`
+	APIClass config.APIClass `json:"api_class,omitempty"`
+	HFRepo   string          `json:"hf_repo,omitempty"`
+	Error    string          `json:"error,omitempty"`
 }
 
 type ModelListEntry struct {
-	ModelID         string     `json:"model_id"`
-	State           ModelState `json:"state"`
-	HFRepo          string     `json:"hf_repo"`
-	Backend         string     `json:"backend"`
-	AlwaysOn        bool       `json:"always_on"`
-	VRAMGB          int        `json:"vram_gb"`
-	RequestsRunning int        `json:"requests_running"`
-	RequestsWaiting int        `json:"requests_waiting"`
-	AvgTokPerS      *float64   `json:"avg_tok_per_s,omitempty"`
-	TotalRequests   int        `json:"total_requests"`
+	ModelID         string          `json:"model_id"`
+	State           ModelState      `json:"state"`
+	HFRepo          string          `json:"hf_repo"`
+	Backend         string          `json:"backend"`
+	APIClass        config.APIClass `json:"api_class"`
+	AlwaysOn        bool            `json:"always_on"`
+	VRAMGB          int             `json:"vram_gb"`
+	RequestsRunning int             `json:"requests_running"`
+	RequestsWaiting int             `json:"requests_waiting"`
+	AvgTokPerS      *float64        `json:"avg_tok_per_s,omitempty"`
+	TotalRequests   int             `json:"total_requests"`
 }
