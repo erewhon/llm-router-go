@@ -17,6 +17,7 @@ import (
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/nodeagent"
+	"github.com/erewhon/llm-router-go/internal/nodeagent/backends/sglang"
 )
 
 // version is overridden via -ldflags="-X main.version=$(git describe ...)".
@@ -35,6 +36,7 @@ func run(args []string) int {
 		logLevel   = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		logFormat  = fs.String("log-format", "json", "log format: json or text")
 		shutdownTo = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
+		probeHost  = fs.String("probe-host", "localhost", "host name backend probes target")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -72,7 +74,12 @@ func run(args []string) int {
 		return 1
 	}
 
-	agent, err := nodeagent.New(registry, *nodeName, logger, version)
+	agent, err := nodeagent.New(registry, *nodeName, logger, version,
+		// SGLang on the Sparks (and the legacy vLLM image) both advertise
+		// over the same OpenAI-shaped /v1/models + Prometheus /metrics
+		// protocol, so one driver covers BackendVLLM today.
+		nodeagent.WithBackend(config.BackendVLLM, sglang.New(*probeHost)),
+	)
 	if err != nil {
 		logger.Error("agent init failed", "node", *nodeName, "err", err)
 		return 1

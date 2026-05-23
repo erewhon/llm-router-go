@@ -1,17 +1,20 @@
 package nodeagent
 
-// JSON request/response types for the node-agent API.
-// Field tags mirror the Python Pydantic schema in
-// src/llm_router/node_agent/models.py so existing clients
-// (dashboard, LiteLLM hook, TUI) keep working unchanged.
+import "github.com/erewhon/llm-router-go/internal/nodeagent/backends"
 
-type ModelState string
+// JSON request/response types for the node-agent API. Field tags mirror
+// the Python Pydantic schema in src/llm_router/node_agent/models.py so
+// existing clients (dashboard, LiteLLM hook, TUI) keep working unchanged.
+
+// ModelState is the lifecycle state a model's backend can be in.
+// Aliased to backends.State so handler code and driver code agree.
+type ModelState = backends.State
 
 const (
-	StateStopped  ModelState = "stopped"
-	StateStarting ModelState = "starting"
-	StateRunning  ModelState = "running"
-	StateError    ModelState = "error"
+	StateStopped  = backends.StateStopped
+	StateStarting = backends.StateStarting
+	StateRunning  = backends.StateRunning
+	StateError    = backends.StateError
 )
 
 type HealthResponse struct {

@@ -98,18 +98,31 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
 
 #### Phase 1b — backend probing
 
-- [ ] Backend drivers under `internal/nodeagent/backends/`:
-  - [ ] `sglang` — Docker container lifecycle via `os/exec` (`docker ps`,
-        `docker inspect`, `docker logs`); state via HTTP probe to
-        `:5391/v1/models` + `/metrics`. Match on `--served-model-name`
-        equals `hf_repo` (see `feedback_nodeagent_served_model_match.md`).
-  - [ ] `llamacpp` — systemd unit management via `coreos/go-systemd` D-Bus.
-  - [ ] `vllm` — same pattern as sglang.
-  - [ ] `lmstudio` — HTTP-only probe.
-- [ ] Replace the 1a stub `initialState()` with real probing in `/models`
-      and `/models/{id}/status`.
-- [ ] Scrape SGLang/vLLM `/metrics` on the same host and re-expose
-      via the agent's `/metrics` (or proxy a dedicated path).
+- [x] **Backend interface** at `internal/nodeagent/backends/` and
+      functional-options `nodeagent.WithBackend(...)` so the agent can
+      accept driver registrations from outside the package.
+- [x] **`sglang` driver** (`internal/nodeagent/backends/sglang/`):
+      HTTP probe of `/v1/models` for reachability + served-model match
+      (with `#suffix` stripping), `/metrics` scrape for running/waiting
+      request counts, total requests, and tok/s (prefers SGLang's
+      `gen_throughput` gauge, falls back to the inter-token-latency
+      histogram math vLLM exposes). Handles both bare and `sglang:`
+      prefixed metric names — current SGLang uses the prefix; the
+      Python agent currently misses these.
+- [x] Replace the 1a stub `initialState()` with real probing in `/models`,
+      `/models/{id}/status`, and `/health.running_models`.
+- [x] Smoke-tested on both Sparks: archimedes returns nemotron-3-super
+      `running` + qwen3.5-122b `stopped`; hypatia returns
+      qwen3.6-hypatia `running` (fixing the false-error the Python
+      agent reports because it checks systemd while the actual service
+      runs in Docker).
+- [ ] Backend start/stop lifecycle (Docker for SGLang, systemd for vLLM).
+      Defer until status-only shadow comparison passes.
+- [ ] `llamacpp` driver — systemd unit management via `coreos/go-systemd`
+      D-Bus. Needed for UI-TARS on delphi.
+- [ ] `lmstudio` driver — HTTP-only probe.
+- [ ] Re-expose upstream `/metrics` (proxied or merged) on the agent's
+      `/metrics` for Prometheus scrape.
 
 #### Phase 1c — GPU/system metrics
 

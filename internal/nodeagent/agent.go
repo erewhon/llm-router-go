@@ -1,11 +1,11 @@
 // Package nodeagent is the per-machine HTTP service that manages local
-// inference backends. Phase 1a is an HTTP skeleton: it serves the same
-// /health, /models, /models/{id}/status, and /metrics endpoints as the
-// Python agent, but reports state purely from the model registry — no
-// backend probing yet. Probing arrives in Phase 1b.
+// inference backends. /health, /models, /models/{id}/status, /metrics
+// mirror the Python agent's shapes; per-model state is filled in by
+// pluggable backend drivers from internal/nodeagent/backends.
 package nodeagent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/nodeagent/backends"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -26,12 +27,29 @@ type Agent struct {
 	logger   *slog.Logger
 	version  string
 	started  time.Time
+	backends map[config.BackendType]backends.Backend
 	metrics  http.Handler
+}
+
+// Option configures an Agent at construction time.
+type Option func(*Agent)
+
+// WithBackend registers a driver for the given BackendType. Multiple
+// calls overwrite earlier registrations for the same type. Models whose
+// backend has no registered driver report StateStopped from /models
+// and /models/{id}/status until a driver is wired in.
+func WithBackend(t config.BackendType, b backends.Backend) Option {
+	return func(a *Agent) {
+		if a.backends == nil {
+			a.backends = map[config.BackendType]backends.Backend{}
+		}
+		a.backends[t] = b
+	}
 }
 
 // New constructs an Agent. The node name must exist in registry.Nodes.
 // version is stamped into Prometheus build_info and the access log.
-func New(registry *config.ModelRegistry, node string, logger *slog.Logger, version string) (*Agent, error) {
+func New(registry *config.ModelRegistry, node string, logger *slog.Logger, version string, opts ...Option) (*Agent, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("nodeagent: registry is nil")
 	}
@@ -47,6 +65,9 @@ func New(registry *config.ModelRegistry, node string, logger *slog.Logger, versi
 		logger:   logger,
 		version:  version,
 		started:  time.Now(),
+	}
+	for _, opt := range opts {
+		opt(a)
 	}
 	a.metrics = newMetricsHandler(a)
 	return a, nil
@@ -74,10 +95,8 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	running := []string{}
 	for id, m := range models {
-		// Phase 1a: only external backends are considered "running" because
-		// they're managed outside this agent. Local backends report stopped
-		// until probing lands in Phase 1b.
-		if m.Backend == config.BackendExternal {
+		st := a.probe(r.Context(), id, m)
+		if st.State == backends.StateRunning {
 			running = append(running, id)
 		}
 	}
@@ -94,13 +113,12 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.DiskTotalGB = &total
 	}
 
-	// Co-located services are listed but not probed in Phase 1a.
 	for name, svc := range nodeDef.Services {
 		resp.Services = append(resp.Services, ServiceStatus{
 			Name:        name,
 			ServiceType: string(svc.Type),
 			Label:       svc.Label,
-			Reachable:   false,
+			Reachable:   false, // probed in a later phase
 		})
 	}
 
@@ -111,13 +129,18 @@ func (a *Agent) handleModelList(w http.ResponseWriter, r *http.Request) {
 	models := a.registry.ModelsForNode(a.node, true)
 	out := make([]ModelListEntry, 0, len(models))
 	for id, m := range models {
+		st := a.probe(r.Context(), id, m)
 		out = append(out, ModelListEntry{
-			ModelID:  id,
-			State:    initialState(m.Backend),
-			HFRepo:   m.HFRepo,
-			Backend:  string(m.Backend),
-			AlwaysOn: m.AlwaysOn,
-			VRAMGB:   m.VRAMGB,
+			ModelID:         id,
+			State:           st.State,
+			HFRepo:          m.HFRepo,
+			Backend:         string(m.Backend),
+			AlwaysOn:        m.AlwaysOn,
+			VRAMGB:          m.VRAMGB,
+			RequestsRunning: st.RequestsRunning,
+			RequestsWaiting: st.RequestsWaiting,
+			AvgTokPerS:      st.AvgTokPerSec,
+			TotalRequests:   st.TotalRequests,
 		})
 	}
 	writeJSON(w, out)
@@ -131,22 +154,30 @@ func (a *Agent) handleModelStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("model %q not found on node %q", id, a.node), http.StatusNotFound)
 		return
 	}
+	st := a.probe(r.Context(), id, m)
 	writeJSON(w, ModelStatusResponse{
 		ModelID: id,
-		State:   initialState(m.Backend),
+		State:   st.State,
+		PID:     st.PID,
+		Port:    st.Port,
 		Backend: string(m.Backend),
 		HFRepo:  m.HFRepo,
+		Error:   st.Error,
 	})
 }
 
-// initialState is the placeholder state returned before Phase 1b backend
-// probing exists. External models report RUNNING because they're managed
-// outside the agent; everything else is STOPPED until probed.
-func initialState(b config.BackendType) ModelState {
-	if b == config.BackendExternal {
-		return StateRunning
+// probe returns the model's current backend state. External backends are
+// considered running because they're managed outside this agent. For
+// non-external backends, we delegate to a registered driver if any;
+// otherwise we report stopped (Phase 1a fallback behaviour).
+func (a *Agent) probe(ctx context.Context, id string, m config.ModelDefinition) backends.Status {
+	if m.Backend == config.BackendExternal {
+		return backends.Status{ModelID: id, State: backends.StateRunning}
 	}
-	return StateStopped
+	if drv, ok := a.backends[m.Backend]; ok {
+		return drv.Status(ctx, id, &m)
+	}
+	return backends.Status{ModelID: id, State: backends.StateStopped}
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +218,9 @@ func newMetricsHandler(a *Agent) http.Handler {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(v); err != nil {
-		// We've already written headers via json.NewEncoder, so the best
-		// we can do is log via the caller's logger context. The handler
-		// closure doesn't have a logger reference; rely on Recover
-		// middleware to surface anything truly catastrophic.
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// Headers already written; nothing better to do here. Recover
+		// middleware will catch anything truly catastrophic.
 		_ = err
 	}
 }
