@@ -69,17 +69,35 @@ external import — keeps the import surface honest.
       shutdown helper. `responseWriter` preserves `http.Flusher` so SSE
       pass-through stays intact through the middleware chain.
 
-### Phase 1 — node-agent (1–2 weeks)
+### Phase 1 — node-agent
 
 Goal: drop-in replacement for the FastAPI node agent, deployed
 **alongside** the Python agent on one node (euclid) first for shadow comparison.
 
-- [ ] HTTP server (chi or stdlib `http.ServeMux` — start with stdlib).
-- [ ] `/health` — process uptime, build version.
-- [ ] `/status` — same JSON shape as Python `/status` (catalog of backends,
-      per-backend state, GPU residency).
-- [ ] `/metrics` — Prometheus re-export, scraping SGLang/vLLM `/metrics`
-      on the same host.
+#### Phase 1a — HTTP skeleton (done)
+
+- [x] HTTP server using stdlib `net/http` (Go 1.22 method-prefixed mux).
+- [x] `/health` — node name, disk free/total, services list, and the
+      registry's set of external-managed models reported as RUNNING.
+      GPU + non-external state arrive in 1b.
+- [x] `/models` — JSON list matching the Python `ModelListEntry` shape:
+      every enabled model assigned to this node (single or multi-node);
+      state = `running` for external, `stopped` for everything else
+      until 1b.
+- [x] `/models/{model_id}/status` — 200 with state/backend/hf_repo for
+      known on-node models, 404 otherwise.
+- [x] `/metrics` — Prometheus reexport over its own registry
+      (`node_agent_build_info`, `node_agent_uptime_seconds`,
+      `node_agent_models_enabled`, plus Go + process collectors).
+      Upstream SGLang/vLLM scraping is 1b.
+- [x] `cmd/node-agent/main.go` — flags for addr, models-yaml, node,
+      log-level, log-format, shutdown-timeout; version stamped via
+      `-ldflags` from `justfile`.
+- [x] Smoke-tested end-to-end against the real
+      `~/Projects/erewhon/llm-router/models.yaml` from `euclid`.
+
+#### Phase 1b — backend probing
+
 - [ ] Backend drivers under `internal/nodeagent/backends/`:
   - [ ] `sglang` — Docker container lifecycle via `os/exec` (`docker ps`,
         `docker inspect`, `docker logs`); state via HTTP probe to
@@ -88,14 +106,27 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
   - [ ] `llamacpp` — systemd unit management via `coreos/go-systemd` D-Bus.
   - [ ] `vllm` — same pattern as sglang.
   - [ ] `lmstudio` — HTTP-only probe.
-- [ ] GPU/system metrics (`internal/nodeagent/gpu`): nvidia-smi parsing
-      on Sparks, intel_gpu_top / sysfs on euclid Arc, AMD on delphi.
-- [ ] systemd unit for node-agent itself.
+- [ ] Replace the 1a stub `initialState()` with real probing in `/models`
+      and `/models/{id}/status`.
+- [ ] Scrape SGLang/vLLM `/metrics` on the same host and re-expose
+      via the agent's `/metrics` (or proxy a dedicated path).
+
+#### Phase 1c — GPU/system metrics
+
+- [ ] `internal/nodeagent/gpu`: nvidia-smi parsing on Sparks,
+      intel_gpu_top / sysfs on euclid Arc, AMD on delphi.
+- [ ] Wire GPU fields (`gpu_type`, `total_vram_gb`, `free_vram_gb`,
+      `gpu_busy_pct`) into `/health` responses.
+
+#### Phase 1d — deploy
+
+- [ ] systemd unit for the node-agent binary.
+- [ ] `deploy/scripts/sync-node-agent.sh` — rsync + restart.
 - [ ] Shadow deploy on euclid: run on `:8101`, dashboard compares both.
 
-**Cutover criterion**: 24h shadow run with `/status` JSON matching the
-Python agent's output (modulo timestamps) within tolerance, on all four
-machines.
+**Cutover criterion**: 24h shadow run with `/health` + `/models` JSON
+matching the Python agent's output (modulo timestamps) within tolerance,
+on all four machines.
 
 ### Phase 2 — tool-proxy (2–3 weeks)
 

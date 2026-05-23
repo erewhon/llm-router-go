@@ -5,23 +5,27 @@ set positional-arguments
 default:
     @just --list
 
+# version stamped into binaries via -ldflags. Evaluated once at parse time.
+version := `git describe --tags --always --dirty 2>/dev/null || echo dev`
+ldflags := "-X main.version=" + version
+
 # build all binaries into ./bin/
 build: build-node-agent build-tool-proxy build-router
 
 build-node-agent:
-    go build -o bin/node-agent ./cmd/node-agent
+    go build -ldflags='{{ ldflags }}' -o bin/node-agent ./cmd/node-agent
 
 build-tool-proxy:
-    go build -o bin/tool-proxy ./cmd/tool-proxy
+    go build -ldflags='{{ ldflags }}' -o bin/tool-proxy ./cmd/tool-proxy
 
 build-router:
-    go build -o bin/router ./cmd/router
+    go build -ldflags='{{ ldflags }}' -o bin/router ./cmd/router
 
 # cross-compile arm64 binaries for the Sparks (archimedes, hypatia)
 build-arm64:
-    GOOS=linux GOARCH=arm64 go build -o bin/arm64/node-agent ./cmd/node-agent
-    GOOS=linux GOARCH=arm64 go build -o bin/arm64/tool-proxy ./cmd/tool-proxy
-    GOOS=linux GOARCH=arm64 go build -o bin/arm64/router    ./cmd/router
+    GOOS=linux GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/arm64/node-agent ./cmd/node-agent
+    GOOS=linux GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/arm64/tool-proxy ./cmd/tool-proxy
+    GOOS=linux GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/arm64/router    ./cmd/router
 
 # run tests
 test:
@@ -52,5 +56,5 @@ clean:
     rm -rf bin/ coverage.txt coverage.html
 
 # print version that would be embedded into a build
-version:
-    @git describe --tags --always --dirty 2>/dev/null || echo dev
+print-version:
+    @echo {{ version }}
