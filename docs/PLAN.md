@@ -171,27 +171,49 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
 matching the Python agent's output (modulo timestamps) within tolerance,
 on all four machines.
 
-### Phase 2 — tool-proxy (2–3 weeks)
+### Phase 2 — tool-proxy
 
 Goal: replace the FastAPI tool proxy at `euclid:5392`.
 
-- [ ] `net/http/httputil.ReverseProxy` for SSE pass-through (with
-      `FlushInterval: -1`).
-- [ ] `golang.org/x/net/proxy` for SOCKS5 dialing through
-      `svc-sys-research-vpn:1080`.
+#### Phase 2a — chat-completions reverse-proxy (done)
+
+- [x] `internal/toolproxy/`: `httputil.ReverseProxy` with `Rewrite`
+      hook + `FlushInterval=-1` for SSE pass-through.
+- [x] Model resolution: registry key, `hf_repo` (with `#suffix`
+      stripped), and aliases all match. Strips the `openai/` prefix
+      LiteLLM sometimes prepends. Rewrites the body's `model` field
+      to the upstream's expected name before forwarding.
+- [x] External-backed models 404 with a clear error (they're not in
+      the tool-proxy path).
+- [x] `/v1/models` (OpenAI shape, surfaces `api_class` per entry).
+- [x] `/health`.
+- [x] `cmd/tool-proxy/main.go` — flags, registry load, signal-driven
+      graceful shutdown via httpx.ServeContext.
+- [x] Smoke-tested live: POST through the Go proxy to Nemotron-3-Super
+      on archimedes:5391 returned 200 + correct id/model in ~1.5s.
+
+#### Phase 2b — tool execution
+
+- [ ] SOCKS5 dialer via `golang.org/x/net/proxy` for the VPN container.
 - [ ] Tool registry under `internal/toolproxy/tools/`:
   - [ ] `web_search` (DuckDuckGo via VPN-SOCKS5).
   - [ ] `fetch_url` (also through VPN).
   - [ ] `calculator`.
   - [ ] `tavily` (paid fallback, direct net).
-- [ ] Auto-router: classify incoming request → route to model tier.
-      Reuses embeddings on OpenArc (`euclid:5404`, qwen3-embedding-4b).
-      Must respect `active_aliases` — skip categories whose alias maps
-      to a disabled model (the 2026-05-10 behavior).
-- [ ] Reasoning-token passthrough (delta forwarding for `<think>` /
-      reasoning fields).
-- [ ] Forward chat completion to correct backend keyed on `model_id`
-      from the registry (the disambiguation fix vs. shared `hf_repo`).
+- [ ] Stream interception: detect assistant `tool_calls` in the
+      response stream, run tools, continue the chat with results.
+
+#### Phase 2c — auto-router
+
+- [ ] Classify incoming request via embeddings on OpenArc
+      (`euclid:5404`, qwen3-embedding-4b) → route to model tier.
+- [ ] Skip categories whose alias maps to a disabled model
+      (the 2026-05-10 behaviour collected from `_model_registry`).
+
+#### Phase 2d — reasoning passthrough
+
+- [ ] Forward `<think>` / `reasoning_content` deltas to clients that
+      ask for them.
 
 **Cutover criterion**: tool-proxy traffic dual-routed for 24h, with
 matching tool-call invocations and search results (logged).
