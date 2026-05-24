@@ -225,7 +225,13 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
       33 tests across registry/calculator/http_client/fetch_url/
       web_search cover defaults, error paths, edge cases, and fixture-
       based parsing.
-- [ ] `tavily` (paid fallback, direct net).
+- [x] `tavily_search` — POST to api.tavily.com with the apiKey, query,
+      search_depth (basic/advanced, default basic), `include_answer` +
+      `max_results=5`. Renders `AI Summary: …` + a list of
+      `title (relevance: N) / content / url`. Errors surface upstream's
+      `detail`/`message`/`error` JSON fields when present, falling back
+      to a truncated raw body. The tool requires a non-empty apiKey;
+      callers gate registration on `os.Getenv("TAVILY_API_KEY") != ""`.
 - [ ] Wire Registry into Proxy via `WithTools(...)`.
 - [ ] Stream interception: detect assistant `tool_calls` in the
       response stream, run tools, continue the chat with results.
