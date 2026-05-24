@@ -203,11 +203,29 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
       asin/acos/atan/log/log10/log2/exp/abs/round/ceil/floor/factorial)
       and constants (pi/e/tau/inf). Factorial rejects negatives, non-
       integers, and arguments > 170 (float64 overflow).
-- [ ] SOCKS5 dialer via `golang.org/x/net/proxy` for the VPN container.
-- [ ] Network tools:
-  - [ ] `web_search` (DuckDuckGo via VPN-SOCKS5).
-  - [ ] `fetch_url` (also through VPN).
-  - [ ] `tavily` (paid fallback, direct net).
+- [x] `NewHTTPClient` builds the shared `*http.Client` used by every
+      network-touching tool. Accepts bare `host:port`,
+      `socks5://host:port`, or `socks5h://host:port` (treated the same
+      because Go's `proxy.SOCKS5` always asks the proxy to resolve the
+      target hostname — the curl `socks5h` behaviour the Mullvad
+      container needs). Validates host + numeric port at construction
+      so misconfig fails fast.
+- [x] `fetch_url` — HTTP GET via the shared client, content-type gate
+      (text/json/xml only), `golang.org/x/net/html` walker for clean
+      text extraction (skips script/style/noscript/template, treats
+      block elements as newline boundaries, collapses inline whitespace
+      including source-code newlines so the model gets browser-rendered
+      structure). Body capped at 4MiB read, output truncated at the
+      same `MaxFetchChars=8000` the Python tool uses.
+- [x] `web_search` — POST `q=…` to `html.duckduckgo.com/html/`, parse
+      result blocks by climbing from each `a.result__a` to the
+      enclosing `.result*` container, then extracting title/snippet/url
+      with DDG's `/l/?uddg=…` redirect unwrapped. Hand-rolled selectors
+      in `x/net/html` avoid a goquery dep. Caps at `MaxSearchResults=5`.
+      33 tests across registry/calculator/http_client/fetch_url/
+      web_search cover defaults, error paths, edge cases, and fixture-
+      based parsing.
+- [ ] `tavily` (paid fallback, direct net).
 - [ ] Wire Registry into Proxy via `WithTools(...)`.
 - [ ] Stream interception: detect assistant `tool_calls` in the
       response stream, run tools, continue the chat with results.
