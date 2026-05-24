@@ -39,6 +39,8 @@ models:
     node: archimedes
     api_port: 5391
     aliases: [coder-alt]
+    tags:
+      - nothink
 
   flux-dev:
     hf_repo: FLUX.1-dev

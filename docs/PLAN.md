@@ -232,9 +232,27 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
       `detail`/`message`/`error` JSON fields when present, falling back
       to a truncated raw body. The tool requires a non-empty apiKey;
       callers gate registration on `os.Getenv("TAVILY_API_KEY") != ""`.
-- [ ] Wire Registry into Proxy via `WithTools(...)`.
-- [ ] Stream interception: detect assistant `tool_calls` in the
-      response stream, run tools, continue the chat with results.
+- [x] **2b.iv** — `Registry` wired into `Proxy` via `WithTools(...)`;
+      `cmd/tool-proxy` registers calculator + web_search + fetch_url (+
+      tavily_search when `--tavily-key`/`TAVILY_API_KEY` is set), all sharing
+      one SOCKS5-capable `http.Client` (`--proxy`).
+- [x] **2b.iv** — tool-execution loop. `handleChat` branches on
+      `shouldInjectTools` (registry non-empty AND model not `nothink`-tagged):
+      no → the 2a reverse-proxy passthrough, unchanged; yes → inject proxy tool
+      defs (merged with client tools, proxy names win) and run the loop. Per
+      round: call the backend **non-streaming**, `extractToolCalls` (native
+      `tool_calls` + `<tool_call>`-tag fallback), split proxy- vs client-owned.
+      Client-owned → hand the whole batch back (`finish_reason: tool_calls`, no
+      execution); all proxy-owned → execute, append `tool` results, repeat;
+      none → done. Capped at `--max-tool-rounds` (5; `--backend-timeout`
+      600s/call). Streaming: the loop runs non-streaming, then the final answer
+      is **re-streamed** from the backend for true token-by-token output — the
+      redundant generation the Python proxy also pays; chosen over
+      buffer-and-replay for streaming parity, revisit as a post-cutover
+      optimization. Backend `reasoning_content` is forwarded; `<think>`-tag
+      extraction is deferred to 2d, and the Python `FALLBACK_ROUTES` table
+      (unscheduled in any phase) is still TODO. 19 new tests (loop +
+      extraction) pass under `-race`; the empty-registry 2a tests are unchanged.
 
 #### Phase 2c — auto-router
 
