@@ -42,6 +42,11 @@ func run(args []string) int {
 		maxToolRounds  = fs.Int("max-tool-rounds", 5, "max tool-execution rounds before returning")
 		backendTimeout = fs.Duration("backend-timeout", 600*time.Second, "per-call timeout for backend chat-completions in the tool loop")
 		toolTimeout    = fs.Duration("tool-timeout", 30*time.Second, "timeout for outbound tool HTTP requests (web search, fetch_url, tavily)")
+		embedURL       = fs.String("embed-url", "http://192.168.42.240:5404", "embedding backend URL for the auto-router")
+		embedModel     = fs.String("embed-model", "qwen3-embedding-4b", "embedding model served by --embed-url")
+		embedTimeout   = fs.Duration("embed-timeout", 5*time.Second, "timeout for auto-router embedding requests")
+		litellmURL     = fs.String("litellm-url", "http://euclid.local:4010", "LiteLLM URL the auto-router redirects resolved aliases to")
+		litellmKey     = fs.String("litellm-key", "sk-litellm-master", "LiteLLM bearer key (falls back to LITELLM_KEY env)")
 		showVer        = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -95,10 +100,33 @@ func run(args []string) int {
 	}
 	logger.Info("tools registered", "tools", reg.Names(), "proxy", *socksProxy)
 
+	// Auto-router. Its embedding client talks DIRECTLY to the LAN embedder —
+	// it must not route through the web tools' SOCKS5 VPN proxy. activeAliases
+	// (enabled model ids + their aliases) restrict which categories the router
+	// may select, so it never picks an alias whose model is disabled.
+	activeAliases := map[string]bool{}
+	for id, m := range registry.Models {
+		if !m.Enabled {
+			continue
+		}
+		activeAliases[id] = true
+		for _, a := range m.Aliases {
+			activeAliases[a] = true
+		}
+	}
+	litellmBearer := *litellmKey
+	if litellmBearer == "" {
+		litellmBearer = os.Getenv("LITELLM_KEY")
+	}
+	embedClient := &http.Client{Timeout: *embedTimeout}
+	autoRouter := toolproxy.NewAutoRouter(*embedURL, *embedModel, embedClient, logger, activeAliases)
+
 	proxy := toolproxy.New(registry, logger,
 		toolproxy.WithTools(reg),
 		toolproxy.WithMaxToolRounds(*maxToolRounds),
 		toolproxy.WithBackendTimeout(*backendTimeout),
+		toolproxy.WithAutoRouter(autoRouter),
+		toolproxy.WithLiteLLM(*litellmURL, litellmBearer),
 	)
 
 	handler := httpx.Chain(
@@ -116,7 +144,12 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("starting", "addr", *addr, "version", version, "models_yaml", *modelsYAML)
+	// Background: compute auto-router category embeddings, retrying until the
+	// embedder answers. Exits when ctx is cancelled on shutdown.
+	go autoRouter.RunInit(ctx)
+
+	logger.Info("starting", "addr", *addr, "version", version, "models_yaml", *modelsYAML,
+		"embed_url", *embedURL, "litellm_url", *litellmURL)
 	if err := httpx.ServeContext(ctx, srv, *shutdownTo); err != nil {
 		logger.Error("server stopped with error", "err", err)
 		return 1

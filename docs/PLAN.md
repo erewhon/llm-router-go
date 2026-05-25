@@ -256,10 +256,32 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
 
 #### Phase 2c — auto-router
 
-- [ ] Classify incoming request via embeddings on OpenArc
-      (`euclid:5404`, qwen3-embedding-4b) → route to model tier.
-- [ ] Skip categories whose alias maps to a disabled model
-      (the 2026-05-10 behaviour collected from `_model_registry`).
+- [x] **2c** — `internal/toolproxy/autorouter.go`. `handleChat` intercepts
+      `auto`/`auto-free`/`auto-full` (after stripping `openai/`) *before*
+      `resolveModel`, since those are external stubs pointing back at the proxy.
+      `Classify` extracts the last user message (multimodal image → straight to
+      `vision`), truncates to 500 runes, embeds it on OpenArc
+      (`--embed-url` euclid:5404, qwen3-embedding-4b, **single-input** — the
+      batched path is broken), and cosine-matches against the pre-computed
+      category embeddings (coder / coder-fim / thinker / research / vision,
+      descriptions verbatim from Python; deterministic order so ties favour the
+      first). Complexity upgrades on the coding path: `auto-free` →
+      `coder-hard` (≥0.45), `auto-full` → `claude-opus-4-6` (≥0.70). Any
+      failure (uninitialised, no user msg, embed error) falls back to `coder`.
+- [x] **2c** — disabled-alias skipping. `main` collects active aliases
+      (enabled model ids + their aliases) and passes them to `NewAutoRouter`;
+      `Initialize` embeds only categories whose alias is active, so the router
+      can't pick an alias whose model is disabled (the 2026-05-10 behaviour).
+- [x] **2c** — redirect + wiring. The chosen alias is written back to the
+      body and the request is reverse-proxied through LiteLLM (`--litellm-url`
+      euclid:4010, `--litellm-key`/`LITELLM_KEY`), which resolves it (the alias
+      may be an external model + LiteLLM applies mode filtering). `reverseProxyTo`
+      relays SSE or JSON unchanged, so stream/non-stream need no special-casing.
+      Embeddings use a **direct** LAN client (not the web tools' SOCKS5 VPN
+      client); category embeddings compute in a background goroutine with
+      backoff retry (`RunInit`) so a slow/down embedder never blocks startup.
+      Decision logging via slog (replacing Python's JSONL file). 13 new tests
+      pass under `-race`.
 
 #### Phase 2d — reasoning passthrough
 

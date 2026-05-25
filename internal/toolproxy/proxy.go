@@ -36,6 +36,9 @@ type Proxy struct {
 	maxToolRounds  int
 	backendTimeout time.Duration
 	backendHTTP    *http.Client
+	autoRouter     *AutoRouter
+	litellmURL     string
+	litellmKey     string
 }
 
 // Option configures a Proxy at construction time.
@@ -82,6 +85,27 @@ func WithBackendTimeout(d time.Duration) Option {
 	}
 }
 
+// WithAutoRouter enables auto-routing: requests for the "auto", "auto-free",
+// and "auto-full" models are classified by ar and redirected through LiteLLM
+// (see WithLiteLLM) with the chosen alias. Nil (the default) leaves auto
+// models to fail normal resolution.
+func WithAutoRouter(ar *AutoRouter) Option {
+	return func(p *Proxy) { p.autoRouter = ar }
+}
+
+// WithLiteLLM sets the URL + bearer key the auto-router redirects to. The
+// chosen alias may be an external model the tool proxy can't route itself, so
+// it goes back through LiteLLM (which also applies mode filtering). Defaults:
+// http://euclid.local:4010 and an empty key.
+func WithLiteLLM(url, key string) Option {
+	return func(p *Proxy) {
+		if url != "" {
+			p.litellmURL = url
+		}
+		p.litellmKey = key
+	}
+}
+
 // New constructs a Proxy bound to the given registry.
 func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *Proxy {
 	if logger == nil {
@@ -94,6 +118,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *P
 		flushInterval:  -1, // SSE: flush on every write
 		maxToolRounds:  5,
 		backendTimeout: 600 * time.Second,
+		litellmURL:     "http://euclid.local:4010",
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -135,6 +160,15 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-routing (Phase 2c): "auto"/"auto-free"/"auto-full" are classified
+	// and redirected through LiteLLM with the chosen alias, before normal
+	// resolution — those are external stubs that just point back here, so
+	// resolveModel would reject them.
+	if tier, ok := autoTier(model); ok && p.autoRouter != nil {
+		p.handleAutoRoute(w, r, bodyMap, tier)
+		return
+	}
+
 	res, err := resolveModel(p.registry, model)
 	if err != nil {
 		// Not-found and external-misroute are client errors; everything
@@ -158,7 +192,7 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		p.logger.InfoContext(r.Context(), "forwarding (passthrough)",
 			"model", model, "backend_model", res.BackendModel,
 			"backend_url", res.BackendURL, "resolved_via", res.ModelID)
-		p.reverseProxyTo(w, r, res.BackendURL, newBody)
+		p.reverseProxyTo(w, r, res.BackendURL, newBody, "")
 		return
 	}
 
@@ -201,11 +235,31 @@ func (p *Proxy) shouldInjectTools(modelID string) bool {
 	return !containsString(m.Tags, "nothink")
 }
 
+// handleAutoRoute classifies the prompt, rewrites the body's model to the
+// chosen alias, and redirects the request through LiteLLM. reverseProxyTo
+// relays whatever LiteLLM returns (SSE or JSON) unchanged, so streaming and
+// non-streaming both work without special-casing.
+func (p *Proxy) handleAutoRoute(w http.ResponseWriter, r *http.Request, bodyMap map[string]any, tier AutoTier) {
+	messages, _ := bodyMap["messages"].([]any)
+	alias := p.autoRouter.Classify(r.Context(), messages, tier)
+	bodyMap["model"] = alias
+	body, err := json.Marshal(bodyMap)
+	if err != nil {
+		http.Error(w, "re-encode body: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	p.logger.InfoContext(r.Context(), "auto-routed",
+		"tier", string(tier), "alias", alias, "litellm_url", p.litellmURL)
+	p.reverseProxyTo(w, r, p.litellmURL, body, p.litellmKey)
+}
+
 // reverseProxyTo forwards the request to backendURL/v1/chat/completions with
 // the given (already-rewritten) body, preserving SSE streaming via
-// FlushInterval. Shared by the passthrough path and the tool loop's final
-// streamed answer.
-func (p *Proxy) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendURL string, body []byte) {
+// FlushInterval. When authBearer is non-empty it's set as the Authorization
+// header (the LiteLLM redirect needs it; backend passthrough passes ""). Shared
+// by the passthrough path, the tool loop's final streamed answer, and the
+// auto-route redirect.
+func (p *Proxy) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendURL string, body []byte, authBearer string) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
@@ -222,6 +276,9 @@ func (p *Proxy) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendUR
 			pr.Out.Body = io.NopCloser(bytes.NewReader(body))
 			pr.Out.ContentLength = int64(len(body))
 			pr.Out.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			if authBearer != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+authBearer)
+			}
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			p.logger.ErrorContext(req.Context(), "upstream error",

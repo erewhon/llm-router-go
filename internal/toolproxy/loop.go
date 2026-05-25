@@ -164,7 +164,7 @@ func (p *Proxy) runToolLoopStreaming(w http.ResponseWriter, r *http.Request, res
 		bodyMap["stream"] = true
 		finalBody, mErr := json.Marshal(bodyMap)
 		if mErr == nil {
-			p.reverseProxyTo(w, r, res.BackendURL, finalBody)
+			p.reverseProxyTo(w, r, res.BackendURL, finalBody, "")
 			return
 		}
 		err = fmt.Errorf("toolproxy: marshal final stream body: %w", mErr)
