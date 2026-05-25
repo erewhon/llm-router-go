@@ -65,13 +65,23 @@ func (p *Proxy) runLoop(ctx context.Context, backendURL string, bodyMap map[stri
 
 		msg := cc.Choices[0].Message
 		content := stripToolCallTags(msg.Content)
+		// Reasoning (2d): prefer the backend's structured reasoning_content;
+		// fall back to <think> tags inlined in the content. cleanContent has any
+		// think block removed so it isn't shown to the client or replayed to the
+		// model. The streaming final answer is relayed raw, so this tag split
+		// only affects non-streamed and client-call/max-rounds responses;
+		// structured reasoning_content deltas pass through the relay untouched.
+		tagReasoning, cleanContent := extractThinking(content)
 		reasoning := msg.reasoningText()
-		lastContent, lastReasoning = content, reasoning
+		if reasoning == "" {
+			reasoning = tagReasoning
+		}
+		lastContent, lastReasoning = cleanContent, reasoning
 
 		calls := extractToolCalls(msg)
 		if len(calls) == 0 {
 			return loopResult{
-				outcome: outcomeFinal, content: content, reasoning: reasoning,
+				outcome: outcomeFinal, content: cleanContent, reasoning: reasoning,
 				usage: cc.Usage, messages: messages,
 			}, nil
 		}
@@ -92,15 +102,16 @@ func (p *Proxy) runLoop(ctx context.Context, backendURL string, bodyMap map[stri
 			p.logger.InfoContext(ctx, "returning client tool calls",
 				"client", len(clientCalls), "proxy", len(proxyCalls))
 			return loopResult{
-				outcome: outcomeClientCalls, content: content, reasoning: reasoning,
+				outcome: outcomeClientCalls, content: cleanContent, reasoning: reasoning,
 				toolCalls: calls, usage: cc.Usage, messages: messages,
 			}, nil
 		}
 
-		// All proxy-owned: record the assistant turn, run each tool, append the
-		// results, and loop for the model's next move.
+		// All proxy-owned: record the assistant turn (thinking stripped so the
+		// model doesn't see its own reasoning replayed), run each tool, append
+		// the results, and loop for the model's next move.
 		p.logger.InfoContext(ctx, "executing proxy tools", "round", round+1, "count", len(proxyCalls))
-		messages = append(messages, assistantToolCallMessage(content, calls))
+		messages = append(messages, assistantToolCallMessage(cleanContent, calls))
 		for _, c := range proxyCalls {
 			out := p.tools.Execute(ctx, c.Function.Name, c.Function.Arguments)
 			messages = append(messages, toolResultMessage(c.ID, out))

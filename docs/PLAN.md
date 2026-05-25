@@ -285,8 +285,24 @@ Goal: replace the FastAPI tool proxy at `euclid:5392`.
 
 #### Phase 2d — reasoning passthrough
 
-- [ ] Forward `<think>` / `reasoning_content` deltas to clients that
-      ask for them.
+- [x] **2d** — reasoning passthrough. Structured `reasoning_content` /
+      `reasoning` deltas already reach the client untouched via the relay
+      (`reverseProxyTo` forwards the backend's SSE verbatim — that's what the
+      reasoning-parser models like Nemotron-3-Super emit). This phase adds the
+      inline-`<think>` path on the **non-streaming** loop: `extractThinking`
+      splits `<think>…</think>` out of the assistant content, preferring the
+      backend's structured reasoning and falling back to the tag text. The tag
+      is stripped from the returned content, from client-call/max-rounds
+      responses, and from the assistant turns recorded in history (so the model
+      doesn't re-read its own thinking). Port of `extraction.extract_thinking`.
+      5 new tests.
+- Deferred (YAGNI): the **streaming** `<think>` reframe (Python's
+  `ThinkingStreamParser`). The streamed final answer is relayed raw, so a model
+  that inlined `<think>` mid-stream would leak tags into `content`. No current
+  fleet model does this on a streamed path — tool-loop models use a
+  reasoning-parser (→ structured deltas, already forwarded); passthrough is
+  nothink (→ no reasoning). The stateful chunk-boundary parser is left unbuilt
+  until a model that inlines thinking mid-stream joins the fleet.
 
 **Cutover criterion**: tool-proxy traffic dual-routed for 24h, with
 matching tool-call invocations and search results (logged).

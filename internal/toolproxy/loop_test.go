@@ -103,6 +103,12 @@ func answerResp(content string) string {
 	return fmt.Sprintf(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`, content)
 }
 
+// toolCallRespContent is a tool-call response whose assistant message also
+// carries content (e.g. inline <think> reasoning).
+func toolCallRespContent(name, args, content string) string {
+	return fmt.Sprintf(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%q,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}]}`, content, name, args)
+}
+
 func postChat(t *testing.T, p *Proxy, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -369,6 +375,91 @@ func TestToolLoop_StreamingClientToolBreakout(t *testing.T) {
 	}
 	if up.callCount() != 1 {
 		t.Errorf("upstream calls = %d, want 1 (no re-stream on client breakout)", up.callCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning passthrough (2d)
+// ---------------------------------------------------------------------------
+
+func TestToolLoop_NonStreamingExtractsInlineThink(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"<think>let me think</think>The answer is 42."},"finish_reason":"stop"}]}`,
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"hi"}]}`)
+	cc := decodeCompletion(t, rec)
+	if cc.Choices[0].Message.Content != "The answer is 42." {
+		t.Errorf("content = %q, want think-stripped answer", cc.Choices[0].Message.Content)
+	}
+	if cc.Choices[0].Message.ReasoningContent != "let me think" {
+		t.Errorf("reasoning_content = %q, want 'let me think'", cc.Choices[0].Message.ReasoningContent)
+	}
+}
+
+func TestToolLoop_PrefersBackendReasoning(t *testing.T) {
+	// Both an inline <think> tag and a structured reasoning_content are present;
+	// the backend's structured field wins.
+	up := &scriptedUpstream{queue: []string{
+		`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"<think>tag reasoning</think>answer","reasoning_content":"backend reasoning"},"finish_reason":"stop"}]}`,
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[]}`)
+	cc := decodeCompletion(t, rec)
+	if cc.Choices[0].Message.ReasoningContent != "backend reasoning" {
+		t.Errorf("reasoning_content = %q, want backend value", cc.Choices[0].Message.ReasoningContent)
+	}
+	if cc.Choices[0].Message.Content != "answer" {
+		t.Errorf("content = %q, want 'answer'", cc.Choices[0].Message.Content)
+	}
+}
+
+func TestToolLoop_StripsThinkFromHistory(t *testing.T) {
+	// The assistant turn recorded in history must have its <think> removed so
+	// the model doesn't re-read its own reasoning on the next round.
+	up := &scriptedUpstream{queue: []string{
+		toolCallRespContent("calculator", `{"expression":"2+2"}`, "<think>compute it</think>"),
+		answerResp("done"),
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	_ = postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"2+2?"}]}`)
+	if up.callCount() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", up.callCount())
+	}
+	if c := msgField(up.call(1), -2, "content"); c != "" {
+		t.Errorf("assistant history content = %v, want empty (think stripped)", c)
+	}
+}
+
+func TestToolLoop_StreamingForwardsBackendReasoning(t *testing.T) {
+	// The relayed final stream carries reasoning_content deltas straight to the
+	// client — structured reasoning passthrough needs no reframing.
+	finalSSE := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking out loud\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	up := &scriptedUpstream{
+		queue: []string{answerResp("triggers outcomeFinal")},
+		sse:   finalSSE,
+	}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	body := rec.Body.String()
+	for _, want := range []string{"reasoning_content", "thinking out loud", "the answer", "[DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stream missing %q:\n%s", want, body)
+		}
 	}
 }
 

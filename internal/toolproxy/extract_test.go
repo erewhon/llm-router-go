@@ -108,6 +108,25 @@ func TestStripToolCallTags(t *testing.T) {
 	}
 }
 
+func TestExtractThinking(t *testing.T) {
+	cases := []struct {
+		in, wantReason, wantClean string
+	}{
+		{"<think>plan</think>answer", "plan", "answer"},
+		{"no tags here", "", "no tags here"},
+		{"<think>a</think>mid<think>b</think>end", "a\n\nb", "midend"},
+		{"<think>\n  deep thought  \n</think>\n\nThe answer", "deep thought", "The answer"},
+		{"leading</think>tail", "", "leadingtail"}, // orphan close stripped (Python parity)
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		gotR, gotC := extractThinking(c.in)
+		if gotR != c.wantReason || gotC != c.wantClean {
+			t.Errorf("extractThinking(%q) = (%q,%q), want (%q,%q)", c.in, gotR, gotC, c.wantReason, c.wantClean)
+		}
+	}
+}
+
 func TestReasoningText_PrefersReasoning(t *testing.T) {
 	if got := (chatMessage{Reasoning: "a", ReasoningContent: "b"}).reasoningText(); got != "a" {
 		t.Errorf("got %q, want a (reasoning preferred)", got)

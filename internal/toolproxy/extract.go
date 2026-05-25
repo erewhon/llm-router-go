@@ -83,3 +83,25 @@ func extractToolCallsFromContent(content string) []toolCall {
 func stripToolCallTags(content string) string {
 	return strings.TrimSpace(toolCallTagRe.ReplaceAllString(content, ""))
 }
+
+// thinkBlockRe captures the body of each <think>...</think> block.
+var thinkBlockRe = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
+
+// thinkStripRe removes whole <think>...</think> blocks (and stray orphan
+// </think> tags) plus trailing whitespace. Port of the Python proxy's
+// _THINK_RE.
+var thinkStripRe = regexp.MustCompile(`(?s)(?:<think>.*?</think>|</think>)\s*`)
+
+// extractThinking separates <think>...</think> blocks from content, returning
+// (reasoning, clean). Used on the non-streaming path for models that inline
+// their thinking in the content rather than emitting structured
+// reasoning_content. Port of extraction.extract_thinking.
+func extractThinking(content string) (reasoning, clean string) {
+	var parts []string
+	for _, m := range thinkBlockRe.FindAllStringSubmatch(content, -1) {
+		parts = append(parts, strings.TrimSpace(m[1]))
+	}
+	clean = strings.TrimSpace(thinkStripRe.ReplaceAllString(content, ""))
+	reasoning = strings.Join(parts, "\n\n")
+	return reasoning, clean
+}
