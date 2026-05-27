@@ -1,0 +1,226 @@
+// Package router is the Go rewrite of the LiteLLM proxy — the OpenAI-compatible
+// front door for the fleet. It reads models.yaml directly (no generate_config
+// step), resolves aliases and model ids to the right upstream, and reverse-
+// proxies the request with SSE streaming intact:
+//
+//   - tool_proxy:true models -> the tool proxy (192.168.42.240:5392), with the
+//     model_id preserved so the proxy can disambiguate shared hf_repos
+//   - external models        -> their api_base, with the resolved api_key
+//   - everything else (local) -> the model's node backend (SGLang/vLLM)
+//
+// Phase 3a wires /v1/chat/completions, /v1/models, and /health. The remaining
+// endpoint families (/v1/completions, /v1/embeddings, /v1/rerank), Postgres
+// request logging, mode-aware dashboards, and the /.well-known/opencode handler
+// land in later 3.x steps (see docs/PLAN.md).
+package router
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"time"
+
+	"github.com/erewhon/llm-router-go/internal/config"
+)
+
+// Router serves the OpenAI front-door endpoints over a model registry.
+type Router struct {
+	registry      *config.ModelRegistry
+	active        map[string]config.ModelDefinition // models routable in this mode
+	mode          string
+	logger        *slog.Logger
+	transport     http.RoundTripper
+	flushInterval time.Duration
+	getenv        func(string) string
+}
+
+// Option configures a Router at construction time.
+type Option func(*Router)
+
+// WithTransport overrides the HTTP transport used to talk to upstreams.
+// Used by tests; production gets http.DefaultTransport.
+func WithTransport(rt http.RoundTripper) Option {
+	return func(r *Router) { r.transport = rt }
+}
+
+// WithFlushInterval overrides the ReverseProxy flush interval. Default is -1
+// (flush on every write), which SSE streaming requires. Tests set 0.
+func WithFlushInterval(d time.Duration) Option {
+	return func(r *Router) { r.flushInterval = d }
+}
+
+// WithMode restricts the routable set to models active in the given mode tag
+// ("big"/"default"/...). Empty (the default) means all enabled models, no mode
+// filtering. Mirrors the Python ModelRegistry.models_for_mode helper.
+func WithMode(mode string) Option {
+	return func(r *Router) { r.mode = mode }
+}
+
+// WithGetenv overrides environment lookup for api_key resolution. Tests inject
+// a fake; production uses os.Getenv.
+func WithGetenv(fn func(string) string) Option {
+	return func(r *Router) {
+		if fn != nil {
+			r.getenv = fn
+		}
+	}
+}
+
+// New constructs a Router bound to the given registry. The routable model set
+// is computed once from the configured mode — reload the process to pick up a
+// changed models.yaml (matching the Python proxy's load-time behaviour).
+func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *Router {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	r := &Router{
+		registry:      registry,
+		logger:        logger,
+		transport:     http.DefaultTransport,
+		flushInterval: -1, // SSE: flush on every write
+		getenv:        os.Getenv,
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	r.active = registry.ModelsForMode(r.mode)
+	return r
+}
+
+// Handler returns the HTTP mux. Wrap with the standard httpx middleware chain
+// (RequestID, AccessLog, Recover) in main.
+func (rt *Router) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", rt.handleChat)
+	mux.HandleFunc("GET /v1/models", rt.handleModels)
+	mux.HandleFunc("GET /health", rt.handleHealth)
+	return mux
+}
+
+// ---------------------------------------------------------------------------
+// /v1/chat/completions — resolve, rewrite the model field, reverse-proxy.
+// ---------------------------------------------------------------------------
+
+func (rt *Router) handleChat(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var bodyMap map[string]any
+	if err := json.Unmarshal(body, &bodyMap); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	model, _ := bodyMap["model"].(string)
+	if model == "" {
+		http.Error(w, `missing "model" field`, http.StatusBadRequest)
+		return
+	}
+
+	res, err := rt.resolveModel(model)
+	if err != nil {
+		rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	bodyMap["model"] = res.BackendModel
+	newBody, err := json.Marshal(bodyMap)
+	if err != nil {
+		http.Error(w, "re-encode body: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rt.logger.InfoContext(r.Context(), "forwarding",
+		"model", model, "backend_model", res.BackendModel,
+		"backend_url", res.BackendURL, "resolved_via", res.ModelID,
+		"via_tool_proxy", res.ViaToolProxy)
+	rt.reverseProxyTo(w, r, res.BackendURL, newBody, res.AuthBearer)
+}
+
+// reverseProxyTo forwards the request to backendRoot (a base URL with the
+// "/v1" suffix already stripped) using the original request path, preserving
+// SSE streaming via FlushInterval. SetURL joins backendRoot's path with the
+// inbound path, so any path prefix on an external api_base is kept and the
+// endpoint generalises to /v1/completions, /v1/embeddings, etc. When
+// authBearer is non-empty it replaces the Authorization header (external
+// providers); local/tool-proxy hops pass "".
+func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer string) {
+	target, err := url.Parse(backendRoot)
+	if err != nil {
+		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rp := &httputil.ReverseProxy{
+		Transport:     rt.transport,
+		FlushInterval: rt.flushInterval,
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target) // scheme+host, joins target.Path with the inbound path
+			pr.Out.Host = ""  // use the new Host from URL
+			pr.Out.Body = io.NopCloser(bytes.NewReader(body))
+			pr.Out.ContentLength = int64(len(body))
+			pr.Out.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			if authBearer != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+authBearer)
+			}
+		},
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			rt.logger.ErrorContext(req.Context(), "upstream error",
+				"backend_url", backendRoot, "err", err)
+			http.Error(rw, "upstream: "+err.Error(), http.StatusBadGateway)
+		},
+	}
+	rp.ServeHTTP(w, r)
+}
+
+// ---------------------------------------------------------------------------
+// /v1/models — OpenAI-shape list of every model routable in the current mode.
+// ---------------------------------------------------------------------------
+
+func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
+	type entry struct {
+		ID       string          `json:"id"`
+		Object   string          `json:"object"`
+		OwnedBy  string          `json:"owned_by"`
+		APIClass config.APIClass `json:"api_class,omitempty"`
+	}
+	type response struct {
+		Object string  `json:"object"`
+		Data   []entry `json:"data"`
+	}
+
+	out := response{Object: "list"}
+	for id, m := range rt.active {
+		out.Data = append(out.Data, entry{
+			ID:       id,
+			Object:   "model",
+			OwnedBy:  string(m.Backend),
+			APIClass: m.APIClass,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// ---------------------------------------------------------------------------
+// /health
+// ---------------------------------------------------------------------------
+
+func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":    "ok",
+		"mode":      rt.mode,
+		"models":    len(rt.active),
+		"streaming": true,
+	})
+}

@@ -312,19 +312,50 @@ matching tool-call invocations and search results (logged).
 Goal: retire LiteLLM. The Go router reads `models.yaml` directly,
 no intermediate `generate_config` step needed.
 
-- [ ] OpenAI-compatible endpoints: `/v1/chat/completions`,
-      `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`.
-- [ ] Alias resolution (e.g. `coder` → `qwen3.6-hypatia`).
-- [ ] `tool_proxy: true` routing — forward to `192.168.42.240:5392`
-      with model_id preserved.
-- [ ] SSE pass-through (same `ReverseProxy` pattern as tool-proxy).
-- [ ] Request logging to Postgres (reuse the LiteLLM Postgres schema or
-      define a fresh, simpler one — decide during this phase).
-- [ ] Mode tags (`mode:big`, `mode:default`) — load-time filtering of
-      which models are active.
+#### Phase 3a — skeleton (done)
+
+- [x] `internal/router/`: route table over `models.yaml`. `resolveModel`
+      matches an incoming name by registry key (exact match wins, deterministic),
+      then hf_repo (bare or with `#suffix`), then alias; a leading `openai/`
+      prefix is stripped. Only models active in the configured mode are routable.
+- [x] Front-door routing via `config.APIBase(id, aliasOverride)` (the tool proxy
+      forces tool_proxy *off* to avoid looping back; the router uses the model's
+      real setting): `tool_proxy:true` → tool proxy at `192.168.42.240:5392`
+      with the **model_id** in the body (not hf_repo, so the proxy can
+      disambiguate shared repos); `external` → its `api_base` with the resolved
+      `api_key`; local → the node backend with the bare hf_repo. Per-alias
+      `alias_overrides.tool_proxy` is honoured.
+- [x] `api_key` resolution: literal when it starts with `sk-`, otherwise an
+      env-var name (matches `generate_config.py`'s `os.environ/` logic).
+      Injectable (`WithGetenv`) for tests.
+- [x] `POST /v1/chat/completions` — reverse-proxy with SSE intact. `SetURL`
+      joins the inbound path, so it generalises to the other endpoint families
+      in 3b without hardcoding paths.
+- [x] `GET /v1/models` (OpenAI shape, surfaces `owned_by` + `api_class`) and
+      `GET /health` (status, mode, model count).
+- [x] `cmd/router/main.go` — flags (addr default `:4015`, models-yaml, mode,
+      log-level/format, shutdown-timeout), registry load, standard httpx
+      middleware chain, signal-driven graceful shutdown. 18 tests (resolve
+      table + handlers + SSE) pass under `-race`.
+- [x] Smoke-tested live against the real `models.yaml`: `/v1/models` listed all
+      28 enabled models; `coder` routed to the tool proxy as model_id
+      `qwen3.5-122b-a10b`, `research` as `nemotron-3-super`, both returning 200
+      from the real backends.
+
+#### Phase 3b — remaining endpoints + logging
+
+- [ ] Remaining OpenAI endpoints: `/v1/completions`, `/v1/embeddings`,
+      `/v1/rerank`. The reverse-proxy is already path-generic, so this is mostly
+      mux wiring plus per-`api_class` resolve checks.
+- [ ] Request logging to Postgres — **DECIDED (2026-05-26): a fresh, simpler
+      schema**, not LiteLLM's. Define the minimal table(s) we actually query
+      (request/response, model, tokens, latency, status).
+- [ ] Mode tags (`mode:big`, `mode:default`) — load-time filtering is done
+      (`--mode`); surface it to the dashboard and document the reload story.
 - [ ] Health-check endpoints for the dashboard.
 - [ ] `/.well-known/opencode` endpoint (replace the
       `opencode-wellknown` systemd unit at `:4012`).
+- [ ] `/metrics` (Prometheus) — match the node-agent's reexport.
 
 **Cutover criterion**: parallel run on `:4015` for 48h, dashboard +
 opencode clients pointed at it, no observed regressions.
@@ -364,7 +395,8 @@ opencode clients pointed at it, no observed regressions.
 ## Open questions / TODO
 
 - [ ] **CI**: GitHub Actions config — first PR after scaffold lands.
-- [ ] **Postgres schema**: keep LiteLLM's, or define fresh?
+- [x] **Postgres schema**: DECIDED 2026-05-26 — define a fresh, simpler schema
+      (not LiteLLM's). Detailed in Phase 3b.
 - [ ] **Bifrost re-evaluation**: revisit after Phase 1 if `internal/router`
       starts approaching 3K lines.
 - [ ] **Auto-router embedding cache**: currently lives in tool-proxy
