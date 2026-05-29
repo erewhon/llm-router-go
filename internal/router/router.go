@@ -15,9 +15,11 @@
 // to a reqlog.Sink — every request that reaches handleProxy emits one record
 // (including rejected ones) via a defer, with usage tokens parsed from
 // non-streaming JSON bodies (buffered via ReverseProxy.ModifyResponse) and
-// from the rolling 64KB tail of SSE streams. /metrics, mode-aware dashboards,
-// and the /.well-known/opencode handler land in later 3b.x steps (see
-// docs/PLAN.md).
+// from the rolling 64KB tail of SSE streams. Phase 3b.iii added the /metrics
+// Prometheus endpoint (per-binary registry mirroring the node-agent's
+// pattern, populated from the same Observe call as the Sink) and enriched
+// /health with version + uptime + per-api_class model counts. The
+// /.well-known/opencode handler is the remaining 3b piece (see docs/PLAN.md).
 package router
 
 import (
@@ -48,6 +50,9 @@ type Router struct {
 	flushInterval time.Duration
 	getenv        func(string) string
 	sink          reqlog.Sink
+	version       string
+	started       time.Time
+	metrics       *routerMetrics
 }
 
 // Option configures a Router at construction time.
@@ -95,6 +100,16 @@ func WithSink(s reqlog.Sink) Option {
 	}
 }
 
+// WithVersion sets the build version surfaced via /health and the
+// router_build_info Prometheus metric. Default is "dev".
+func WithVersion(v string) Option {
+	return func(r *Router) {
+		if v != "" {
+			r.version = v
+		}
+	}
+}
+
 // New constructs a Router bound to the given registry. The routable model set
 // is computed once from the configured mode — reload the process to pick up a
 // changed models.yaml (matching the Python proxy's load-time behaviour).
@@ -109,11 +124,14 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		flushInterval: -1, // SSE: flush on every write
 		getenv:        os.Getenv,
 		sink:          reqlog.NopSink{},
+		version:       "dev",
+		started:       time.Now(),
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	r.active = registry.ModelsForMode(r.mode)
+	r.metrics = newRouterMetrics(r.version, r.started, r.active)
 	return r
 }
 
@@ -133,6 +151,7 @@ func (rt *Router) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1/models", rt.handleModels)
 	mux.HandleFunc("GET /health", rt.handleHealth)
+	mux.Handle("GET /metrics", rt.metrics.Handler())
 	return mux
 }
 
@@ -188,6 +207,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = extractSSEUsage(cap.sseTail.Tail())
 			}
 			rt.sink.Log(lr)
+			rt.metrics.Observe(lr)
 		}()
 
 		body, err := io.ReadAll(r.Body)
@@ -350,11 +370,18 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
+	modelsByClass := map[string]int{}
+	for _, m := range rt.active {
+		modelsByClass[string(m.APIClass)]++
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":    "ok",
-		"mode":      rt.mode,
-		"models":    len(rt.active),
-		"streaming": true,
+		"status":          "ok",
+		"version":         rt.version,
+		"mode":            rt.mode,
+		"uptime_seconds":  time.Since(rt.started).Seconds(),
+		"models":          len(rt.active),
+		"models_by_class": modelsByClass,
+		"streaming":       true,
 	})
 }

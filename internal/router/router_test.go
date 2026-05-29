@@ -685,3 +685,128 @@ func TestReqlog_NilSinkBecomesNop(t *testing.T) {
 	rec := postTo(t, rt, "/v1/chat/completions", `{"model":"coder","messages":[]}`)
 	_ = rec // resolution may or may not succeed; the assertion is no panic.
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3b.iii — /metrics and richer /health
+// ---------------------------------------------------------------------------
+
+func TestHealth_RichFields(t *testing.T) {
+	rt := newTestRouter(t, nil, WithVersion("test-1.2.3"))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rt.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Status        string         `json:"status"`
+		Version       string         `json:"version"`
+		Mode          string         `json:"mode"`
+		UptimeSec     float64        `json:"uptime_seconds"`
+		Models        int            `json:"models"`
+		ModelsByClass map[string]int `json:"models_by_class"`
+		Streaming     bool           `json:"streaming"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "ok" || resp.Version != "test-1.2.3" || !resp.Streaming {
+		t.Errorf("scalar fields wrong: %+v", resp)
+	}
+	if resp.Models < 5 {
+		t.Errorf("Models = %d, expected several active", resp.Models)
+	}
+	if resp.ModelsByClass["chat"] < 3 {
+		t.Errorf("models_by_class[chat] = %d, want >= 3 (testYAML has multiple chat models)",
+			resp.ModelsByClass["chat"])
+	}
+	if resp.ModelsByClass["embeddings"] != 1 || resp.ModelsByClass["rerank"] != 1 {
+		t.Errorf("models_by_class wrong: %+v", resp.ModelsByClass)
+	}
+	if resp.UptimeSec < 0 {
+		t.Errorf("UptimeSec = %v, want >= 0", resp.UptimeSec)
+	}
+}
+
+func TestMetrics_ServesPrometheus(t *testing.T) {
+	rt := newTestRouter(t, nil, WithVersion("test-vx"))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rt.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`router_build_info{version="test-vx"} 1`,
+		"router_uptime_seconds ",
+		`router_models_active{api_class="chat"}`,
+		`router_models_active{api_class="embeddings"}`,
+		"go_goroutines", // Go collector
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q", want)
+		}
+	}
+}
+
+func TestMetrics_RequestsAndTokensObserved(t *testing.T) {
+	up := usageUpstream(t) // returns usage {7,11,18}
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	// One successful chat (counts requests_total + duration + tokens).
+	postTo(t, rt, "/v1/chat/completions", `{"model":"research","messages":[]}`)
+	// One 404 (counts under model="unresolved", api_class="unknown").
+	postTo(t, rt, "/v1/chat/completions", `{"model":"ghost","messages":[]}`)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rt.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		// research alias -> nemotron-3-super; chat path; status 200
+		`router_requests_total{api_class="chat",model="nemotron-3-super",path="/v1/chat/completions",status="200"} 1`,
+		// unresolved 404
+		`router_requests_total{api_class="unknown",model="unresolved",path="/v1/chat/completions",status="404"} 1`,
+		// tokens 7 prompt, 11 completion from the upstream usage block
+		`router_upstream_tokens_total{api_class="chat",kind="prompt",model="nemotron-3-super"} 7`,
+		`router_upstream_tokens_total{api_class="chat",kind="completion",model="nemotron-3-super"} 11`,
+		// duration histogram exists for chat path
+		`router_request_duration_seconds_bucket{api_class="chat",path="/v1/chat/completions"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics body missing %q\n--- body excerpt ---\n%s", want, snippet(body, want))
+		}
+	}
+}
+
+// snippet returns ~3 lines of context around the first occurrence of needle's
+// metric name (everything up to the first '{'), or the first 800 bytes if not
+// found. Helps when an assertion fails because the value is off by a number.
+func snippet(haystack, needle string) string {
+	name := needle
+	if i := strings.Index(needle, "{"); i > 0 {
+		name = needle[:i]
+	}
+	idx := strings.Index(haystack, name)
+	if idx < 0 {
+		if len(haystack) > 800 {
+			return haystack[:800] + "..."
+		}
+		return haystack
+	}
+	start := idx - 200
+	if start < 0 {
+		start = 0
+	}
+	end := idx + 800
+	if end > len(haystack) {
+		end = len(haystack)
+	}
+	return haystack[start:end]
+}

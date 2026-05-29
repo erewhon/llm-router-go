@@ -401,12 +401,33 @@ no intermediate `generate_config` step needed.
 router logs to — the existing Supabase on euclid (`supabase-db`, not host-
 published), a dedicated container, or somewhere else.
 
-#### Phase 3b.iii — observability + dashboard
+#### Phase 3b.iii — observability + dashboard (done)
 
-- [ ] `/metrics` (Prometheus) — match the node-agent's reexport pattern.
-- [ ] Health-check endpoints for the dashboard.
-- [ ] Mode tags surfaced to the dashboard (load-time filtering already done via
-      `--mode`); document the reload story.
+- [x] `/metrics` (Prometheus) — per-binary registry mirroring the node-agent's
+      pattern. Go + process collectors plus router-specific metrics:
+      `router_build_info{version}` gauge; `router_uptime_seconds` GaugeFunc;
+      `router_models_active{api_class}` set at load-time from the active set;
+      `router_requests_total{path,model,api_class,status}` counter
+      (`model` = `resolved_via`, falling back to `"unresolved"` to bound
+      cardinality at 404); `router_request_duration_seconds{path,api_class}`
+      histogram (5ms–120s buckets); `router_upstream_tokens_total{kind,model,
+      api_class}` counter populated from `parseUsage` / `extractSSEUsage`.
+- [x] Observe is called from the same `handleProxy` defer as `Sink.Log`, so the
+      Prometheus counters and the Postgres rows never disagree.
+- [x] `/health` enriched: now includes `version`, `mode`, `uptime_seconds`,
+      `models`, `models_by_class`, `streaming` — enough for the dashboard to
+      pick up build identity and per-class counts without a second call.
+- [x] `--mode` surfaced via `/health.mode`; reload story stays "restart the
+      binary" — the active set is computed at construction, matching the
+      Python proxy's load-time behaviour (documented in the Router struct doc).
+- [x] 3 new tests (rich /health fields, /metrics serves Prometheus with
+      expected lines, requests + tokens counted) bring the router package to
+      29 tests. All `-race` green.
+- [x] Smoke-tested live: `/health` returned the 28-model breakdown
+      (`chat:20, embeddings:1, image_edit:1, image_gen:1, music_gen:1,
+      rerank:1, stt:1, tts:2`); `/metrics` exposed the histogram (sum=0.155s),
+      per-status request counters, and per-model token counts (15 prompt /
+      2 completion) parsed from the real upstream response.
 
 #### Phase 3b.iv — well-known
 

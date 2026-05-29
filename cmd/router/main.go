@@ -65,7 +65,7 @@ func run(args []string) int {
 		return 1
 	}
 
-	routerOpts := []router.Option{router.WithMode(*mode)}
+	routerOpts := []router.Option{router.WithMode(*mode), router.WithVersion(version)}
 	var sink reqlog.Sink = reqlog.NopSink{}
 	if *postgresDSN != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
