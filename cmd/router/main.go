@@ -18,6 +18,7 @@ import (
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/router"
+	"github.com/erewhon/llm-router-go/internal/router/reqlog"
 )
 
 // version is overridden via -ldflags="-X main.version=$(git describe ...)".
@@ -30,13 +31,14 @@ func main() {
 func run(args []string) int {
 	fs := flag.NewFlagSet("router", flag.ContinueOnError)
 	var (
-		addr       = fs.String("addr", ":4015", "listen address (cutover runs parallel to LiteLLM:4010)")
-		modelsYAML = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
-		mode       = fs.String("mode", "", `mode tag filter ("big"/"default"/...); empty = all enabled models`)
-		logLevel   = fs.String("log-level", "info", "log level: debug, info, warn, error")
-		logFormat  = fs.String("log-format", "json", "log format: json or text")
-		shutdownTo = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
-		showVer    = fs.Bool("version", false, "print version and exit")
+		addr        = fs.String("addr", ":4015", "listen address (cutover runs parallel to LiteLLM:4010)")
+		modelsYAML  = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
+		mode        = fs.String("mode", "", `mode tag filter ("big"/"default"/...); empty = all enabled models`)
+		logLevel    = fs.String("log-level", "info", "log level: debug, info, warn, error")
+		logFormat   = fs.String("log-format", "json", "log format: json or text")
+		shutdownTo  = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
+		postgresDSN = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
+		showVer     = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -63,7 +65,23 @@ func run(args []string) int {
 		return 1
 	}
 
-	rt := router.New(registry, logger, router.WithMode(*mode))
+	routerOpts := []router.Option{router.WithMode(*mode)}
+	var sink reqlog.Sink = reqlog.NopSink{}
+	if *postgresDSN != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ps, err := reqlog.NewPostgres(ctx, *postgresDSN, logger.With("subsys", "reqlog"))
+		cancel()
+		if err != nil {
+			logger.Error("reqlog postgres failed", "err", err, "dsn", reqlog.RedactDSN(*postgresDSN))
+			return 1
+		}
+		sink = ps
+		defer ps.Close()
+		logger.Info("reqlog enabled", "dsn", reqlog.RedactDSN(*postgresDSN))
+	}
+	routerOpts = append(routerOpts, router.WithSink(sink))
+
+	rt := router.New(registry, logger, routerOpts...)
 
 	handler := httpx.Chain(
 		rt.Handler(),

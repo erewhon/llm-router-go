@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/router/reqlog"
 )
 
 const testYAML = `
@@ -495,4 +496,192 @@ func TestChat_RejectsEmbeddingModel(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b.ii — reqlog sink integration
+// ---------------------------------------------------------------------------
+
+// usageUpstream is a fake upstream that responds with an OpenAI-shape body
+// containing a `usage` block.
+func usageUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":11,"total_tokens":18}}`))
+	}))
+}
+
+func TestReqlog_SuccessfulChatRecordsUsage(t *testing.T) {
+	up := usageUpstream(t)
+	defer up.Close()
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport}, WithSink(sink))
+
+	rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"research","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.Path != "/v1/chat/completions" || r.Method != "POST" {
+		t.Errorf("path/method wrong: %q %q", r.Path, r.Method)
+	}
+	if r.Model != "research" || r.BackendModel != "nemotron-3-super" || !r.ViaToolProxy {
+		t.Errorf("resolution fields wrong: model=%q backend=%q via=%v",
+			r.Model, r.BackendModel, r.ViaToolProxy)
+	}
+	if r.APIClass != "chat" {
+		t.Errorf("APIClass = %q, want chat", r.APIClass)
+	}
+	if r.Status != 200 {
+		t.Errorf("Status = %d, want 200", r.Status)
+	}
+	if r.LatencyMS < 0 {
+		t.Errorf("LatencyMS = %d (should be >= 0)", r.LatencyMS)
+	}
+	if r.PromptTokens == nil || *r.PromptTokens != 7 {
+		t.Errorf("PromptTokens = %v, want 7", r.PromptTokens)
+	}
+	if r.CompletionTokens == nil || *r.CompletionTokens != 11 {
+		t.Errorf("CompletionTokens = %v, want 11", r.CompletionTokens)
+	}
+	if r.TotalTokens == nil || *r.TotalTokens != 18 {
+		t.Errorf("TotalTokens = %v, want 18", r.TotalTokens)
+	}
+	if r.Error != "" {
+		t.Errorf("Error = %q, want empty", r.Error)
+	}
+}
+
+func TestReqlog_EmbeddingsRecordsTokens(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":3,"total_tokens":3}}`))
+	}))
+	defer up.Close()
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport}, WithSink(sink))
+
+	postTo(t, rt, "/v1/embeddings", `{"model":"embedding","input":"hi"}`)
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.APIClass != "embeddings" || r.Path != "/v1/embeddings" {
+		t.Errorf("wrong endpoint metadata: class=%q path=%q", r.APIClass, r.Path)
+	}
+	if r.PromptTokens == nil || *r.PromptTokens != 3 {
+		t.Errorf("PromptTokens = %v, want 3", r.PromptTokens)
+	}
+	if r.CompletionTokens != nil {
+		t.Errorf("CompletionTokens = %v, want nil (embeddings have no completion)", r.CompletionTokens)
+	}
+}
+
+func TestReqlog_ClassMismatchRecorded(t *testing.T) {
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	defer up.Close()
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport}, WithSink(sink))
+
+	postTo(t, rt, "/v1/embeddings", `{"model":"coder","input":"x"}`)
+	if calls != 0 {
+		t.Errorf("upstream got %d calls, want 0", calls)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.Status != 400 {
+		t.Errorf("Status = %d, want 400", r.Status)
+	}
+	if r.BackendURL == "" {
+		t.Errorf("BackendURL should be populated (resolution succeeded before class check)")
+	}
+	if r.APIClass != "chat" {
+		t.Errorf("APIClass = %q (the model's own class) want chat", r.APIClass)
+	}
+	if !strings.Contains(r.Error, "api_class") {
+		t.Errorf("Error doesn't mention api_class: %q", r.Error)
+	}
+}
+
+func TestReqlog_UnknownModelRecorded(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, nil, WithSink(sink))
+	postTo(t, rt, "/v1/chat/completions", `{"model":"ghost","messages":[]}`)
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.Status != 404 || r.Model != "ghost" || r.BackendURL != "" || r.Error == "" {
+		t.Errorf("404 record wrong: %+v", r)
+	}
+}
+
+func TestReqlog_BadJSONRecorded(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, nil, WithSink(sink))
+	postTo(t, rt, "/v1/chat/completions", `{not json`)
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	if recs[0].Status != 400 || recs[0].Model != "" {
+		t.Errorf("bad-json record wrong: status=%d model=%q", recs[0].Status, recs[0].Model)
+	}
+}
+
+// SSE-tail usage extraction: a streamed response includes `usage` in the last
+// data event before [DONE]; the rolling 64KB tail must capture it.
+func TestReqlog_SSECapturesUsageFromTail(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f, _ := w.(http.Flusher)
+		for _, chunk := range []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+			"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+			"data: [DONE]\n\n",
+		} {
+			_, _ = w.Write([]byte(chunk))
+			f.Flush()
+		}
+	}))
+	defer up.Close()
+	sink := &reqlog.MemorySink{}
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport}, WithSink(sink))
+
+	postTo(t, rt, "/v1/chat/completions",
+		`{"model":"coder","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if !r.Stream {
+		t.Errorf("Stream = false, want true")
+	}
+	if r.PromptTokens == nil || *r.PromptTokens != 5 ||
+		r.CompletionTokens == nil || *r.CompletionTokens != 2 ||
+		r.TotalTokens == nil || *r.TotalTokens != 7 {
+		t.Errorf("SSE usage extraction wrong: pt=%v ct=%v tt=%v",
+			r.PromptTokens, r.CompletionTokens, r.TotalTokens)
+	}
+}
+
+func TestReqlog_NilSinkBecomesNop(t *testing.T) {
+	// WithSink(nil) shouldn't panic — it should set NopSink and proceed.
+	rt := newTestRouter(t, nil, WithSink(nil))
+	rec := postTo(t, rt, "/v1/chat/completions", `{"model":"coder","messages":[]}`)
+	_ = rec // resolution may or may not succeed; the assertion is no panic.
 }

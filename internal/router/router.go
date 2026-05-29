@@ -11,9 +11,13 @@
 // Phase 3a wired /v1/chat/completions, /v1/models, and /health. Phase 3b.i
 // added /v1/completions, /v1/embeddings, and /v1/rerank with per-endpoint
 // api_class enforcement and tool-proxy bypass for the non-chat endpoints (the
-// tool proxy serves only chat-completions). Postgres request logging,
-// /metrics, mode-aware dashboards, and the /.well-known/opencode handler land
-// in later 3b.x steps (see docs/PLAN.md).
+// tool proxy serves only chat-completions). Phase 3b.ii wired request logging
+// to a reqlog.Sink — every request that reaches handleProxy emits one record
+// (including rejected ones) via a defer, with usage tokens parsed from
+// non-streaming JSON bodies (buffered via ReverseProxy.ModifyResponse) and
+// from the rolling 64KB tail of SSE streams. /metrics, mode-aware dashboards,
+// and the /.well-known/opencode handler land in later 3b.x steps (see
+// docs/PLAN.md).
 package router
 
 import (
@@ -26,9 +30,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/httpx"
+	"github.com/erewhon/llm-router-go/internal/router/reqlog"
 )
 
 // Router serves the OpenAI front-door endpoints over a model registry.
@@ -40,6 +47,7 @@ type Router struct {
 	transport     http.RoundTripper
 	flushInterval time.Duration
 	getenv        func(string) string
+	sink          reqlog.Sink
 }
 
 // Option configures a Router at construction time.
@@ -74,6 +82,19 @@ func WithGetenv(fn func(string) string) Option {
 	}
 }
 
+// WithSink wires a request-log sink. Every request that reaches handleProxy
+// produces one record, including rejected ones (400/404). nil is treated as
+// reqlog.NopSink. Production uses reqlog.PostgresSink; tests use MemorySink.
+func WithSink(s reqlog.Sink) Option {
+	return func(r *Router) {
+		if s == nil {
+			r.sink = reqlog.NopSink{}
+			return
+		}
+		r.sink = s
+	}
+}
+
 // New constructs a Router bound to the given registry. The routable model set
 // is computed once from the configured mode — reload the process to pick up a
 // changed models.yaml (matching the Python proxy's load-time behaviour).
@@ -87,6 +108,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		transport:     http.DefaultTransport,
 		flushInterval: -1, // SSE: flush on every write
 		getenv:        os.Getenv,
+		sink:          reqlog.NopSink{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -120,6 +142,9 @@ func (rt *Router) Handler() http.Handler {
 
 // handleProxy returns a handler that resolves the request's model under the
 // given constraints and reverse-proxies the (model-rewritten) body upstream.
+// Every request that reaches this handler emits one reqlog.Record on exit,
+// including the rejected paths (bad JSON, missing model, unknown model,
+// api_class mismatch) so the dashboard sees them too.
 //
 //   - requireClass: the model's api_class must match exactly; "" disables the
 //     check (currently every endpoint passes a concrete class).
@@ -127,43 +152,89 @@ func (rt *Router) Handler() http.Handler {
 //     proxy doesn't implement (/v1/completions, /v1/embeddings, /v1/rerank).
 func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &recordingWriter{ResponseWriter: w}
+		cap := &responseCapture{}
+
+		var (
+			modelIn  string
+			resolved *resolveResult
+			errMsg   string
+		)
+
+		defer func() {
+			lr := reqlog.Record{
+				RequestID: httpx.RequestIDFromContext(r.Context()),
+				TS:        start,
+				Method:    r.Method,
+				Path:      r.URL.Path,
+				Model:     modelIn,
+				Status:    rec.status,
+				LatencyMS: int(time.Since(start) / time.Millisecond),
+				Stream:    cap.isSSE,
+				Error:     errMsg,
+			}
+			if resolved != nil {
+				lr.BackendModel = resolved.BackendModel
+				lr.BackendURL = resolved.BackendURL
+				lr.ResolvedVia = resolved.ModelID
+				lr.APIClass = string(resolved.APIClass)
+				lr.ViaToolProxy = resolved.ViaToolProxy
+			}
+			switch {
+			case cap.jsonBody != nil:
+				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = parseUsage(cap.jsonBody)
+			case cap.sseTail != nil:
+				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = extractSSEUsage(cap.sseTail.Tail())
+			}
+			rt.sink.Log(lr)
+		}()
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			errMsg = "read body: " + err.Error()
+			http.Error(rec, errMsg, http.StatusBadRequest)
 			return
 		}
 
 		var bodyMap map[string]any
 		if err := json.Unmarshal(body, &bodyMap); err != nil {
-			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			errMsg = "invalid JSON: " + err.Error()
+			http.Error(rec, errMsg, http.StatusBadRequest)
 			return
 		}
 
 		model, _ := bodyMap["model"].(string)
 		if model == "" {
-			http.Error(w, `missing "model" field`, http.StatusBadRequest)
+			errMsg = `missing "model" field`
+			http.Error(rec, errMsg, http.StatusBadRequest)
 			return
 		}
+		modelIn = model
 
 		res, err := rt.resolveModel(model, forceDirect)
 		if err != nil {
+			errMsg = err.Error()
 			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(rec, errMsg, http.StatusNotFound)
 			return
 		}
+		resolved = &res
 
 		if requireClass != "" && res.APIClass != requireClass {
+			errMsg = fmt.Sprintf("model %q has api_class %q; %s requires %q",
+				model, res.APIClass, r.URL.Path, requireClass)
 			rt.logger.WarnContext(r.Context(), "api_class mismatch",
 				"model", model, "got", string(res.APIClass), "want", string(requireClass), "path", r.URL.Path)
-			http.Error(w, fmt.Sprintf("model %q has api_class %q; %s requires %q",
-				model, res.APIClass, r.URL.Path, requireClass), http.StatusBadRequest)
+			http.Error(rec, errMsg, http.StatusBadRequest)
 			return
 		}
 
 		bodyMap["model"] = res.BackendModel
 		newBody, err := json.Marshal(bodyMap)
 		if err != nil {
-			http.Error(w, "re-encode body: "+err.Error(), http.StatusInternalServerError)
+			errMsg = "re-encode body: " + err.Error()
+			http.Error(rec, errMsg, http.StatusInternalServerError)
 			return
 		}
 
@@ -172,7 +243,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			"model", model, "backend_model", res.BackendModel,
 			"backend_url", res.BackendURL, "resolved_via", res.ModelID,
 			"via_tool_proxy", res.ViaToolProxy)
-		rt.reverseProxyTo(w, r, res.BackendURL, newBody, res.AuthBearer)
+		rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, cap)
 	}
 }
 
@@ -183,7 +254,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 // endpoint generalises to /v1/completions, /v1/embeddings, etc. When
 // authBearer is non-empty it replaces the Authorization header (external
 // providers); local/tool-proxy hops pass "".
-func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer string) {
+//
+// cap (non-nil) records what we learn about the response for the reqlog
+// sink: for JSON responses we buffer the body so usage tokens can be parsed
+// in handleProxy's defer; for SSE we wrap the response body with a rolling
+// 64KB tail buffer so the final `usage` chunk (if present) is captured
+// without holding the whole stream in memory.
+func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer string, cap *responseCapture) {
 	target, err := url.Parse(backendRoot)
 	if err != nil {
 		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
@@ -197,10 +274,38 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 			pr.Out.Host = ""  // use the new Host from URL
 			pr.Out.Body = io.NopCloser(bytes.NewReader(body))
 			pr.Out.ContentLength = int64(len(body))
-			pr.Out.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			pr.Out.Header.Set("Content-Length", strconv.Itoa(len(body)))
 			if authBearer != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+authBearer)
 			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if cap == nil {
+				return nil
+			}
+			ct := resp.Header.Get("Content-Type")
+			switch {
+			case contentTypeIsSSE(ct):
+				cap.isSSE = true
+				cap.sseTail = newStreamTailCapture(resp.Body, 64*1024)
+				resp.Body = cap.sseTail
+			case contentTypeIsJSON(ct):
+				// Buffer the JSON body so we can parse `usage` after it's
+				// forwarded. Bodies for chat/embedding/rerank responses are
+				// small (KB), so reading them in full is fine.
+				buf, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return err
+				}
+				if err := resp.Body.Close(); err != nil {
+					return err
+				}
+				cap.jsonBody = buf
+				resp.Body = io.NopCloser(bytes.NewReader(buf))
+				resp.ContentLength = int64(len(buf))
+				resp.Header.Set("Content-Length", strconv.Itoa(len(buf)))
+			}
+			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			rt.logger.ErrorContext(req.Context(), "upstream error",

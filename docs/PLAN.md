@@ -361,16 +361,45 @@ no intermediate `generate_config` step needed.
       (a `tool_proxy:true` model) correctly bypassed the tool proxy and went
       direct to archimedes:5391 with the bare hf_repo.
 
-#### Phase 3b.ii — request logging to Postgres
+#### Phase 3b.ii — request logging to Postgres (done)
 
-- [ ] Fresh, simpler schema (**DECIDED 2026-05-26**, not LiteLLM's): minimum is
-      request_id, ts, method/path, model (incoming + backend), backend_url,
-      status, latency_ms, prompt/completion tokens. Bootstrap-on-startup
-      (`CREATE TABLE IF NOT EXISTS`).
-- [ ] Capture hook in the proxy path; token usage parsed from non-streaming
-      responses; SSE captures token totals from the final `usage` chunk where
-      available.
-- [ ] `--postgres-dsn` flag (off when empty — logging is opt-in for dev runs).
+- [x] New `internal/router/reqlog/` package: `Sink` interface +
+      `NopSink` (default) + `MemorySink` (tests) + `PostgresSink` (async writer
+      goroutine + buffered channel, drop-on-full so a stalled DB never blocks
+      the proxy path; idempotent `Close` via `sync.Once`; password-redacting
+      DSN helper for safe logging).
+- [x] Fresh, simpler schema (DECIDED 2026-05-26, **not** LiteLLM's), bootstrap
+      on startup (`CREATE TABLE IF NOT EXISTS` + 3 indexes on ts/request_id/
+      model). One row per request: request_id, ts, method/path, model (in +
+      backend), backend_url, resolved_via, api_class, via_tool_proxy, stream,
+      status, latency_ms, prompt/completion/total tokens, error.
+- [x] Capture hook in `handleProxy`: every request that reaches the handler
+      emits one Record on exit via a `defer` — including rejected ones (bad
+      JSON, missing model, unknown model, api_class mismatch). Status comes
+      from a `recordingWriter` wrapper; the resolution result fills the
+      backend fields; the error message is captured for non-2xx paths.
+- [x] Token usage extraction: for non-streaming JSON responses,
+      `ReverseProxy.ModifyResponse` buffers the (small) body and `parseUsage`
+      reads the OpenAI-shape `usage` block. For SSE responses, a rolling 64KB
+      `streamTailCapture` wraps `resp.Body`; `extractSSEUsage` scans the tail
+      for the final `data:` event containing `usage` (e.g. an OpenAI/SGLang
+      chunk before `[DONE]`). Memory-bounded regardless of total stream
+      length.
+- [x] `--postgres-dsn` flag — off (NopSink) when empty; on construction the
+      sink pings the DB and bootstraps the schema, failing fast on connection
+      errors. Logger sees `dsn` with the password redacted.
+- [x] 7 new tests at the router layer (chat-usage / embeddings-tokens /
+      class-mismatch / unknown-model / bad-JSON / SSE-tail-usage / nil-sink)
+      plus reqlog unit tests (Nop/Memory/RedactDSN) and an env-gated Postgres
+      integration test (`ROUTER_REQLOG_PG_DSN=...`). All `-race` green.
+- [x] Smoke-tested end-to-end against a throwaway Postgres container: real
+      chat to Qwen3.5-122B logged 575/8/583 tokens; embeddings logged
+      prompt=0 with completion NULL (correctly distinguished); rerank logged
+      0/NULL/0; class-mismatch logged status=400 with the error message.
+
+**Production-target decision (open):** which Postgres instance the deployed
+router logs to — the existing Supabase on euclid (`supabase-db`, not host-
+published), a dedicated container, or somewhere else.
 
 #### Phase 3b.iii — observability + dashboard
 
