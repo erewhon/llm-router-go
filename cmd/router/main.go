@@ -38,7 +38,14 @@ func run(args []string) int {
 		logFormat   = fs.String("log-format", "json", "log format: json or text")
 		shutdownTo  = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
 		postgresDSN = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
-		showVer     = fs.Bool("version", false, "print version and exit")
+
+		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
+		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
+		wellKnownProviderName = fs.String("wellknown-provider-name", "LLM Router", "human label OpenCode shows for the provider")
+		wellKnownBaseURL      = fs.String("wellknown-base-url", "", "public OpenAI-compatible URL OpenCode hits (e.g. https://llm.peacock-bramble.ts.net/v1)")
+		wellKnownAPIKey       = fs.String("wellknown-api-key", "", "bearer OpenCode should send; empty omits the apiKey field")
+
+		showVer = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -65,7 +72,16 @@ func run(args []string) int {
 		return 1
 	}
 
-	routerOpts := []router.Option{router.WithMode(*mode), router.WithVersion(version)}
+	routerOpts := []router.Option{
+		router.WithMode(*mode),
+		router.WithVersion(version),
+		router.WithWellKnown(router.WellKnownConfig{
+			ProviderID:   *wellKnownProviderID,
+			ProviderName: *wellKnownProviderName,
+			BaseURL:      *wellKnownBaseURL,
+			APIKey:       *wellKnownAPIKey,
+		}),
+	}
 	var sink reqlog.Sink = reqlog.NopSink{}
 	if *postgresDSN != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

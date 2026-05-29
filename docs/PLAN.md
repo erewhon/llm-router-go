@@ -429,10 +429,37 @@ published), a dedicated container, or somewhere else.
       per-status request counters, and per-model token counts (15 prompt /
       2 completion) parsed from the real upstream response.
 
-#### Phase 3b.iv — well-known
+#### Phase 3b.iv — well-known (done)
 
-- [ ] `/.well-known/opencode` endpoint (replace the
-      `opencode-wellknown` systemd unit at `:4012`).
+- [x] New `internal/router/wellknown.go`: `WellKnownConfig` struct (provider
+      id/name, baseURL, optional apiKey, configurable context/output limit
+      defaults — 131072 / 32768 to match the existing static file) and a
+      `buildWellKnown` that materializes the OpenCode-shape document
+      (`$schema` + `provider.<id>.{npm, name, options, models}`) from the
+      router's active model set.
+- [x] One model entry per alias of every **chat-class** model (embeddings,
+      rerank, TTS/STT, image, music aliases are filtered out — OpenCode is
+      a chat client). Models without aliases fall back to their registry id
+      as the alias.
+- [x] `WithWellKnown(cfg)` option on the Router; `Handler()` registers
+      `GET /.well-known/opencode`; empty `ProviderID` returns 404 so the
+      endpoint is opt-in via flag (`--wellknown-provider-id`,
+      `--wellknown-provider-name`, `--wellknown-base-url`,
+      `--wellknown-api-key`). Response is pretty-printed JSON with
+      `Cache-Control: no-store` so OpenCode picks up model changes on the
+      next restart.
+- [x] 5 new tests (disabled-returns-404, alias-emission and chat-only
+      filter, mode filter, omit-empty apiKey, custom limit defaults) bring
+      the router package to 34 tests, all `-race` green.
+- [x] Smoke-tested live against the real `models.yaml`: 29 chat aliases
+      emitted (covering the auto-router stubs, all enabled Claude/GLM/Kimi/
+      Zen externals, the local nemotron/qwen3.6 lines, and the
+      thinker/coder/research/vision aliases) with zero leakage of any
+      non-chat alias; with no flags configured the endpoint returns 404.
+- [x] Retires the Python `opencode-wellknown.service` (static file server
+      on `:4012`) — the static file at `/var/lib/opencode-wellknown/opencode`
+      regenerates from `models.yaml` on every request. Tailscale Serve's
+      `/.well-known/*` path will repoint at the Go router at cutover.
 
 **Cutover criterion**: parallel run on `:4015` for 48h, dashboard +
 opencode clients pointed at it, no observed regressions.

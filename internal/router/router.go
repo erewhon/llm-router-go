@@ -18,8 +18,10 @@
 // from the rolling 64KB tail of SSE streams. Phase 3b.iii added the /metrics
 // Prometheus endpoint (per-binary registry mirroring the node-agent's
 // pattern, populated from the same Observe call as the Sink) and enriched
-// /health with version + uptime + per-api_class model counts. The
-// /.well-known/opencode handler is the remaining 3b piece (see docs/PLAN.md).
+// /health with version + uptime + per-api_class model counts. Phase 3b.iv
+// added the GET /.well-known/opencode endpoint that generates an OpenCode
+// provider config from models.yaml — retiring the static
+// /var/lib/opencode-wellknown/opencode file served by the Python :4012 unit.
 package router
 
 import (
@@ -53,6 +55,7 @@ type Router struct {
 	version       string
 	started       time.Time
 	metrics       *routerMetrics
+	wellKnown     WellKnownConfig
 }
 
 // Option configures a Router at construction time.
@@ -110,6 +113,13 @@ func WithVersion(v string) Option {
 	}
 }
 
+// WithWellKnown configures the GET /.well-known/opencode endpoint. An empty
+// ProviderID leaves the handler returning 404 (the default), so the router
+// can be deployed before the OpenCode well-known URL is decided.
+func WithWellKnown(cfg WellKnownConfig) Option {
+	return func(r *Router) { r.wellKnown = cfg }
+}
+
 // New constructs a Router bound to the given registry. The routable model set
 // is computed once from the configured mode — reload the process to pick up a
 // changed models.yaml (matching the Python proxy's load-time behaviour).
@@ -152,6 +162,7 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", rt.handleModels)
 	mux.HandleFunc("GET /health", rt.handleHealth)
 	mux.Handle("GET /metrics", rt.metrics.Handler())
+	mux.HandleFunc("GET /.well-known/opencode", rt.handleWellKnown)
 	return mux
 }
 
