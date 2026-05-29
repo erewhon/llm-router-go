@@ -342,20 +342,47 @@ no intermediate `generate_config` step needed.
       `qwen3.5-122b-a10b`, `research` as `nemotron-3-super`, both returning 200
       from the real backends.
 
-#### Phase 3b — remaining endpoints + logging
+#### Phase 3b.i — remaining OpenAI endpoints (done)
 
-- [ ] Remaining OpenAI endpoints: `/v1/completions`, `/v1/embeddings`,
-      `/v1/rerank`. The reverse-proxy is already path-generic, so this is mostly
-      mux wiring plus per-`api_class` resolve checks.
-- [ ] Request logging to Postgres — **DECIDED (2026-05-26): a fresh, simpler
-      schema**, not LiteLLM's. Define the minimal table(s) we actually query
-      (request/response, model, tokens, latency, status).
-- [ ] Mode tags (`mode:big`, `mode:default`) — load-time filtering is done
-      (`--mode`); surface it to the dashboard and document the reload story.
+- [x] `handleChat` refactored into a generic `handleProxy(requireClass, forceDirect)`
+      factory; `Handler()` registers `/v1/chat/completions`, `/v1/completions`,
+      `/v1/embeddings`, and `/v1/rerank` against it.
+- [x] Per-endpoint **api_class enforcement**: requests with a mismatched
+      `api_class` get 400 with a class-mismatch message; the upstream is not hit.
+- [x] **Tool-proxy bypass** for `/v1/completions`, `/v1/embeddings`, `/v1/rerank`
+      via a `forceDirect` override that beats both the model's `tool_proxy` flag
+      and any per-alias override (the tool proxy serves only chat-completions).
+- [x] 7 new tests (resolve forceDirect + api_class surfacing + 5 handler tests)
+      bring the package to 25 tests; full suite `-race` green.
+- [x] Smoke-tested live: `/v1/embeddings` (qwen3-embedding on OpenArc) returned a
+      2560-dim vector; `/v1/rerank` (qwen3-reranker) returned scored docs
+      (bypassing LiteLLM's "Unsupported provider" bug on rerank); class-mismatch
+      returns 400 both ways; `/v1/completions` for `research`
+      (a `tool_proxy:true` model) correctly bypassed the tool proxy and went
+      direct to archimedes:5391 with the bare hf_repo.
+
+#### Phase 3b.ii — request logging to Postgres
+
+- [ ] Fresh, simpler schema (**DECIDED 2026-05-26**, not LiteLLM's): minimum is
+      request_id, ts, method/path, model (incoming + backend), backend_url,
+      status, latency_ms, prompt/completion tokens. Bootstrap-on-startup
+      (`CREATE TABLE IF NOT EXISTS`).
+- [ ] Capture hook in the proxy path; token usage parsed from non-streaming
+      responses; SSE captures token totals from the final `usage` chunk where
+      available.
+- [ ] `--postgres-dsn` flag (off when empty — logging is opt-in for dev runs).
+
+#### Phase 3b.iii — observability + dashboard
+
+- [ ] `/metrics` (Prometheus) — match the node-agent's reexport pattern.
 - [ ] Health-check endpoints for the dashboard.
+- [ ] Mode tags surfaced to the dashboard (load-time filtering already done via
+      `--mode`); document the reload story.
+
+#### Phase 3b.iv — well-known
+
 - [ ] `/.well-known/opencode` endpoint (replace the
       `opencode-wellknown` systemd unit at `:4012`).
-- [ ] `/metrics` (Prometheus) — match the node-agent's reexport.
 
 **Cutover criterion**: parallel run on `:4015` for 48h, dashboard +
 opencode clients pointed at it, no observed regressions.

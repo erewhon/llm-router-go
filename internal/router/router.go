@@ -8,10 +8,12 @@
 //   - external models        -> their api_base, with the resolved api_key
 //   - everything else (local) -> the model's node backend (SGLang/vLLM)
 //
-// Phase 3a wires /v1/chat/completions, /v1/models, and /health. The remaining
-// endpoint families (/v1/completions, /v1/embeddings, /v1/rerank), Postgres
-// request logging, mode-aware dashboards, and the /.well-known/opencode handler
-// land in later 3.x steps (see docs/PLAN.md).
+// Phase 3a wired /v1/chat/completions, /v1/models, and /health. Phase 3b.i
+// added /v1/completions, /v1/embeddings, and /v1/rerank with per-endpoint
+// api_class enforcement and tool-proxy bypass for the non-chat endpoints (the
+// tool proxy serves only chat-completions). Postgres request logging,
+// /metrics, mode-aware dashboards, and the /.well-known/opencode handler land
+// in later 3b.x steps (see docs/PLAN.md).
 package router
 
 import (
@@ -97,54 +99,81 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 // (RequestID, AccessLog, Recover) in main.
 func (rt *Router) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", rt.handleChat)
+	// Chat-completions respects tool_proxy routing (the tool loop applies).
+	mux.HandleFunc("POST /v1/chat/completions", rt.handleProxy(config.APIClassChat, false))
+	// /v1/completions speaks the same chat models but bypasses the tool proxy
+	// (no tools/reasoning on plain text completion; the proxy doesn't serve
+	// this path anyway).
+	mux.HandleFunc("POST /v1/completions", rt.handleProxy(config.APIClassChat, true))
+	// Embeddings + rerank bypass the tool proxy and require their own classes.
+	mux.HandleFunc("POST /v1/embeddings", rt.handleProxy(config.APIClassEmbeddings, true))
+	mux.HandleFunc("POST /v1/rerank", rt.handleProxy(config.APIClassRerank, true))
+
 	mux.HandleFunc("GET /v1/models", rt.handleModels)
 	mux.HandleFunc("GET /health", rt.handleHealth)
 	return mux
 }
 
 // ---------------------------------------------------------------------------
-// /v1/chat/completions — resolve, rewrite the model field, reverse-proxy.
+// Generic POST handler — resolve, enforce api_class, rewrite model, forward.
 // ---------------------------------------------------------------------------
 
-func (rt *Router) handleChat(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
+// handleProxy returns a handler that resolves the request's model under the
+// given constraints and reverse-proxies the (model-rewritten) body upstream.
+//
+//   - requireClass: the model's api_class must match exactly; "" disables the
+//     check (currently every endpoint passes a concrete class).
+//   - forceDirect: bypass tool-proxy routing — set for endpoints the tool
+//     proxy doesn't implement (/v1/completions, /v1/embeddings, /v1/rerank).
+func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
-	var bodyMap map[string]any
-	if err := json.Unmarshal(body, &bodyMap); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
+		var bodyMap map[string]any
+		if err := json.Unmarshal(body, &bodyMap); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
-	model, _ := bodyMap["model"].(string)
-	if model == "" {
-		http.Error(w, `missing "model" field`, http.StatusBadRequest)
-		return
-	}
+		model, _ := bodyMap["model"].(string)
+		if model == "" {
+			http.Error(w, `missing "model" field`, http.StatusBadRequest)
+			return
+		}
 
-	res, err := rt.resolveModel(model)
-	if err != nil {
-		rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
+		res, err := rt.resolveModel(model, forceDirect)
+		if err != nil {
+			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 
-	bodyMap["model"] = res.BackendModel
-	newBody, err := json.Marshal(bodyMap)
-	if err != nil {
-		http.Error(w, "re-encode body: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+		if requireClass != "" && res.APIClass != requireClass {
+			rt.logger.WarnContext(r.Context(), "api_class mismatch",
+				"model", model, "got", string(res.APIClass), "want", string(requireClass), "path", r.URL.Path)
+			http.Error(w, fmt.Sprintf("model %q has api_class %q; %s requires %q",
+				model, res.APIClass, r.URL.Path, requireClass), http.StatusBadRequest)
+			return
+		}
 
-	rt.logger.InfoContext(r.Context(), "forwarding",
-		"model", model, "backend_model", res.BackendModel,
-		"backend_url", res.BackendURL, "resolved_via", res.ModelID,
-		"via_tool_proxy", res.ViaToolProxy)
-	rt.reverseProxyTo(w, r, res.BackendURL, newBody, res.AuthBearer)
+		bodyMap["model"] = res.BackendModel
+		newBody, err := json.Marshal(bodyMap)
+		if err != nil {
+			http.Error(w, "re-encode body: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		rt.logger.InfoContext(r.Context(), "forwarding",
+			"path", r.URL.Path,
+			"model", model, "backend_model", res.BackendModel,
+			"backend_url", res.BackendURL, "resolved_via", res.ModelID,
+			"via_tool_proxy", res.ViaToolProxy)
+		rt.reverseProxyTo(w, r, res.BackendURL, newBody, res.AuthBearer)
+	}
 }
 
 // reverseProxyTo forwards the request to backendRoot (a base URL with the

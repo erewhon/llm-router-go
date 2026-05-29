@@ -76,6 +76,21 @@ models:
     backend: vllm
     node: archimedes
     tags: [mode:big]
+
+  # embedding-class model (OpenArc-style on /v1)
+  qwen3-embedding:
+    hf_repo: Qwen/Qwen3-Embedding-4B
+    backend: external
+    api_base: http://euclid.local:5404/v1
+    api_class: embeddings
+    aliases: [embedding]
+
+  # rerank-class model
+  qwen3-reranker:
+    hf_repo: Qwen/Qwen3-Reranker-4B
+    backend: external
+    api_base: http://euclid.local:5404/v1
+    api_class: rerank
 `
 
 func testRegistry(t *testing.T) *config.ModelRegistry {
@@ -366,5 +381,118 @@ func TestChat_UpstreamUnreachableIs502(t *testing.T) {
 	rt.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3b.i — /v1/completions, /v1/embeddings, /v1/rerank
+// ---------------------------------------------------------------------------
+
+func postTo(t *testing.T, rt *Router, path, jsonBody string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	rt.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestEmbeddings_RoutesWithHFRepo(t *testing.T) {
+	var path string
+	var body map[string]any
+	up := captureUpstream(t, &path, &body, nil)
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	rec := postTo(t, rt, "/v1/embeddings",
+		`{"model":"embedding","input":"hello world"}`) // alias of qwen3-embedding
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if path != "/v1/embeddings" {
+		t.Errorf("upstream path = %q, want /v1/embeddings", path)
+	}
+	if body["model"] != "Qwen/Qwen3-Embedding-4B" {
+		t.Errorf("upstream model = %v, want bare hf_repo", body["model"])
+	}
+	if body["input"] != "hello world" {
+		t.Errorf("input field not preserved: %v", body["input"])
+	}
+}
+
+func TestRerank_RoutesWithHFRepo(t *testing.T) {
+	var path string
+	var body map[string]any
+	up := captureUpstream(t, &path, &body, nil)
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	rec := postTo(t, rt, "/v1/rerank",
+		`{"model":"qwen3-reranker","query":"q","documents":["a","b"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if path != "/v1/rerank" {
+		t.Errorf("upstream path = %q, want /v1/rerank", path)
+	}
+	if body["model"] != "Qwen/Qwen3-Reranker-4B" {
+		t.Errorf("upstream model = %v, want bare hf_repo", body["model"])
+	}
+}
+
+// /v1/completions on a tool_proxy:true model must bypass the tool proxy
+// (the proxy doesn't serve that path) and forward the bare hf_repo direct
+// to the node backend.
+func TestCompletions_BypassesToolProxy(t *testing.T) {
+	var path string
+	var body map[string]any
+	up := captureUpstream(t, &path, &body, nil)
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	rec := postTo(t, rt, "/v1/completions",
+		`{"model":"research","prompt":"hello"}`) // alias of nemotron-3-super (tool_proxy:true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if path != "/v1/completions" {
+		t.Errorf("upstream path = %q, want /v1/completions", path)
+	}
+	// hf_repo, NOT the model_id — forceDirect produces the same body shape as
+	// a direct local model.
+	if body["model"] != "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" {
+		t.Errorf("upstream model = %v, want bare hf_repo (bypassed tool proxy)", body["model"])
+	}
+}
+
+// Calling a non-chat endpoint with a chat model returns 400 with a clear
+// class-mismatch message — and the body is NOT forwarded upstream.
+func TestEmbeddings_RejectsChatModel(t *testing.T) {
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+	}))
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	rec := postTo(t, rt, "/v1/embeddings", `{"model":"coder","input":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "api_class") {
+		t.Errorf("error message doesn't mention api_class: %s", rec.Body.String())
+	}
+	if calls != 0 {
+		t.Errorf("upstream received %d calls, want 0 (request must be rejected before forwarding)", calls)
+	}
+}
+
+// Symmetric: calling /v1/chat/completions with an embedding-class model.
+func TestChat_RejectsEmbeddingModel(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"qwen3-embedding","messages":[]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }

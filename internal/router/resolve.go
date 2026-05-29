@@ -38,7 +38,12 @@ type resolveResult struct {
 //
 // Only models routable in the current mode are considered. A leading "openai/"
 // prefix (which some clients/LiteLLM add) is stripped before matching.
-func (rt *Router) resolveModel(model string) (resolveResult, error) {
+//
+// forceDirect short-circuits tool-proxy routing: pass true for endpoints the
+// tool proxy doesn't implement (/v1/completions, /v1/embeddings, /v1/rerank)
+// so the request goes straight to the node backend regardless of the model's
+// tool_proxy flag or per-alias override. /v1/chat/completions passes false.
+func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, error) {
 	if rt.registry == nil {
 		return resolveResult{}, fmt.Errorf("router: nil registry")
 	}
@@ -49,28 +54,34 @@ func (rt *Router) resolveModel(model string) (resolveResult, error) {
 	want := strings.TrimPrefix(model, "openai/")
 
 	if m, ok := rt.active[want]; ok {
-		return rt.buildResult(want, m, "", model)
+		return rt.buildResult(want, m, "", model, forceDirect)
 	}
 	for id, m := range rt.active {
 		hfBase := strings.SplitN(m.HFRepo, "#", 2)[0]
 		if hfBase == want || m.HFRepo == want {
-			return rt.buildResult(id, m, "", model)
+			return rt.buildResult(id, m, "", model, forceDirect)
 		}
 		for _, a := range m.Aliases {
 			if a == want {
-				return rt.buildResult(id, m, a, model)
+				return rt.buildResult(id, m, a, model, forceDirect)
 			}
 		}
 	}
 	return resolveResult{}, fmt.Errorf("router: unknown model %q", model)
 }
 
-// buildResult assembles the forwarding decision for a matched model. matchedAlias
-// is the alias the caller used (or ""), so per-alias tool_proxy overrides apply.
-func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias, original string) (resolveResult, error) {
-	// An alias may opt in/out of tool-proxy routing independently of its model.
+// buildResult assembles the forwarding decision for a matched model.
+// matchedAlias is the alias the caller used (or ""), so per-alias tool_proxy
+// overrides apply. forceDirect (set by non-chat endpoints) trumps both the
+// model's tool_proxy flag and any alias override.
+func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias, original string, forceDirect bool) (resolveResult, error) {
+	// Override precedence: forceDirect (endpoint) > alias override > model default.
 	var override *bool
-	if matchedAlias != "" {
+	switch {
+	case forceDirect:
+		f := false
+		override = &f
+	case matchedAlias != "":
 		if ov, ok := m.AliasOverrides[matchedAlias]; ok && ov.ToolProxy != nil {
 			override = ov.ToolProxy
 		}

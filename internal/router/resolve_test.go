@@ -88,7 +88,7 @@ func TestResolveModel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := rt.resolveModel(tc.model)
+			res, err := rt.resolveModel(tc.model, false)
 			if err != nil {
 				t.Fatalf("resolveModel(%q): %v", tc.model, err)
 			}
@@ -114,7 +114,7 @@ func TestResolveModel(t *testing.T) {
 func TestResolveModel_Errors(t *testing.T) {
 	rt := newTestRouter(t, nil)
 	for _, model := range []string{"", "nonexistent", "ghost-disabled"} {
-		if _, err := rt.resolveModel(model); err == nil {
+		if _, err := rt.resolveModel(model, false); err == nil {
 			t.Errorf("resolveModel(%q) = nil error, want error", model)
 		}
 	}
@@ -122,11 +122,69 @@ func TestResolveModel_Errors(t *testing.T) {
 
 func TestResolveModel_ModeExcludesOtherMode(t *testing.T) {
 	rt := newTestRouter(t, nil, WithMode("default"))
-	if _, err := rt.resolveModel("big-only"); err == nil {
+	if _, err := rt.resolveModel("big-only", false); err == nil {
 		t.Errorf("mode=default: resolveModel(big-only) should fail (mode:big excluded)")
 	}
 	// A normal untagged model still resolves under mode=default.
-	if _, err := rt.resolveModel("coder"); err != nil {
+	if _, err := rt.resolveModel("coder", false); err != nil {
 		t.Errorf("mode=default: resolveModel(coder) failed: %v", err)
+	}
+}
+
+// forceDirect must bypass tool-proxy routing even for a tool_proxy:true model
+// — this is what the /v1/completions, /v1/embeddings, /v1/rerank handlers
+// pass, since the tool proxy doesn't serve those paths.
+func TestResolveModel_ForceDirectBypassesToolProxy(t *testing.T) {
+	rt := newTestRouter(t, nil)
+
+	// chat-style routing: research -> nemotron via the tool proxy with model_id.
+	chat, err := rt.resolveModel("research", false)
+	if err != nil {
+		t.Fatalf("chat resolve: %v", err)
+	}
+	if !chat.ViaToolProxy || chat.BackendURL != "http://192.168.42.240:5392" {
+		t.Errorf("chat path should go via tool proxy, got url=%q via=%v",
+			chat.BackendURL, chat.ViaToolProxy)
+	}
+	if chat.BackendModel != "nemotron-3-super" {
+		t.Errorf("chat path should send model_id; got %q", chat.BackendModel)
+	}
+
+	// forceDirect=true: same model, but straight to the node backend with the
+	// bare hf_repo — exactly what /v1/completions should produce.
+	direct, err := rt.resolveModel("research", true)
+	if err != nil {
+		t.Fatalf("forceDirect resolve: %v", err)
+	}
+	if direct.ViaToolProxy {
+		t.Errorf("forceDirect should bypass tool proxy, but ViaToolProxy=true")
+	}
+	if direct.BackendURL != "http://archimedes.local:5391" {
+		t.Errorf("forceDirect BackendURL = %q, want http://archimedes.local:5391", direct.BackendURL)
+	}
+	if direct.BackendModel != "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4" {
+		t.Errorf("forceDirect BackendModel = %q, want hf_repo", direct.BackendModel)
+	}
+}
+
+// /v1/embeddings + /v1/rerank routing depends on api_class being surfaced.
+func TestResolveModel_APIClassSurfaced(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	for _, tc := range []struct {
+		model string
+		want  config.APIClass
+	}{
+		{"qwen3-embedding", config.APIClassEmbeddings},
+		{"embedding", config.APIClassEmbeddings}, // alias
+		{"qwen3-reranker", config.APIClassRerank},
+		{"coder", config.APIClassChat}, // default
+	} {
+		res, err := rt.resolveModel(tc.model, true)
+		if err != nil {
+			t.Fatalf("resolveModel(%q): %v", tc.model, err)
+		}
+		if res.APIClass != tc.want {
+			t.Errorf("%s api_class = %q, want %q", tc.model, res.APIClass, tc.want)
+		}
 	}
 }
