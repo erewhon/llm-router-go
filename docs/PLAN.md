@@ -163,7 +163,17 @@ Goal: drop-in replacement for the FastAPI node agent, deployed
       omitted instead of `null` (semantically equivalent).
 - [x] Memory footprint: Go agent ~4.5 MB resident vs Python's ~217 MB
       (48× less).
-- [ ] Shadow deploy on hypatia, delphi, euclid (same script).
+- [x] **Shadow deploy on hypatia** (`:8101`, version `18b3da3`, 2026-05-29):
+      `/health` exact match on total_vram/disk/gpu_busy/running_models/
+      gpu_type; free_vram differs by ~12MB (snapshot timing). `/models`
+      perfect match — both report 2 models with identical states and
+      identical `total_requests=1828` (both agents scrape the same SGLang).
+      Known stub: services entries show `reachable:false` for ComfyUI vs
+      Python's `true` (the Go agent's service-probe code is marked "later
+      phase"). Memory: ~14MB resident vs Python's ~187MB (~13× less). 24h
+      watch in progress before enable-on-boot.
+- [ ] Shadow deploy on delphi, euclid (same script). Delphi gated on the
+      llamacpp driver (UI-TARS is a systemd unit, not Docker).
 - [ ] Enable on boot once parity is observed for 24h on each node:
       `sudo systemctl enable llm-router-go-agent`.
 
@@ -463,6 +473,38 @@ published), a dedicated container, or somewhere else.
 
 **Cutover criterion**: parallel run on `:4015` for 48h, dashboard +
 opencode clients pointed at it, no observed regressions.
+
+#### Phase 3 — HARD CUTOVER done 2026-06-06
+
+The 48h parallel-run was skipped in favor of a hard cutover (low-traffic
+Friday evening, "roll forward, can switch back"). Live on euclid:4010
+since ~13:30 CDT. LiteLLM (`litellm-proxy.service`) stopped + disabled.
+
+- Unit: `deploy/systemd/llm-router-go.service` — binds `:4010`, user
+  `llm-router`, `Conflicts=litellm-proxy.service` so the two can't fight.
+- Deploy script: `deploy/scripts/deploy-router.sh [--cutover]` — mirrors
+  the node-agent deploy, with an opt-in flag that performs the service
+  flip.
+- Build: **`CGO_ENABLED=1`** (not the usual static build). Pure-Go DNS
+  failed on euclid because systemd-resolved is active but does **not**
+  bind the loopback stub at `127.0.0.53:53` — NetBird is the only :53
+  listener and it's bound to the mesh IP. Cgo'd binary uses glibc → NSS
+  → avahi like everything else.
+- Sandbox: `SystemCallFilter` deliberately omitted (combined with
+  `RestrictAddressFamilies` it broke the resolver). Re-harden later with
+  a real backend probe in the test loop.
+- Started with **NopSink** (no Postgres reqlog). Add `--postgres-dsn`
+  once the Incus-VM Postgres lands.
+- Roll-forward gaps (logged, not blocking):
+  - `/v1/models` lists 28 canonical IDs only — aliases are resolved
+    during routing but NOT in the listing. LiteLLM expanded to 63.
+    `.well-known/opencode` still emits all 31 chat aliases so opencode
+    keeps working.
+  - `opencode-wellknown.service` on `:4012` is now redundant; harmless
+    but should be stopped + disabled.
+  - `dashboard.py` has a `:4010/ui` LiteLLM admin link that 404s.
+- Rollback: `just rollback-to-litellm` (in the Python repo's justfile).
+  LiteLLM is still installed, just disabled.
 
 ## Cross-cutting concerns
 

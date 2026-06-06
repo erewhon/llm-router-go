@@ -1,0 +1,100 @@
+# /etc/systemd/system/llm-router-go.service
+#
+# Go router (replacement for litellm-proxy). Binds :4010 — the port the
+# legacy LiteLLM proxy used — so client configs don't need to change at
+# cutover. To roll back:
+#     sudo systemctl stop llm-router-go
+#     sudo systemctl start litellm-proxy
+#
+# Install (typically driven by deploy/scripts/deploy-router.sh):
+#     sudo install -m 644 llm-router-go.service \
+#         /etc/systemd/system/llm-router-go.service
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now llm-router-go
+#
+# Requires the existing `llm-router` system user (created for the
+# Python agent: `useradd --system --shell /usr/sbin/nologin llm-router`).
+# Tonight starts with NopSink (no Postgres reqlog) — add --postgres-dsn
+# once the Incus-VM Postgres lands.
+
+[Unit]
+Description=LLM Router (Go) — OpenAI-compatible proxy
+After=network-online.target
+Wants=network-online.target
+# Don't fight with the LiteLLM unit. If it's enabled, this will block
+# until it stops; the deploy script disables litellm-proxy first.
+Conflicts=litellm-proxy.service
+
+[Service]
+Type=simple
+User=llm-router
+Group=llm-router
+
+ExecStart=/usr/local/bin/llm-router-go \
+    --addr=:4010 \
+    --models-yaml=/home/erewhon/Projects/erewhon/llm-router/models.yaml \
+    --mode=default \
+    --log-format=json \
+    --log-level=info \
+    --wellknown-provider-id=llm \
+    "--wellknown-provider-name=LLM Router" \
+    --wellknown-base-url=http://euclid.local:4010/v1 \
+    --wellknown-api-key=sk-litellm-master
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# --- State directories (systemd creates and chowns these) ---
+StateDirectory=llm-router-go
+RuntimeDirectory=llm-router-go
+
+# --- Filesystem sandboxing ---
+# Read-only /usr, /boot, /etc; writes only to StateDirectory/RuntimeDirectory.
+ProtectSystem=strict
+# Mask /home with a tmpfs, then bind-mount only what the binary needs.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/erewhon/Projects/erewhon/llm-router/models.yaml
+PrivateTmp=yes
+
+# --- Kernel protections ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# --- Capability and privilege restrictions ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- System call restrictions ---
+# NOTE: SystemCallFilter removed 2026-06-06 — combined with the AF_*
+# restriction below it broke Go's net resolver on systemd-resolved
+# (dial tcp: lookup *: read udp 127.0.0.1:*->127.0.0.53:53: connection refused).
+# Reintroduce carefully (test with a real backend call) if hardening matters.
+SystemCallArchitectures=native
+
+# --- Namespace and address restrictions ---
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# --- Memory ---
+LockPersonality=yes
+UMask=0077
+
+# --- Network: bound to LAN + Tailscale + NetBird IPs (no internet egress
+# needed; backends are LAN-direct, /metrics is scraped locally). Allow
+# 100.64.0.0/10 for Tailscale CGNAT space, 100.64.0.0/10 also covers
+# NetBird 100.64-100.127 range. ---
+# (No IPAddressAllow here — backends live on multiple network ranges
+# (192.168.42.0/24 LAN, eventually NetBird mesh). Filtering here would
+# break legitimate traffic. UFW on euclid scopes inbound :4010.)
+
+[Install]
+WantedBy=multi-user.target
