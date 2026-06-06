@@ -36,16 +36,18 @@ ExecStart=/usr/local/bin/llm-router-go \
     --mode=default \
     --log-format=json \
     --log-level=info \
-    --api-keys=sk-litellm-master \
     --wellknown-provider-id=llm \
     "--wellknown-provider-name=LLM Router" \
-    --wellknown-base-url=https://llm.bcc.sh/v1 \
-    --wellknown-api-key=sk-litellm-master
+    --wellknown-base-url=https://llm.bcc.sh/v1
 
-# NOTE on secret on the command line: `--api-keys=sk-...` is visible in
-# /proc/PID/cmdline and `ps`. Acceptable for now (matches the existing
-# `--wellknown-api-key` exposure). Future hardening: move both to an
-# EnvironmentFile via `ho secret get`.
+# Secrets land here from `ho secret get llm-router/api-key` via
+# deploy/scripts/deploy-router-secrets.sh. The `-` prefix makes the unit
+# start (with auth disabled, WARN logged) even if the file is missing —
+# better than failing closed when the env-file is the wrong shape.
+#
+#   ROUTER_API_KEYS=sk-...,sk-other-key       # comma-separated; gates /v1/*
+#   WELLKNOWN_API_KEY=sk-...                  # surfaced in /.well-known/opencode
+EnvironmentFile=-/etc/llm-router/proxy.env
 
 Restart=on-failure
 RestartSec=5

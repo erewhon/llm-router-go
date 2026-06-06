@@ -48,7 +48,10 @@ func run(args []string) int {
 
 		// API key auth. Empty list disables auth — anyone reachable can call
 		// /v1/*. /health, /metrics, /.well-known/opencode are always exempt.
-		apiKeys = fs.String("api-keys", "", `comma-separated bearer tokens accepted on /v1/*; empty disables auth (NOT recommended on shared networks)`)
+		// If --api-keys is empty, falls back to $ROUTER_API_KEYS (typical
+		// pattern: load that env var from systemd's EnvironmentFile so the
+		// key isn't visible in /proc/PID/cmdline).
+		apiKeys = fs.String("api-keys", "", `comma-separated bearer tokens accepted on /v1/*; empty falls back to $ROUTER_API_KEYS, then disables auth`)
 
 		showVer = fs.Bool("version", false, "print version and exit")
 	)
@@ -75,6 +78,15 @@ func run(args []string) int {
 	if err != nil {
 		logger.Error("load registry failed", "path", *modelsYAML, "err", err)
 		return 1
+	}
+
+	// Env-var fallback for secrets. Standard pattern: systemd ships them
+	// via EnvironmentFile so they don't appear in /proc/PID/cmdline. Flags
+	// still win if set, so dev/test runs are unaffected.
+	if *wellKnownAPIKey == "" {
+		if v := os.Getenv("WELLKNOWN_API_KEY"); v != "" {
+			*wellKnownAPIKey = v
+		}
 	}
 
 	routerOpts := []router.Option{
@@ -104,11 +116,19 @@ func run(args []string) int {
 
 	rt := router.New(registry, logger, routerOpts...)
 
-	authKeys := splitCSV(*apiKeys)
+	apiKeysSrc := *apiKeys
+	apiKeysFrom := "flag"
+	if apiKeysSrc == "" {
+		if v := os.Getenv("ROUTER_API_KEYS"); v != "" {
+			apiKeysSrc = v
+			apiKeysFrom = "env"
+		}
+	}
+	authKeys := splitCSV(apiKeysSrc)
 	if len(authKeys) == 0 {
-		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys to enable")
+		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys or $ROUTER_API_KEYS to enable")
 	} else {
-		logger.Info("API key auth enabled", "keys", len(authKeys))
+		logger.Info("API key auth enabled", "keys", len(authKeys), "source", apiKeysFrom)
 	}
 	authExempt := []string{"/health", "/metrics", "/.well-known/opencode"}
 

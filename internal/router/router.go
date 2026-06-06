@@ -34,6 +34,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
@@ -363,14 +364,39 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 		Data   []entry `json:"data"`
 	}
 
+	// Emit canonical IDs + all aliases as separate entries, matching the
+	// LiteLLM-era shape so client tools that enumerate /v1/models (rather
+	// than the well-known) see every routable name. Aliases share the
+	// canonical model's backend and api_class — they're routing handles,
+	// not separate models.
 	out := response{Object: "list"}
-	for id, m := range rt.active {
+	seen := make(map[string]struct{}, len(rt.active)*2)
+	add := func(id string, m config.ModelDefinition) {
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
 		out.Data = append(out.Data, entry{
 			ID:       id,
 			Object:   "model",
 			OwnedBy:  string(m.Backend),
 			APIClass: m.APIClass,
 		})
+	}
+	// Stable order: walk canonical IDs alphabetically, emit canonical
+	// before its aliases. Tests assert on presence not order, but stable
+	// ordering keeps diffs across deploys reviewable.
+	ids := make([]string, 0, len(rt.active))
+	for id := range rt.active {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		m := rt.active[id]
+		add(id, m)
+		for _, a := range m.Aliases {
+			add(a, m)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

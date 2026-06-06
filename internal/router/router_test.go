@@ -187,6 +187,23 @@ func TestModels_ListsActiveExcludesDisabled(t *testing.T) {
 	if got["ghost-disabled"] {
 		t.Errorf("disabled model leaked into /v1/models")
 	}
+	// Aliases must surface alongside canonical IDs (parity with LiteLLM):
+	// nemotron-3-super → thinker, research; qwen36-hypatia → coder, vision;
+	// zen-glm → glm; qwen3-embedding → embedding (the only non-chat alias).
+	for _, alias := range []string{"thinker", "research", "coder", "vision", "glm", "embedding"} {
+		if !got[alias] {
+			t.Errorf("alias %q missing from /v1/models", alias)
+		}
+	}
+	// Alias entries should mirror the backend/api_class of their canonical
+	// model. Spot-check `coder` (alias of qwen36-hypatia, chat-class).
+	for _, e := range resp.Data {
+		if e.ID == "coder" {
+			if e.APIClass != "chat" {
+				t.Errorf("alias 'coder' api_class = %q, want chat", e.APIClass)
+			}
+		}
+	}
 }
 
 func TestModels_ModeFilterExcludesOtherMode(t *testing.T) {
