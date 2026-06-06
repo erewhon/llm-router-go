@@ -8,24 +8,38 @@ import (
 	"testing"
 )
 
-// wellKnownResp mirrors the wire JSON for assertions.
+// wellKnownResp mirrors the wire JSON for assertions. As of the 2026-06-06
+// shape change the top-level keys are `auth` and `config`; `$schema` and
+// `provider` are nested under `config`. We expose them flattened here so
+// the existing assertions on `Schema` / `Provider` still work.
 type wellKnownResp struct {
-	Schema   string `json:"$schema"`
-	Provider map[string]struct {
-		NPM     string `json:"npm"`
-		Name    string `json:"name"`
-		Options struct {
-			BaseURL string `json:"baseURL"`
-			APIKey  string `json:"apiKey"`
-		} `json:"options"`
-		Models map[string]struct {
-			Name  string `json:"name"`
-			Limit struct {
-				Context int `json:"context"`
-				Output  int `json:"output"`
-			} `json:"limit"`
-		} `json:"models"`
-	} `json:"provider"`
+	Auth struct {
+		Command []string `json:"command"`
+		Env     string   `json:"env"`
+	} `json:"auth"`
+	Config struct {
+		Schema   string                       `json:"$schema"`
+		Provider map[string]wellKnownTestProv `json:"provider"`
+	} `json:"config"`
+}
+
+// Convenience accessors to keep older assertions compact.
+func (r *wellKnownResp) Schema() string                                 { return r.Config.Schema }
+func (r *wellKnownResp) Provider() map[string]wellKnownTestProv         { return r.Config.Provider }
+type wellKnownTestProv struct {
+	NPM     string `json:"npm"`
+	Name    string `json:"name"`
+	Options struct {
+		BaseURL string `json:"baseURL"`
+		APIKey  string `json:"apiKey"`
+	} `json:"options"`
+	Models map[string]struct {
+		Name  string `json:"name"`
+		Limit struct {
+			Context int `json:"context"`
+			Output  int `json:"output"`
+		} `json:"limit"`
+	} `json:"models"`
 }
 
 func getWellKnown(t *testing.T, rt *Router) *httptest.ResponseRecorder {
@@ -66,12 +80,12 @@ func TestWellKnown_EmitsAliasesForChatModelsOnly(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Schema != WellKnownSchemaURL {
-		t.Errorf("$schema = %q", resp.Schema)
+	if resp.Schema() != WellKnownSchemaURL {
+		t.Errorf("$schema = %q", resp.Schema())
 	}
-	llm, ok := resp.Provider["llm"]
+	llm, ok := resp.Provider()["llm"]
 	if !ok {
-		t.Fatalf("provider.llm missing; keys=%v", keysOf(resp.Provider))
+		t.Fatalf("provider.llm missing; keys=%v", keysOf(resp.Provider()))
 	}
 	if llm.NPM != "@ai-sdk/openai-compatible" || llm.Name != "Test Router" {
 		t.Errorf("provider scalar fields wrong: npm=%q name=%q", llm.NPM, llm.Name)
@@ -114,10 +128,54 @@ func TestWellKnown_ModeFiltersExcludeOtherModes(t *testing.T) {
 	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	// big-only carries `tags: [mode:big]` in testYAML; under mode=default it
 	// must not appear (even though it's chat-class).
-	for k := range resp.Provider["llm"].Models {
+	for k := range resp.Provider()["llm"].Models {
 		if k == "big-only" {
 			t.Errorf("mode=default leaked big-only into well-known")
 		}
+	}
+}
+
+func TestWellKnown_AuthBlock(t *testing.T) {
+	// 2026-06-06 regression: `opencode providers login` crashed with
+	// `undefined is not an object (evaluating 'u.auth.command')` because
+	// the doc emitted no top-level `auth` block. Lock in the shape.
+	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
+		ProviderID:   "llm",
+		ProviderName: "LLM",
+		BaseURL:      "https://example.test/v1",
+		APIKey:       "sk-secret",
+		AuthEnv:      "CUSTOM_ENV",
+	}))
+	rec := getWellKnown(t, rt)
+	var resp wellKnownResp
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, want := resp.Auth.Command, []string{"echo", "sk-secret"}; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("auth.command = %v, want %v", got, want)
+	}
+	if resp.Auth.Env != "CUSTOM_ENV" {
+		t.Errorf("auth.env = %q, want CUSTOM_ENV", resp.Auth.Env)
+	}
+}
+
+func TestWellKnown_AuthEnvDefaultsAndCommandOmittedWithoutKey(t *testing.T) {
+	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
+		ProviderID:   "llm",
+		ProviderName: "LLM",
+		BaseURL:      "https://example.test/v1",
+		// APIKey + AuthEnv empty
+	}))
+	rec := getWellKnown(t, rt)
+	var resp wellKnownResp
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Auth.Env != "LLM_ROUTER_API_KEY" {
+		t.Errorf("auth.env default = %q, want LLM_ROUTER_API_KEY", resp.Auth.Env)
+	}
+	if len(resp.Auth.Command) != 0 {
+		t.Errorf("auth.command should be empty when APIKey unset; got %v", resp.Auth.Command)
 	}
 }
 
@@ -146,7 +204,7 @@ func TestWellKnown_CustomLimitDefaults(t *testing.T) {
 	rec := getWellKnown(t, rt)
 	var resp wellKnownResp
 	_ = json.NewDecoder(rec.Body).Decode(&resp)
-	m := resp.Provider["llm"].Models["coder"]
+	m := resp.Provider()["llm"].Models["coder"]
 	if m.Limit.Context != 262144 || m.Limit.Output != 16384 {
 		t.Errorf("custom limits not propagated: %+v", m.Limit)
 	}

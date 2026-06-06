@@ -27,11 +27,15 @@ type WellKnownConfig struct {
 	// ProviderName is the human label shown in OpenCode (e.g. "LLM Router").
 	ProviderName string
 	// BaseURL is the OpenAI-compatible URL OpenCode will POST to (the
-	// router's public URL, e.g. https://llm.peacock-bramble.ts.net/v1).
+	// router's public URL, e.g. https://llm.bcc.sh/v1).
 	BaseURL string
 	// APIKey is the bearer OpenCode should send. Omitted from JSON when
 	// empty so OpenCode can prompt or fall back to its own auth flow.
 	APIKey string
+	// AuthEnv is the env-var name OpenCode sets to the fetched secret
+	// (the "env" field inside the top-level `auth` block). Empty defaults
+	// to "LLM_ROUTER_API_KEY".
+	AuthEnv string
 	// DefaultContext / DefaultOutput populate every emitted model's
 	// limit.{context, output}. Zero means use the schema-default
 	// (131072 / 32768, matching the existing static file in the
@@ -43,9 +47,26 @@ type WellKnownConfig struct {
 // configured reports whether the endpoint should serve.
 func (c WellKnownConfig) configured() bool { return c.ProviderID != "" }
 
-// wellKnownDoc is the wire shape. Field tags use exact OpenCode keys.
+// wellKnownDoc is the wire shape OpenCode CLI expects: a top-level `auth`
+// block (so `opencode providers login` finds `u.auth.command`) plus a
+// `config` block that nests the provider map. Earlier versions of this
+// file emitted just `{$schema, provider}` and broke `opencode providers
+// login` with `undefined is not an object (evaluating 'u.auth.command')`.
 type wellKnownDoc struct {
-	Schema   string                  `json:"$schema"`
+	Auth   wellKnownAuth   `json:"auth"`
+	Config wellKnownConfig `json:"config"`
+}
+
+type wellKnownAuth struct {
+	// Command opencode runs to fetch the secret. Conventionally
+	// ["echo", "<key>"] when the key is materialized server-side.
+	Command []string `json:"command"`
+	// Env is the env var name opencode sets to the fetched secret.
+	Env string `json:"env"`
+}
+
+type wellKnownConfig struct {
+	Schema   string                  `json:"$schema,omitempty"`
 	Provider map[string]wellKnownPrv `json:"provider"`
 }
 
@@ -104,17 +125,32 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 		}
 	}
 
+	authEnv := cfg.AuthEnv
+	if authEnv == "" {
+		authEnv = "LLM_ROUTER_API_KEY"
+	}
+	var authCmd []string
+	if cfg.APIKey != "" {
+		authCmd = []string{"echo", cfg.APIKey}
+	}
+
 	return wellKnownDoc{
-		Schema: WellKnownSchemaURL,
-		Provider: map[string]wellKnownPrv{
-			cfg.ProviderID: {
-				NPM:  "@ai-sdk/openai-compatible",
-				Name: cfg.ProviderName,
-				Options: wellKnownPrvOpts{
-					BaseURL: cfg.BaseURL,
-					APIKey:  cfg.APIKey,
+		Auth: wellKnownAuth{
+			Command: authCmd,
+			Env:     authEnv,
+		},
+		Config: wellKnownConfig{
+			Schema: WellKnownSchemaURL,
+			Provider: map[string]wellKnownPrv{
+				cfg.ProviderID: {
+					NPM:  "@ai-sdk/openai-compatible",
+					Name: cfg.ProviderName,
+					Options: wellKnownPrvOpts{
+						BaseURL: cfg.BaseURL,
+						APIKey:  cfg.APIKey,
+					},
+					Models: models,
 				},
-				Models: models,
 			},
 		},
 	}

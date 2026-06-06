@@ -36,10 +36,16 @@ ExecStart=/usr/local/bin/llm-router-go \
     --mode=default \
     --log-format=json \
     --log-level=info \
+    --api-keys=sk-litellm-master \
     --wellknown-provider-id=llm \
     "--wellknown-provider-name=LLM Router" \
-    --wellknown-base-url=http://euclid.local:4010/v1 \
+    --wellknown-base-url=https://llm.bcc.sh/v1 \
     --wellknown-api-key=sk-litellm-master
+
+# NOTE on secret on the command line: `--api-keys=sk-...` is visible in
+# /proc/PID/cmdline and `ps`. Acceptable for now (matches the existing
+# `--wellknown-api-key` exposure). Future hardening: move both to an
+# EnvironmentFile via `ho secret get`.
 
 Restart=on-failure
 RestartSec=5

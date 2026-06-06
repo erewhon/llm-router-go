@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,8 +43,12 @@ func run(args []string) int {
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
 		wellKnownProviderName = fs.String("wellknown-provider-name", "LLM Router", "human label OpenCode shows for the provider")
-		wellKnownBaseURL      = fs.String("wellknown-base-url", "", "public OpenAI-compatible URL OpenCode hits (e.g. https://llm.peacock-bramble.ts.net/v1)")
+		wellKnownBaseURL      = fs.String("wellknown-base-url", "", "public OpenAI-compatible URL OpenCode hits (e.g. https://llm.bcc.sh/v1)")
 		wellKnownAPIKey       = fs.String("wellknown-api-key", "", "bearer OpenCode should send; empty omits the apiKey field")
+
+		// API key auth. Empty list disables auth — anyone reachable can call
+		// /v1/*. /health, /metrics, /.well-known/opencode are always exempt.
+		apiKeys = fs.String("api-keys", "", `comma-separated bearer tokens accepted on /v1/*; empty disables auth (NOT recommended on shared networks)`)
 
 		showVer = fs.Bool("version", false, "print version and exit")
 	)
@@ -99,11 +104,20 @@ func run(args []string) int {
 
 	rt := router.New(registry, logger, routerOpts...)
 
+	authKeys := splitCSV(*apiKeys)
+	if len(authKeys) == 0 {
+		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys to enable")
+	} else {
+		logger.Info("API key auth enabled", "keys", len(authKeys))
+	}
+	authExempt := []string{"/health", "/metrics", "/.well-known/opencode"}
+
 	handler := httpx.Chain(
 		rt.Handler(),
 		httpx.RequestID,
 		httpx.AccessLog(logger),
 		httpx.Recover(logger),
+		router.RequireBearer(authKeys, authExempt),
 	)
 	srv := &http.Server{
 		Addr:              *addr,
@@ -123,4 +137,14 @@ func run(args []string) int {
 	}
 	logger.Info("shutdown complete")
 	return 0
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
