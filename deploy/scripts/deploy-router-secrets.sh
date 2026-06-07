@@ -22,6 +22,10 @@ set -euo pipefail
 
 HOST="${HOST:-euclid.local}"
 SECRET_NAME="${SECRET_NAME:-llm-router/api-key}"
+# Upstream OpenCode Zen API key — the router resolves the external Zen models'
+# `api_key: OPENCODE_ZEN_API_KEY` (env-var name) against this. Optional: if the
+# ref doesn't resolve, the line is omitted and Zen models 401.
+ZEN_SECRET_NAME="${ZEN_SECRET_NAME:-llm-router/opencode-zen-api-key}"
 HO="${HO:-/home/erewhon/.local/bin/ho}"
 
 if [[ ! -x "$HO" ]]; then
@@ -42,6 +46,11 @@ echo "==> Fetching $SECRET_NAME from ho..."
     printf 'WELLKNOWN_API_KEY='
     "$HO" secret get "$SECRET_NAME"
     echo
+    if zen=$("$HO" secret get "$ZEN_SECRET_NAME" 2>/dev/null) && [[ -n "$zen" ]]; then
+        printf 'OPENCODE_ZEN_API_KEY=%s\n' "$zen"
+    else
+        echo "deploy-router-secrets: WARN $ZEN_SECRET_NAME did not resolve; Zen models will 401" >&2
+    fi
 } > "$WORK/proxy.env"
 chmod 600 "$WORK/proxy.env"
 
