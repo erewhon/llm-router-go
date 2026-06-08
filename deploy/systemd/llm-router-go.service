@@ -14,12 +14,18 @@
 #
 # Requires the existing `llm-router` system user (created for the
 # Python agent: `useradd --system --shell /usr/sbin/nologin llm-router`).
-# Tonight starts with NopSink (no Postgres reqlog) — add --postgres-dsn
-# once the Incus-VM Postgres lands.
+# Request logging goes to the dedicated `llm-router-postgres` container
+# (postgres:17 on 127.0.0.1:5433) via --postgres-dsn=${ROUTER_PG_DSN}; the
+# DSN is materialized into proxy.env by deploy-router-secrets.sh from the
+# `ho secret llm-router/reqlog-pg-password`. Empty/unset → NopSink (no log).
 
 [Unit]
 Description=LLM Router (Go) — OpenAI-compatible proxy
-After=network-online.target
+# docker.service: the reqlog Postgres runs as the `llm-router-postgres`
+# container (--restart unless-stopped). Ordering after dockerd shrinks the
+# boot race; if the DB still isn't ready the router logs a WARN and runs
+# without reqlog (NopSink) — inference never blocks on the log DB.
+After=network-online.target docker.service
 Wants=network-online.target
 # Don't fight with the LiteLLM unit. If it's enabled, this will block
 # until it stops; the deploy script disables litellm-proxy first.
@@ -36,6 +42,7 @@ ExecStart=/usr/local/bin/llm-router-go \
     --mode=default \
     --log-format=json \
     --log-level=info \
+    --postgres-dsn=${ROUTER_PG_DSN} \
     --wellknown-provider-id=llm \
     "--wellknown-provider-name=LLM Router" \
     --wellknown-base-url=https://llm.bcc.sh/v1
@@ -47,6 +54,8 @@ ExecStart=/usr/local/bin/llm-router-go \
 #
 #   ROUTER_API_KEYS=sk-...,sk-other-key       # comma-separated; gates /v1/*
 #   WELLKNOWN_API_KEY=sk-...                  # surfaced in /.well-known/opencode
+#   OPENCODE_ZEN_API_KEY=...                  # upstream key for external Zen models
+#   ROUTER_PG_DSN=postgres://router:...@127.0.0.1:5433/router?sslmode=disable
 EnvironmentFile=-/etc/llm-router/proxy.env
 
 Restart=on-failure

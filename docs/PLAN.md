@@ -407,9 +407,12 @@ no intermediate `generate_config` step needed.
       prompt=0 with completion NULL (correctly distinguished); rerank logged
       0/NULL/0; class-mismatch logged status=400 with the error message.
 
-**Production-target decision (open):** which Postgres instance the deployed
-router logs to — the existing Supabase on euclid (`supabase-db`, not host-
-published), a dedicated container, or somewhere else.
+**Production target (decided 2026-06-07):** a dedicated `llm-router-postgres`
+container on euclid (`postgres:17-alpine`, `127.0.0.1:5433`, volume
+`llm-router-pgdata`, `--restart unless-stopped`). Picked over an Incus VM
+(Incus isn't installed on euclid) and over reusing `litellm-postgres` (we're
+retiring LiteLLM). The DSN flows via `ROUTER_PG_DSN` in `proxy.env`, assembled
+by `deploy-router-secrets.sh` from `ho secret llm-router/reqlog-pg-password`.
 
 #### Phase 3b.iii — observability + dashboard (done)
 
@@ -493,8 +496,10 @@ since ~13:30 CDT. LiteLLM (`litellm-proxy.service`) stopped + disabled.
 - Sandbox: `SystemCallFilter` deliberately omitted (combined with
   `RestrictAddressFamilies` it broke the resolver). Re-harden later with
   a real backend probe in the test loop.
-- Started with **NopSink** (no Postgres reqlog). Add `--postgres-dsn`
-  once the Incus-VM Postgres lands.
+- Started with **NopSink**; reqlog wired to the dedicated `llm-router-postgres`
+  container 2026-06-07 (`--postgres-dsn=${ROUTER_PG_DSN}`). On a DB-unreachable
+  error the router logs a WARN and falls back to NopSink rather than exiting, so
+  a log-DB outage never blocks inference.
 - Roll-forward gaps (logged, not blocking):
   - `/v1/models` lists 28 canonical IDs only — aliases are resolved
     during routing but NOT in the listing. LiteLLM expanded to 63.

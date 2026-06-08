@@ -105,12 +105,16 @@ func run(args []string) int {
 		ps, err := reqlog.NewPostgres(ctx, *postgresDSN, logger.With("subsys", "reqlog"))
 		cancel()
 		if err != nil {
-			logger.Error("reqlog postgres failed", "err", err, "dsn", reqlog.RedactDSN(*postgresDSN))
-			return 1
+			// Soft-fail: a request-log DB outage must never take down the
+			// proxy. Fall back to NopSink (sink is already NopSink) and run
+			// without logging — loudly, so the gap is visible in the journal.
+			logger.Warn("reqlog postgres unavailable; falling back to NopSink (requests will NOT be logged)",
+				"err", err, "dsn", reqlog.RedactDSN(*postgresDSN))
+		} else {
+			sink = ps
+			defer ps.Close()
+			logger.Info("reqlog enabled", "dsn", reqlog.RedactDSN(*postgresDSN))
 		}
-		sink = ps
-		defer ps.Close()
-		logger.Info("reqlog enabled", "dsn", reqlog.RedactDSN(*postgresDSN))
 	}
 	routerOpts = append(routerOpts, router.WithSink(sink))
 
