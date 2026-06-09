@@ -84,9 +84,15 @@ func run(args []string) int {
 		// GPU snapshot for /health. The vendor comes from the registry;
 		// the per-node vram_gb is used as a fallback when xpu-smi
 		// discovery can't determine total VRAM on Arc.
-		nodeagent.WithGPUReader(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
+		//
+		// Cached: the GPU probe is the one slow part of /health (Intel
+		// xpu-smi can take ~1.5s, right at the dashboard's 1.5s probe
+		// timeout). The cache runs it at most once per TTL and serves the
+		// last snapshot otherwise, so /health stays fast. Mirrors the
+		// Python agent's get_gpu_info_cached fix.
+		nodeagent.WithGPUReader(gpu.Cached(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
 			FallbackTotalVRAMGB: nodeDef.VRAMGB,
-		})),
+		}), 5*time.Second)),
 	)
 	if err != nil {
 		logger.Error("agent init failed", "node", *nodeName, "err", err)

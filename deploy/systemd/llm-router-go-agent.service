@@ -1,15 +1,17 @@
 # /etc/systemd/system/llm-router-go-agent.service
 #
-# Go rewrite of the LLM Router node agent. Shadow-runs alongside the
-# Python llm-router-agent service (port 8100) while we validate parity.
-# This unit listens on :8101.
+# Go rewrite of the LLM Router node agent — the production node agent on
+# :8100 since the 2026-06-08 cutover, replacing the Python
+# llm-router-agent.service. To roll back on a node:
+#     sudo systemctl stop llm-router-go-agent
+#     sudo systemctl disable llm-router-go-agent
+#     sudo systemctl enable --now llm-router-agent
 #
-# Install (typically driven by deploy/scripts/deploy-node-agent.sh):
+# Install + cut over (driven by deploy/scripts/deploy-node-agent.sh --cutover):
 #   sudo install -m 644 llm-router-go-agent.service \
 #       /etc/systemd/system/llm-router-go-agent.service
 #   sudo systemctl daemon-reload
-#   sudo systemctl start llm-router-go-agent   # one-shot
-#   sudo systemctl enable --now llm-router-go-agent  # on boot
+#   sudo systemctl enable --now llm-router-go-agent  # owns :8100, on boot
 #
 # Requires the existing `llm-router` system user (created for the
 # Python agent — `useradd --system --shell /usr/sbin/nologin llm-router`).
@@ -18,6 +20,9 @@
 Description=LLM Router Node Agent (Go rewrite)
 After=network-online.target
 Wants=network-online.target
+# Owns :8100 — must not run alongside the Python agent. Starting this
+# stops llm-router-agent; the deploy --cutover path also disables it.
+Conflicts=llm-router-agent.service
 
 [Service]
 Type=simple
@@ -25,7 +30,7 @@ User=llm-router
 Group=llm-router
 
 ExecStart=/usr/local/bin/llm-router-go-agent \
-    --addr=:8101 \
+    --addr=:8100 \
     --models-yaml=/home/erewhon/Projects/erewhon/llm-router/models.yaml \
     --log-format=json \
     --log-level=info
