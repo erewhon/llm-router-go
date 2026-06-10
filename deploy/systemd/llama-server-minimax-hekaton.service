@@ -1,0 +1,63 @@
+# /etc/systemd/system/llama-server-minimax.service
+#
+# Serves MiniMax M2.7 (Unsloth UD-Q4_K_XL GGUF, ~131 GiB) on hekaton — a
+# CPU-only node (4x Xeon E7-4850 v2, AVX1 only/no AVX2, 1.5 TB DDR3 across
+# 4 NUMA nodes). Exposes the OpenAI /v1 API + Prometheus /metrics on :5391,
+# probed by the Go node agent's vllm driver. The --alias MUST equal the
+# model's hf_repo in models.yaml (unsloth/MiniMax-M2.7-GGUF) so the agent
+# detects state=running.
+#
+# Measured on this CPU (2026-06-09, llama.cpp 76da245): decode ~2.8 tok/s,
+# prefill ~32 tok/s. Slow but functional. When hekaton gains a GPU
+# (planned RTX 6000 Ada / RTX 8000), add --n-gpu-layers plus -ot/--override-tensor
+# to keep attention + dense layers + as many experts as fit on the card.
+#
+# Install:
+#   sudo install -m644 llama-server-minimax-hekaton.service \
+#       /etc/systemd/system/llama-server-minimax.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now llama-server-minimax
+
+[Unit]
+Description=llama.cpp llama-server - MiniMax M2.7 (CPU, hekaton)
+# ZFS dataset /data/models must be mounted before we can read the weights.
+After=network-online.target zfs-mount.service local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=erewhon
+Group=erewhon
+# llama-server links the libggml*/libllama shared objects installed alongside
+# it; the install RPATH usually finds them, but set this defensively.
+Environment=LD_LIBRARY_PATH=/opt/llama-cpp/lib
+
+# --no-mmap loads the full 131 GiB into anonymous RAM at startup (~3-4 min
+# off the ZFS pool) for stable, fully-resident serving with no first-request
+# page-fault stalls. numactl --interleave=all stripes the weights across all
+# 4 NUMA nodes' memory controllers to spread the DDR3 bandwidth. 48 threads
+# = one per physical core (hyperthreads don't help bandwidth-bound decode).
+# --ctx-size = the model's full trained context (196608 / 192k); the KV cache
+# (~50 GB at full fill) is fine in 1.5 TB. --parallel 1 gives a single request
+# the entire window and serializes concurrency — sensible on a slow single-user
+# box (concurrent requests queue rather than fight over the unified KV pool).
+# Caveat: very long prompts still prefill slowly on CPU (~32 tok/s).
+ExecStart=/usr/bin/numactl --interleave=all /opt/llama-cpp/bin/llama-server \
+    --model /data/models/MiniMax-M2.7/UD-Q4_K_XL/MiniMax-M2.7-UD-Q4_K_XL-00001-of-00004.gguf \
+    --alias unsloth/MiniMax-M2.7-GGUF \
+    --host 0.0.0.0 --port 5391 \
+    --ctx-size 196608 \
+    --parallel 1 \
+    --threads 48 \
+    --no-mmap \
+    --jinja \
+    --metrics
+
+# The 131 GiB --no-mmap load is slow; don't let systemd flag it as a failure.
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -76,24 +76,35 @@ func run(args []string) int {
 	}
 
 	nodeDef := registry.Nodes[*nodeName]
-	agent, err := nodeagent.New(registry, *nodeName, logger, version,
+
+	opts := []nodeagent.Option{
 		// SGLang on the Sparks (and the legacy vLLM image) both advertise
 		// over the same OpenAI-shaped /v1/models + Prometheus /metrics
-		// protocol, so one driver covers BackendVLLM today.
+		// protocol, so one driver covers BackendVLLM today. llama.cpp's
+		// llama-server (e.g. hekaton's CPU-served MiniMax) speaks the same
+		// shape, so the same driver probes it.
 		nodeagent.WithBackend(config.BackendVLLM, sglang.New(*probeHost)),
-		// GPU snapshot for /health. The vendor comes from the registry;
-		// the per-node vram_gb is used as a fallback when xpu-smi
-		// discovery can't determine total VRAM on Arc.
-		//
-		// Cached: the GPU probe is the one slow part of /health (Intel
-		// xpu-smi can take ~1.5s, right at the dashboard's 1.5s probe
-		// timeout). The cache runs it at most once per TTL and serves the
-		// last snapshot otherwise, so /health stays fast. Mirrors the
-		// Python agent's get_gpu_info_cached fix.
-		nodeagent.WithGPUReader(gpu.Cached(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
+	}
+
+	// GPU snapshot for /health, installed only on nodes that actually have a
+	// GPU. A CPU-only node (gpu: none) gets no reader, so /health cleanly
+	// omits the gpu_* fields instead of erroring on every probe. When such a
+	// node gains a card, flip its models.yaml gpu: to the real vendor.
+	//
+	// The vendor comes from the registry; the per-node vram_gb is a fallback
+	// when xpu-smi discovery can't determine total VRAM on Arc.
+	//
+	// Cached: the GPU probe is the one slow part of /health (Intel xpu-smi can
+	// take ~1.5s, right at the dashboard's 1.5s probe timeout). The cache runs
+	// it at most once per TTL and serves the last snapshot otherwise, so
+	// /health stays fast. Mirrors the Python agent's get_gpu_info_cached fix.
+	if nodeDef.GPU != "" && nodeDef.GPU != config.GpuNone {
+		opts = append(opts, nodeagent.WithGPUReader(gpu.Cached(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
 			FallbackTotalVRAMGB: nodeDef.VRAMGB,
-		}), 5*time.Second)),
-	)
+		}), 5*time.Second)))
+	}
+
+	agent, err := nodeagent.New(registry, *nodeName, logger, version, opts...)
 	if err != nil {
 		logger.Error("agent init failed", "node", *nodeName, "err", err)
 		return 1

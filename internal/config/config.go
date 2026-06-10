@@ -43,6 +43,11 @@ const (
 	GpuAMD    GpuType = "amd"
 	GpuNvidia GpuType = "nvidia"
 	GpuIntel  GpuType = "intel"
+	// GpuNone marks a CPU-only node (no discrete GPU). The agent installs
+	// no GPU reader for it, so /health omits the gpu_* fields rather than
+	// erroring every probe. Flip to a real vendor when a card is added
+	// (e.g. hekaton's planned RTX 6000 Ada / RTX 8000).
+	GpuNone GpuType = "none"
 )
 
 type ServiceType string
