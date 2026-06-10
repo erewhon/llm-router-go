@@ -121,6 +121,14 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.DiskTotalGB = &total
 	}
 
+	// System RAM, reported by every node. On a CPU-only inference node
+	// (gpu: none, no gpuReader) this is the dashboard's primary memory
+	// signal in place of VRAM; on GPU nodes it's available but secondary.
+	if used, total, err := memUsageGB(""); err == nil {
+		resp.RAMUsedGB = &used
+		resp.RAMTotalGB = &total
+	}
+
 	if a.gpuReader != nil {
 		if info, err := a.gpuReader.Read(r.Context()); err == nil {
 			gt := string(info.GpuType)

@@ -27,6 +27,8 @@ type HealthResponse struct {
 	TotalVRAMGB   *float64        `json:"total_vram_gb,omitempty"`
 	FreeVRAMGB    *float64        `json:"free_vram_gb,omitempty"`
 	GPUBusyPct    *int            `json:"gpu_busy_pct,omitempty"`
+	RAMUsedGB     *float64        `json:"ram_used_gb,omitempty"`
+	RAMTotalGB    *float64        `json:"ram_total_gb,omitempty"`
 	DiskFreeGB    *float64        `json:"disk_free_gb,omitempty"`
 	DiskTotalGB   *float64        `json:"disk_total_gb,omitempty"`
 	RunningModels []string        `json:"running_models"`
