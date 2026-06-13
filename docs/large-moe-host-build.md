@@ -182,7 +182,66 @@ fits 512–576 GB). Active-param count drives decode — M3 (A23B) will be the
 *fastest* of the giants once it has GGUF support; Nemotron Ultra (A55B) the
 slowest. Kimi at Q4 is the only one that forces 768 GB.
 
+### Coding quality vs RAM — the buying lens
+
+Coding-benchmark scores map onto RAM tiers, so "how good at coding" and "how much
+RAM" are really the same decision. **Caveat:** vendor SWE-bench-Verified numbers
+use different agent scaffolds and aren't directly comparable; the open-weights
+~80% cluster is likely a *bigger* gap to Opus under a standardized harness (Scale
+SEAL), not the ~7-point headline.
+
+| Model (open weights) | SWE-bench Verified | Q4 RAM | Fits 576 GB hedge? |
+|---|---|---|---|
+| DeepSeek V3.2 (671B-A37B, MIT) | ~67–73% | ~380 GB | ✅ comfortable |
+| Qwen3-Coder-480B-A35B (Apache-2.0) | ~65–67% | ~270 GB | ✅ comfortable |
+| MiniMax M2.7 (230B, non-commercial) | ~78% *unconfirmed* (official SWE-Pro 56%) | ~140 GB | ✅ easy |
+| Kimi K2.6 (1T-A32B, mod-MIT) | ~80% (vendor) | ~550 GB | ⚠️ tight — wants 768 GB or Q3 |
+| DeepSeek V4 Pro (1.6T-A49B, MIT) | ~80% (aggregators) | ~800 GB+ | ❌ Tier C+ (768 GB–1 TB) |
+| *ref:* Claude Opus 4.7 / 4.8 | 87.6 / 88.6% (vendor, API-only) | — | not self-hostable |
+
+The knee: the **576 GB hedge comfortably runs the ~65–73% tier** (DeepSeek
+V3.2-671B, Qwen3-Coder-480B) — very good, self-hosted, ~10–20 *effective* points
+behind Opus. Chasing the **~80% open tier costs RAM** — Kimi K2.6 is borderline
+at Q4 (wants ~768 GB) and DeepSeek V4 Pro (1.6 T) is squarely 768 GB–1 TB. **No
+open model matches Opus 4.7/4.8 for hard agentic coding yet**; the choice is
+"very good + owned" vs "best + rented."
+
 ---
+
+## Aside — why not Intel (AMX)?
+
+Intel's **AMX** (Advanced Matrix Extensions, on Xeon Sapphire / Emerald /
+Granite Rapids) is a dedicated matrix engine ~3–8× AVX-512 for INT8/BF16 GEMM,
+and it powers KTransformers' headline numbers (DeepSeek on dual Sapphire + 4090:
+**prefill 185–286 t/s, decode ~13–16 t/s**). AMD has no equivalent. So why EPYC?
+
+Because the two phases bottleneck differently and AMX only helps one:
+- **Prefill (compute-bound): AMX wins.** If long-prompt / big-context ingestion
+  is your pain, Intel + KTransformers is genuinely faster here.
+- **Decode (bandwidth-bound): AMX adds nothing** — decode = bandwidth ÷
+  active-bytes/token, and the lever is memory *channels*:
+
+| Platform | channels | ~bandwidth | AMX | decode vs EPYC |
+|---|---|---|---|---|
+| Xeon Sapphire Rapids | 8 × DDR5-4800 | ~307 GB/s | ✅ | slower |
+| Xeon Emerald Rapids | 8 × DDR5-5600 | ~358 GB/s | ✅ | slower |
+| EPYC Genoa | 12 × DDR5-4800 | ~460 GB/s | ❌ | — |
+| EPYC Turin | 12 × DDR5-6000 | ~576 GB/s | ❌ | — |
+| Xeon Granite Rapids-AP | 12 × DDR5 / MRDIMM-8800 | ~615–840 GB/s | ✅ | faster (both) |
+
+So the affordable AMX boxes (Sapphire/Emerald Rapids) are **only 8-channel** →
+they *decode slower* than a 12-channel EPYC despite AMX; KTransformers' ~13–16
+t/s decode ≈ EPYC Turin + `ik_llama.cpp` (~15–22). The one Intel platform that
+truly beats EPYC on both is **Granite Rapids-AP (12-channel + MRDIMM-8800)** —
+also the **most expensive** option (top-bin Xeon + scarce, pricey MRDIMMs), so
+it loses on bang-for-buck. And AMX's payoff is locked to **KTransformers**, which
+is Intel-centric (no real AMD support) and more complex than `ik_llama.cpp`.
+
+**Verdict:** for value-driven hosting where interactive *decode* matters,
+12-channel EPYC ≥ 8-channel Sapphire/Emerald Rapids, and you recover much of
+AMX's prefill edge by offloading attention to the GPU anyway. Go Intel only if
+huge-prompt prefill is your top priority (Granite Rapids-AP, loose budget) or you
+specifically want to run KTransformers.
 
 ## The two builds (DeepSeek-671B target, 576 GB)
 
