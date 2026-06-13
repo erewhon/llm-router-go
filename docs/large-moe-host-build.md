@@ -231,11 +231,12 @@ costs *only the CPU swap*, no RAM re-buy. Lets you start at Value cost and reach
 No-compromise bandwidth when budget/need says so. (Pair with a 48 GB GPU now;
 add/upgrade GPU independently.)
 
-### Budget aside — DDR4 Milan (only if you must)
-2× EPYC 7713 + used SP3 board + 512 GB used DDR4 + RTX 3090 ≈ **$5–8k**, but
-**no AVX-512** (AVX2 `llama.cpp` only) and ~190 GB/s → **~6–8 t/s** hybrid and a
-dead-end socket. Cheapest way to run >256 GB *at all*, but it caps you below
-your ideal and has no upgrade path. Not recommended given your speed goal.
+### Budget alternative — DDR4 Milan (only if you must)
+EPYC 7713 + used SP3 board + 512 GB used DDR4 + RTX 3090 ≈ **$5–7k**, but
+**no AVX-512** (AVX2 only) and ~190 GB/s → **~6–8 t/s** hybrid, and a dead-end
+socket. Cheapest way to run >256 GB *at all*, but it caps you below your ideal
+and has no upgrade path. Fully specced below; not recommended given your speed
+goal.
 
 ---
 
@@ -267,6 +268,111 @@ Scope is set (DeepSeek-671B target, 576 GB, 15+ t/s ideal). What's left:
 
 Once you pick, next step is a finalized parts list with specific SKUs + a quick
 `ik_llama.cpp` launch-flag cheat-sheet for DeepSeek-671B on this box.
+
+## Finalized parts list — the hedge (buy now, Turin later)
+
+**Strategy:** buy the SP5 board + 576 GB of **DDR5-6000** RDIMMs + a 48 GB GPU
+now, paired with a **cheap, temporary Genoa CPU**. The 6000-speed RAM runs at
+4800 on Genoa today and unlocks its full ~570 GB/s the day you drop in a Turin
+CPU — so the bandwidth jump costs only a CPU swap, no RAM re-buy. Because the
+Genoa chip is a placeholder you'll replace, **buy the cheapest adequate one
+(used/QS is fine)** and recover most of its cost at resale.
+
+### Buy now (~$13–17k)
+
+| # | Part | Specific pick | Qty | ~Price | Notes |
+|---|---|---|---|---|---|
+| CPU (temp) | EPYC Genoa, single-socket | **EPYC 9354P** (32c) or used/QS **9334** (32c) | 1 | $1.5–3.0k | placeholder; 32c is plenty for decode. Buy cheap — you'll swap it. |
+| Board | Supermicro **H13SSL-N** | **rev 2.x, latest BIOS** (must support 9005/Turin) | 1 | $0.9–1.1k | 12 DIMM slots = all 12 channels. Confirm Turin on QVL before buying. |
+| RAM | **48 GB DDR5-6000 ECC RDIMM** (1DPC), board-QVL module | 12 | $6.5–9.0k | **fill all 12 channels.** 6000-rated so Turin later runs full speed; runs at 4800 on Genoa now. The cost driver. |
+| GPU | **NVIDIA RTX A6000 48 GB** (Ampere, passive blower, 300 W) | 1 | $3.0–3.8k | value 48 GB, server-friendly cooling. Alt: RTX 6000 Ada 48 GB (+FP8, ~$5.6k). |
+| PSU | 1.6 kW 80+ Platinum/Titanium | redundant or single | 1 | $0.3–0.5k | sized for a future 600 W 96 GB Blackwell GPU. |
+| Chassis | 4U rackmount (e.g. Supermicro CSE-846) **or** deep E-ATX/SSI-EEB tower w/ strong front-to-back airflow | 1 | $0.3–0.6k | passive A6000 needs chassis airflow. |
+| CPU cooler | **Arctic Freezer 4U-SP5** (air) or SP5 AIO | 1 | $0.06–0.15k | SP5 socket-specific. |
+| Storage | 2 TB (or 4 TB) Gen4 NVMe | 1–2 | $0.2–0.4k | DeepSeek-671B Q4 ≈ 380 GB; size for several models. |
+
+> **Sanity checks before ordering:** (1) RAM must be on the H13SSL-N QVL at
+> DDR5-6000 *and* validated for both 9004/9005; (2) confirm board rev/BIOS lists
+> EPYC 9005 (Turin) support; (3) 1DPC only — single-socket SP5 is 12 slots, one
+> DIMM per channel, so 12×48 GB is the max-bandwidth config.
+
+### Upgrade later (net ~$3–6k) → No-compromise
+
+| Swap | To | ~Price | Effect |
+|---|---|---|---|
+| CPU | **EPYC 9555 (64c)** value, or **9575F (64c, ~5 GHz)** for best prefill | $4–8k (− resale of the Genoa, ~$1.5–2.5k) | RAM jumps 4800→6000 (~440→~570 GB/s) → DeepSeek-671B **~10–15 → ~15–22 t/s** |
+| GPU (optional) | add/replace with **RTX PRO 6000 Blackwell 96 GB** | ~$8.5k | more experts resident → further decode bump |
+
+Board + RAM + PSU + chassis all carry over. No RAM re-buy — that's the whole point.
+
+### `ik_llama.cpp` launch cheat-sheet (DeepSeek-671B on this box)
+
+**Build (AVX-512 + CUDA):**
+```bash
+cmake -B build -DGGML_CUDA=ON -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON \
+      -DGGML_AVX512_BF16=ON -DGGML_SCHED_MAX_COPIES=1
+cmake --build build -j --config Release
+```
+
+**BIOS:** memory at rated speed (XMP/EXPO not used on RDIMM — set DDR5-6000/4800
+manually if needed); **NUMA Nodes Per Socket = NPS1**; SMT on; determinism =
+power/performance.
+
+**Run (single socket, experts in RAM, everything else on the 48 GB GPU):**
+```bash
+numactl -N 0 -m 0 \
+  ./build/bin/llama-server \
+    -m /models/DeepSeek-R1-Q4_K_M.gguf \
+    -ot exps=CPU \            # routed experts stay in RAM
+    -ngl 99 \                 # all non-expert layers (attn/dense/shared) -> GPU
+    -fmoe \                   # fused MoE dispatch
+    -mla 2 -fa \              # DeepSeek MLA + flash attn (KV fits 48 GB)
+    -c 32768 -t 32 \          # context; threads = physical cores on the node
+    -b 2048 -ub 512 \         # prefill batch tuning
+    --host 0.0.0.0 --port 5391 --alias deepseek-r1-local
+```
+
+Tuning notes: bump `-c` for longer context (MLA keeps KV small); add `-ser 7,1`
+to trade a little quality for ~10–30% more decode if you want; **do not** use
+`-rtr` in hybrid CPU+GPU mode (mis-places tensors). Verify the experts-on-CPU
+regex against the model's tensor names (`-ot "\.ffn_.*_exps\.=CPU"` is the
+explicit form). Confirm GGUF + arch support for the exact DeepSeek build before
+buying weights; M3/Nemotron-Ultra arch support is not there yet (see table).
+
+## Finalized parts list — budget (DDR4 Milan, just for comparison)
+
+Single-socket EPYC Milan. High core count to partly offset the lack of AVX-512.
+Fits DeepSeek-671B at Q4 (512 GB), but it's a **dead-end socket**, ~half the
+bandwidth of Genoa, and below the 15+ t/s ideal — included for reference.
+
+### Buy (~$5–7k, no later upgrade)
+
+| # | Part | Specific pick | Qty | ~Price | Notes |
+|---|---|---|---|---|---|
+| CPU | EPYC **7713** (64c Milan) or **7702** (64c Rome) | 1 | $0.5–0.9k | 64c helps offset AVX2-only kernels. Cheap used. |
+| Board | Supermicro **H12SSL-i** (SP3, 8 DIMM, PCIe 4) | 1 | $0.4–0.7k | single-socket, 8 channels. **Dead-end socket** — no Zen4/5. |
+| RAM | **64 GB DDR4-3200 ECC RDIMM** | 8 | $2.0–3.2k | 512 GB, fills all 8 channels. Used DDR4 ≈ $4–6/GB. |
+| GPU | **RTX 3090 24 GB** (used) | 1 | $0.7–1.0k | prefill win, few experts resident. Axial cooler → needs airflow. |
+| PSU | 1.0–1.2 kW 80+ Gold | 1 | $0.2–0.3k | 3090 350 W + EPYC ~225 W. |
+| Chassis | 4U or tower w/ front-to-back airflow | 1 | $0.3–0.5k | |
+| CPU cooler | SP3 cooler (Arctic Freezer 4U-SP3 / Noctua TR4-SP3) | 1 | $0.06–0.1k | |
+| Storage | 2 TB Gen4 NVMe | 1 | $0.15–0.3k | |
+| **Total** | | | | **~$5–7k** |
+
+**Performance / caveats:**
+- ~190 GB/s (8-ch DDR4-3200). **No AVX-512** → `ik_llama.cpp`/`llama.cpp` run on
+  AVX2 (Milan has AVX2+FMA) but **without the AVX-512 IQK fast kernels**, so
+  decode lands at plain-`llama.cpp` tier. DeepSeek-671B Q4 ≈ **~3–4 t/s CPU-only,
+  ~6–8 t/s with the 3090** (GPU does attention/dense; experts stream from DDR4).
+- **No upgrade path** (SP3 won't take Genoa/Turin) — the opposite of the hedge.
+- KTransformers technically meets its AVX2+FMA minimum here, but with no
+  AVX-512/AMX it gains nothing → still use `ik_llama.cpp`/`llama.cpp`.
+- **Build difference:** compile **without** `-DGGML_AVX512=ON` (AVX2 default);
+  launch flags otherwise same as the hedge cheat-sheet above.
+
+**vs. the hedge:** saves ~$8–10k up front but gives up ~2× decode bandwidth,
+the AVX-512 fast kernels, and any upgrade path. The hedge's extra cost is mostly
+DDR5 RAM — which, at 2026 prices, is exactly what you're paying a premium for.
 
 ## Sources
 
