@@ -42,6 +42,15 @@ func resolveModel(r *config.ModelRegistry, model string) (resolveResult, error) 
 	want := strings.TrimPrefix(model, "openai/")
 
 	for id, m := range r.Models {
+		// Disabled models aren't routable. Skipping them also disambiguates
+		// aliases shared between an enabled and a disabled model (e.g. an
+		// alias listed on both the live model and a kept-for-rollback one):
+		// without this, map iteration order could resolve to the disabled
+		// entry and misroute. (The router always sends a concrete model_id,
+		// so this mainly hardens direct/alias calls to the tool proxy.)
+		if !m.Enabled {
+			continue
+		}
 		hfBase := strings.SplitN(m.HFRepo, "#", 2)[0]
 		matched := id == want ||
 			hfBase == want ||
