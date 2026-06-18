@@ -1,0 +1,97 @@
+# /etc/systemd/system/llm-router-go-tool-proxy.service
+#
+# Go rewrite of the tool proxy (replacement for the Python
+# llm-router-tool-proxy.service). Serves OpenAI /v1/chat/completions, runs the
+# tool-execution loop (web_search, fetch_url, calculator), and redirects the
+# auto-router's resolved aliases back through the Go router.
+#
+# Cutover is a parallel-then-flip: this runs on :5393 alongside the Python
+# proxy on :5392, then the routers' --tool-proxy-url / $ROUTER_TOOL_PROXY_URL is
+# pointed at :5393. To roll back, unset that on the routers (→ default :5392)
+# and restart them; the Python unit stays installed and running.
+#
+# Install (driven by deploy/scripts/deploy-tool-proxy.sh):
+#   sudo install -m 644 llm-router-go-tool-proxy.service \
+#       /etc/systemd/system/llm-router-go-tool-proxy.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now llm-router-go-tool-proxy
+#
+# Outbound web-tool requests egress via the SOCKS5 VPN (svc-sys-research-vpn
+# nspawn at 192.168.42.219:1080). The auto-router's embedding client talks
+# DIRECTLY to the LAN embedder (euclid:5404), NOT through the VPN.
+
+[Unit]
+Description=LLM Router Tool Proxy (Go)
+After=network-online.target llm-router-go.service
+Wants=network-online.target
+# Don't fight with the Python tool-proxy unit — they bind different ports
+# (:5392 Python, :5393 Go), so they coexist during the cutover window.
+
+[Service]
+Type=simple
+User=llm-router
+Group=llm-router
+
+ExecStart=/usr/local/bin/llm-router-go-tool-proxy \
+    --addr=:5393 \
+    --models-yaml=/home/erewhon/Projects/erewhon/llm-router/models.yaml \
+    --log-format=json \
+    --log-level=info \
+    --proxy=socks5://192.168.42.219:1080 \
+    --embed-url=http://192.168.42.240:5404 \
+    --embed-model=qwen3-embedding-4b \
+    --litellm-url=http://127.0.0.1:4010
+
+# LITELLM_KEY (a valid ROUTER_API_KEY) lets the auto-router's redirect
+# authenticate to the Go router on :4010. TAVILY_API_KEY is intentionally
+# omitted to match the Python proxy (tavily_search stays unregistered). The
+# `-` prefix lets the unit start (auto-route 401s, normal models fine) if the
+# file is missing.
+#   LITELLM_KEY=sk-...
+EnvironmentFile=-/etc/llm-router/tool-proxy.env
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# --- State directories ---
+StateDirectory=llm-router-go-tool-proxy
+RuntimeDirectory=llm-router-go-tool-proxy
+
+# --- Filesystem sandboxing ---
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/erewhon/Projects/erewhon/llm-router/models.yaml
+PrivateTmp=yes
+
+# --- Kernel protections ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+# --- Capability and privilege restrictions ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# --- System call restrictions ---
+# SystemCallFilter omitted on purpose — see the router unit's note (it broke
+# Go's net resolver on systemd-resolved when combined with AF_* restriction).
+SystemCallArchitectures=native
+
+# --- Address families: needs AF_INET/6 for backends + SOCKS5 VPN, AF_UNIX +
+# AF_NETLINK for the Go runtime/resolver. ---
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# --- Memory ---
+LockPersonality=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
