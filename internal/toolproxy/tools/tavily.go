@@ -73,7 +73,7 @@ func tavily(client *http.Client, endpoint, apiKey string) Tool {
 			if depth != "basic" && depth != "advanced" {
 				return "Invalid arguments: search_depth must be basic or advanced"
 			}
-			return doTavily(ctx, client, endpoint, apiKey, args.Query, depth)
+			return doTavily(ctx, pickClient(ctx, client), endpoint, apiKey, args.Query, depth)
 		},
 	}
 }

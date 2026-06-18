@@ -62,7 +62,7 @@ func webSearch(client *http.Client, endpoint string) Tool {
 			if args.Query == "" {
 				return "Invalid arguments: empty query"
 			}
-			return doSearch(ctx, client, endpoint, args.Query)
+			return doSearch(ctx, pickClient(ctx, client), endpoint, args.Query)
 		},
 	}
 }

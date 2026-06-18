@@ -55,17 +55,9 @@ func NewHTTPClient(cfg HTTPClientConfig) (*http.Client, error) {
 	}
 
 	if cfg.SOCKS5 != "" {
-		host, err := parseSOCKS5(cfg.SOCKS5)
+		cd, err := NewSOCKS5Dialer(cfg.SOCKS5)
 		if err != nil {
 			return nil, err
-		}
-		dialer, err := proxy.SOCKS5("tcp", host, nil, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("tools: SOCKS5 dialer: %w", err)
-		}
-		cd, ok := dialer.(proxy.ContextDialer)
-		if !ok {
-			return nil, fmt.Errorf("tools: SOCKS5 dialer not context-aware")
 		}
 		transport.DialContext = cd.DialContext
 		// Disable HTTP env proxy when we already have an explicit SOCKS5
@@ -78,6 +70,35 @@ func NewHTTPClient(cfg HTTPClientConfig) (*http.Client, error) {
 		Transport: transport,
 		Timeout:   timeout,
 	}, nil
+}
+
+// Dialer is both a proxy.Dialer and a proxy.ContextDialer. golang.org/x/net's
+// SOCKS5 dialer satisfies both; the combined type lets callers use it as the
+// "forward" dialer for proxy.SOCKS5 (wants Dialer) AND for transport.DialContext
+// (wants ContextDialer) without re-asserting.
+type Dialer interface {
+	proxy.Dialer
+	proxy.ContextDialer
+}
+
+// NewSOCKS5Dialer builds a context-aware SOCKS5 dialer for the given proxy
+// address (forms accepted by parseSOCKS5). Used both for the tools' default
+// client and as the tunnel-entry "forward" dialer for per-request egress
+// selection (internal/toolproxy/egress).
+func NewSOCKS5Dialer(socks5 string) (Dialer, error) {
+	host, err := parseSOCKS5(socks5)
+	if err != nil {
+		return nil, err
+	}
+	dialer, err := proxy.SOCKS5("tcp", host, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("tools: SOCKS5 dialer: %w", err)
+	}
+	cd, ok := dialer.(Dialer)
+	if !ok {
+		return nil, fmt.Errorf("tools: SOCKS5 dialer not context-aware")
+	}
+	return cd, nil
 }
 
 // parseSOCKS5 accepts "host:port", "socks5://host:port", or

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/toolproxy/egress"
 	"github.com/erewhon/llm-router-go/internal/toolproxy/tools"
 )
 
@@ -39,6 +40,7 @@ type Proxy struct {
 	autoRouter     *AutoRouter
 	litellmURL     string
 	litellmKey     string
+	egress         *egress.Selector
 }
 
 // Option configures a Proxy at construction time.
@@ -104,6 +106,14 @@ func WithLiteLLM(url, key string) Option {
 		}
 		p.litellmKey = key
 	}
+}
+
+// WithEgress enables per-request VPN exit selection. When set, the proxy reads
+// the `X-Egress` header on tool-loop requests, resolves it to a Mullvad relay
+// SOCKS5 client, and routes that request's web tools through it. Nil (default)
+// leaves the tools on their single bound exit.
+func WithEgress(s *egress.Selector) Option {
+	return func(p *Proxy) { p.egress = s }
 }
 
 // New constructs a Proxy bound to the given registry.
@@ -212,6 +222,20 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		"model", model, "backend_model", res.BackendModel,
 		"backend_url", res.BackendURL, "resolved_via", res.ModelID,
 		"tools", len(allTools))
+
+	// Per-request VPN egress (X-Egress): resolve a client for the chosen exit
+	// and stash it in the request context for the web tools. Empty header or
+	// any resolution error falls back to the default exit (base client).
+	if p.egress != nil {
+		spec := r.Header.Get("X-Egress")
+		client, exit, err := p.egress.ClientFor(r.Context(), spec)
+		if err != nil {
+			p.logger.WarnContext(r.Context(), "egress select failed; using default exit",
+				"spec", spec, "err", err)
+		}
+		w.Header().Set("X-Egress-Exit", exit)
+		r = r.WithContext(tools.WithClient(r.Context(), client))
+	}
 
 	if stream, _ := bodyMap["stream"].(bool); stream {
 		p.runToolLoopStreaming(w, r, res, bodyMap, messages, allTools, toolChoice)

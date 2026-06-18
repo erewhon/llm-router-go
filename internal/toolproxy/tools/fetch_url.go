@@ -57,7 +57,7 @@ func FetchURL(client *http.Client) Tool {
 			if !strings.HasPrefix(args.URL, "http://") && !strings.HasPrefix(args.URL, "https://") {
 				return "Fetch failed: url must start with http:// or https://"
 			}
-			return doFetch(ctx, client, args.URL)
+			return doFetch(ctx, pickClient(ctx, client), args.URL)
 		},
 	}
 }

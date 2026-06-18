@@ -19,6 +19,7 @@ import (
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/toolproxy"
+	"github.com/erewhon/llm-router-go/internal/toolproxy/egress"
 	"github.com/erewhon/llm-router-go/internal/toolproxy/tools"
 )
 
@@ -47,7 +48,15 @@ func run(args []string) int {
 		embedTimeout   = fs.Duration("embed-timeout", 5*time.Second, "timeout for auto-router embedding requests")
 		litellmURL     = fs.String("litellm-url", "http://euclid.local:4010", "LiteLLM URL the auto-router redirects resolved aliases to")
 		litellmKey     = fs.String("litellm-key", "sk-litellm-master", "LiteLLM bearer key (falls back to LITELLM_KEY env)")
-		showVer        = fs.Bool("version", false, "print version and exit")
+
+		// Per-request VPN egress selection (X-Egress header). See
+		// docs/tool-proxy-egress.md. Inert unless a request sends the header.
+		egressEnabled    = fs.Bool("egress-enabled", true, "honour the X-Egress header to pick a Mullvad exit per request (needs --proxy)")
+		mullvadRelaysURL = fs.String("mullvad-relays-url", egress.DefaultRelaysURL, "Mullvad relay list URL (carries socks_name/socks_port)")
+		egressCacheTTL   = fs.Duration("egress-cache-ttl", time.Hour, "how long to cache the Mullvad relay list")
+		egressDefault    = fs.String("egress-default", "", "egress spec when a request sends no X-Egress (empty = current default exit)")
+
+		showVer = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -121,13 +130,44 @@ func run(args []string) int {
 	embedClient := &http.Client{Timeout: *embedTimeout}
 	autoRouter := toolproxy.NewAutoRouter(*embedURL, *embedModel, embedClient, logger, activeAliases)
 
-	proxy := toolproxy.New(registry, logger,
+	proxyOpts := []toolproxy.Option{
 		toolproxy.WithTools(reg),
 		toolproxy.WithMaxToolRounds(*maxToolRounds),
 		toolproxy.WithBackendTimeout(*backendTimeout),
 		toolproxy.WithAutoRouter(autoRouter),
 		toolproxy.WithLiteLLM(*litellmURL, litellmBearer),
-	)
+	}
+
+	// Per-request VPN egress: needs the SOCKS5 tunnel as the "forward" dialer.
+	// Inert until a request sends X-Egress (default exit = toolClient). The
+	// relay catalogue is fetched DIRECT (the public Mullvad API), not via VPN.
+	if *egressEnabled && *socksProxy != "" {
+		forward, derr := tools.NewSOCKS5Dialer(*socksProxy)
+		if derr != nil {
+			logger.Error("egress: build forward dialer failed", "proxy", *socksProxy, "err", derr)
+			return 1
+		}
+		cat := egress.NewCatalogue(egress.CatalogueConfig{
+			URL:    *mullvadRelaysURL,
+			TTL:    *egressCacheTTL,
+			Logger: logger.With("subsys", "egress"),
+		})
+		sel := egress.NewSelector(egress.Config{
+			Forward:       forward,
+			BaseClient:    toolClient,
+			Catalogue:     cat,
+			DefaultSpec:   *egressDefault,
+			ClientTimeout: *toolTimeout,
+			Logger:        logger.With("subsys", "egress"),
+		})
+		proxyOpts = append(proxyOpts, toolproxy.WithEgress(sel))
+		logger.Info("egress selection enabled", "relays_url", *mullvadRelaysURL,
+			"cache_ttl", egressCacheTTL.String(), "default", *egressDefault)
+	} else if *egressEnabled {
+		logger.Warn("egress selection requested but --proxy is empty; X-Egress will be ignored")
+	}
+
+	proxy := toolproxy.New(registry, logger, proxyOpts...)
 
 	handler := httpx.Chain(
 		proxy.Handler(),
