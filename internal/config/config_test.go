@@ -222,7 +222,7 @@ func TestAPIBase(t *testing.T) {
 		{"external returns api_base", "cloud-claude", nil, "https://opencode.ai/zen/v1"},
 		{"llamacpp custom port", "ui-tars", nil, "http://delphi.local:5400/v1"},
 		{"multi-node head=first", "qwen-disabled", boolPtr(false), "http://archimedes.local:5391/v1"},
-		{"tool_proxy redirects", "qwen-disabled", nil, ToolProxyAddr},
+		{"tool_proxy redirects", "qwen-disabled", nil, DefaultToolProxyAddr},
 		{"override disables tool_proxy", "qwen-disabled", boolPtr(false), "http://archimedes.local:5391/v1"},
 	}
 	for _, c := range cases {
@@ -235,6 +235,25 @@ func TestAPIBase(t *testing.T) {
 				t.Errorf("APIBase(%q) = %q, want %q", c.modelID, got, c.want)
 			}
 		})
+	}
+}
+
+func TestAPIBaseToolProxyOverride(t *testing.T) {
+	r := loadSample(t)
+
+	// Unset → built-in default.
+	if got, _ := r.APIBase("qwen-disabled", nil); got != DefaultToolProxyAddr {
+		t.Errorf("default: got %q, want %q", got, DefaultToolProxyAddr)
+	}
+
+	// Set → per-instance override wins (HA: second router host → other proxy).
+	r.ToolProxyAddr = "http://10.0.0.9:5392/v1"
+	got, err := r.APIBase("qwen-disabled", nil)
+	if err != nil {
+		t.Fatalf("APIBase: %v", err)
+	}
+	if got != "http://10.0.0.9:5392/v1" {
+		t.Errorf("override: got %q, want %q", got, "http://10.0.0.9:5392/v1")
 	}
 }
 

@@ -39,6 +39,7 @@ func run(args []string) int {
 		logFormat   = fs.String("log-format", "json", "log format: json or text")
 		shutdownTo  = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
 		postgresDSN = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
+		toolProxyURL = fs.String("tool-proxy-url", "", `address tool_proxy models route to; empty falls back to $ROUTER_TOOL_PROXY_URL, then the built-in default`)
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
@@ -87,6 +88,13 @@ func run(args []string) int {
 		if v := os.Getenv("WELLKNOWN_API_KEY"); v != "" {
 			*wellKnownAPIKey = v
 		}
+	}
+	if *toolProxyURL == "" {
+		*toolProxyURL = os.Getenv("ROUTER_TOOL_PROXY_URL")
+	}
+	if *toolProxyURL != "" {
+		registry.ToolProxyAddr = *toolProxyURL
+		logger.Info("tool proxy address overridden", "addr", *toolProxyURL)
 	}
 
 	routerOpts := []router.Option{

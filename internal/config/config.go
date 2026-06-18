@@ -196,6 +196,11 @@ func (m ModelDefinition) ModeTag() string {
 type ModelRegistry struct {
 	Nodes  map[string]NodeDefinition  `yaml:"nodes"`
 	Models map[string]ModelDefinition `yaml:"models"`
+
+	// ToolProxyAddr is the address tool_proxy models are routed to. Not read
+	// from YAML — set programmatically (router --tool-proxy-url flag). Empty
+	// falls back to DefaultToolProxyAddr.
+	ToolProxyAddr string `yaml:"-"`
 }
 
 // Load reads and validates the registry from a YAML file.
@@ -284,9 +289,12 @@ func (r *ModelRegistry) GetNode(modelID string) (*NodeDefinition, error) {
 	return &n, nil
 }
 
-// ToolProxyAddr is the hardcoded address of the tool proxy. Matches the
-// Python config.py constant. The IP avoids euclid.local mDNS instability.
-const ToolProxyAddr = "http://192.168.42.240:5392/v1"
+// DefaultToolProxyAddr is the fallback address of the tool proxy, used when
+// ModelRegistry.ToolProxyAddr is unset. Matches the Python config.py constant.
+// The IP (not euclid.local) avoids mDNS instability. Override per-instance via
+// the router's --tool-proxy-url flag / $ROUTER_TOOL_PROXY_URL so a second
+// router host (HA) can point at a different tool proxy without a recompile.
+const DefaultToolProxyAddr = "http://192.168.42.240:5392/v1"
 
 // APIBase returns the upstream API base URL for a model.
 //
@@ -328,7 +336,10 @@ func (r *ModelRegistry) APIBase(modelID string, toolProxyOverride *bool) (string
 		effectiveToolProxy = *toolProxyOverride
 	}
 	if effectiveToolProxy {
-		return ToolProxyAddr, nil
+		if r.ToolProxyAddr != "" {
+			return r.ToolProxyAddr, nil
+		}
+		return DefaultToolProxyAddr, nil
 	}
 
 	port := m.APIPort
