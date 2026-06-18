@@ -262,6 +262,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			return
 		}
 
+		// E2: a "<model>-<egress>" alias resolves to a tool-proxy model plus an
+		// egress spec; forward it as X-Egress so the tool proxy picks the VPN
+		// exit. An explicit client X-Egress header always wins.
+		if res.ViaToolProxy && res.Egress != "" && r.Header.Get("X-Egress") == "" {
+			r.Header.Set("X-Egress", res.Egress)
+		}
+
 		bodyMap["model"] = res.BackendModel
 		newBody, err := json.Marshal(bodyMap)
 		if err != nil {

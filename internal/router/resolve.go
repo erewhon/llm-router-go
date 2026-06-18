@@ -28,6 +28,9 @@ type resolveResult struct {
 	ViaToolProxy bool
 	// APIClass is the model's declared endpoint family.
 	APIClass config.APIClass
+	// Egress is the VPN-exit spec derived from a "<model>-<egress>" alias
+	// (E2), forwarded to the tool proxy as X-Egress. Empty for plain models.
+	Egress string
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in
@@ -53,28 +56,67 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 
 	want := strings.TrimPrefix(model, "openai/")
 
+	if id, m, alias, ok := rt.lookup(want); ok {
+		return rt.buildResult(id, m, alias, model, forceDirect, "")
+	}
+	// E2 model-egress aliases: "<base>-<egress>" where <base> resolves to a
+	// tool-proxy model — forward <base> and pass the suffix to the tool proxy
+	// as X-Egress. Only for chat (tool-proxy) requests, never forceDirect ones.
+	if !forceDirect {
+		if res, ok := rt.resolveEgressAlias(want, model); ok {
+			return res, nil
+		}
+	}
+	return resolveResult{}, fmt.Errorf("router: unknown model %q", model)
+}
+
+// lookup matches a model name against the active registry by exact key, hf_repo
+// (bare or with "#suffix"), then alias. Returns the matched id, definition, the
+// alias used (or ""), and whether anything matched.
+func (rt *Router) lookup(want string) (string, config.ModelDefinition, string, bool) {
 	if m, ok := rt.active[want]; ok {
-		return rt.buildResult(want, m, "", model, forceDirect)
+		return want, m, "", true
 	}
 	for id, m := range rt.active {
 		hfBase := strings.SplitN(m.HFRepo, "#", 2)[0]
 		if hfBase == want || m.HFRepo == want {
-			return rt.buildResult(id, m, "", model, forceDirect)
+			return id, m, "", true
 		}
 		for _, a := range m.Aliases {
 			if a == want {
-				return rt.buildResult(id, m, a, model, forceDirect)
+				return id, m, a, true
 			}
 		}
 	}
-	return resolveResult{}, fmt.Errorf("router: unknown model %q", model)
+	return "", config.ModelDefinition{}, "", false
+}
+
+// resolveEgressAlias handles "<base>-<egress>" names. It tries the LONGEST base
+// prefix that resolves (so a model whose own name has hyphens, e.g.
+// "nemotron-3-super-se", wins over a shorter accidental match), accepting the
+// first base that routes through the tool proxy; the remainder is the egress
+// spec. Returns ok=false if no resolvable tool-proxy base is found.
+func (rt *Router) resolveEgressAlias(want, original string) (resolveResult, bool) {
+	for i := strings.LastIndex(want, "-"); i > 0; i = strings.LastIndex(want[:i], "-") {
+		base, egress := want[:i], want[i+1:]
+		id, m, alias, ok := rt.lookup(base)
+		if !ok {
+			continue
+		}
+		res, err := rt.buildResult(id, m, alias, original, false, egress)
+		if err != nil || !res.ViaToolProxy {
+			continue // base isn't tool-proxy-routed; an egress suffix is meaningless
+		}
+		return res, true
+	}
+	return resolveResult{}, false
 }
 
 // buildResult assembles the forwarding decision for a matched model.
 // matchedAlias is the alias the caller used (or ""), so per-alias tool_proxy
 // overrides apply. forceDirect (set by non-chat endpoints) trumps both the
 // model's tool_proxy flag and any alias override.
-func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias, original string, forceDirect bool) (resolveResult, error) {
+func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias, original string, forceDirect bool, egress string) (resolveResult, error) {
 	// Override precedence: forceDirect (endpoint) > alias override > model default.
 	var override *bool
 	switch {
@@ -122,6 +164,7 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 		ResolvedFrom: original,
 		ViaToolProxy: viaToolProxy,
 		APIClass:     m.APIClass,
+		Egress:       egress,
 	}, nil
 }
 

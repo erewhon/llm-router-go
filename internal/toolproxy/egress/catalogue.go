@@ -178,16 +178,36 @@ func (c *Catalogue) fetch(ctx context.Context) ([]Relay, error) {
 	return out, nil
 }
 
+// euCountries is the EU/EEA member-state codes, used by the "eu" spec for
+// GDPR-friendly egress (any of these countries). EEA non-EU (is/li/no) are
+// included since GDPR applies across the EEA.
+var euCountries = map[string]bool{
+	"at": true, "be": true, "bg": true, "hr": true, "cy": true, "cz": true,
+	"dk": true, "ee": true, "fi": true, "fr": true, "de": true, "gr": true,
+	"hu": true, "ie": true, "it": true, "lv": true, "lt": true, "lu": true,
+	"mt": true, "nl": true, "pl": true, "pt": true, "ro": true, "sk": true,
+	"si": true, "es": true, "se": true, // EU-27
+	"is": true, "li": true, "no": true, // EEA
+}
+
 // Resolve maps an egress spec to a relay. Grammar:
 //
 //	"us"               country
 //	"us-atl"           country-city
 //	"us-atl-wg-001"    exact hostname
 //	"<socks_name>"     exact socks5 hostname
+//	"eu"               any EU/EEA country (GDPR)
 //	"any" / "random"   anywhere
 //
 // A broad spec picks a random active match. Returns an error if nothing matches.
 func (c *Catalogue) Resolve(ctx context.Context, spec string) (Relay, error) {
+	return c.ResolveExcluding(ctx, spec, nil)
+}
+
+// ResolveExcluding is Resolve but skips any relay whose socks_name is in
+// exclude. Used by the retry path to fail over to a different relay matching the
+// same spec after one is found dead.
+func (c *Catalogue) ResolveExcluding(ctx context.Context, spec string, exclude map[string]bool) (Relay, error) {
 	if err := c.ensureFresh(ctx); err != nil {
 		return Relay{}, err
 	}
@@ -197,17 +217,30 @@ func (c *Catalogue) Resolve(ctx context.Context, spec string) (Relay, error) {
 	relays := c.relays
 	c.mu.Unlock()
 
+	excluded := func(r Relay) bool { return exclude != nil && exclude[r.SocksName] }
+
 	// Exact hostname / socks_name wins over the country/city heuristic.
 	for _, r := range relays {
-		if spec == strings.ToLower(r.Hostname) || spec == strings.ToLower(r.SocksName) {
+		if (spec == strings.ToLower(r.Hostname) || spec == strings.ToLower(r.SocksName)) && !excluded(r) {
 			return r, nil
 		}
 	}
 
 	var matches []Relay
-	if spec == "any" || spec == "random" {
-		matches = relays
-	} else {
+	switch {
+	case spec == "any" || spec == "random":
+		for _, r := range relays {
+			if !excluded(r) {
+				matches = append(matches, r)
+			}
+		}
+	case spec == "eu":
+		for _, r := range relays {
+			if euCountries[r.CountryCode] && !excluded(r) {
+				matches = append(matches, r)
+			}
+		}
+	default:
 		parts := strings.Split(spec, "-")
 		country := parts[0]
 		city := ""
@@ -221,7 +254,9 @@ func (c *Catalogue) Resolve(ctx context.Context, spec string) (Relay, error) {
 			if city != "" && r.CityCode != city {
 				continue
 			}
-			matches = append(matches, r)
+			if !excluded(r) {
+				matches = append(matches, r)
+			}
 		}
 	}
 	if len(matches) == 0 {

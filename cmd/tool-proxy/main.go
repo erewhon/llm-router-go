@@ -55,6 +55,7 @@ func run(args []string) int {
 		mullvadRelaysURL = fs.String("mullvad-relays-url", egress.DefaultRelaysURL, "Mullvad relay list URL (carries socks_name/socks_port)")
 		egressCacheTTL   = fs.Duration("egress-cache-ttl", time.Hour, "how long to cache the Mullvad relay list")
 		egressDefault    = fs.String("egress-default", "", "egress spec when a request sends no X-Egress (empty = current default exit)")
+		egressMaxTries   = fs.Int("egress-max-tries", 3, "max relays to try per request before failing (failover on a dead relay)")
 
 		showVer = fs.Bool("version", false, "print version and exit")
 	)
@@ -158,11 +159,12 @@ func run(args []string) int {
 			Catalogue:     cat,
 			DefaultSpec:   *egressDefault,
 			ClientTimeout: *toolTimeout,
+			MaxTries:      *egressMaxTries,
 			Logger:        logger.With("subsys", "egress"),
 		})
 		proxyOpts = append(proxyOpts, toolproxy.WithEgress(sel))
 		logger.Info("egress selection enabled", "relays_url", *mullvadRelaysURL,
-			"cache_ttl", egressCacheTTL.String(), "default", *egressDefault)
+			"cache_ttl", egressCacheTTL.String(), "default", *egressDefault, "max_tries", *egressMaxTries)
 	} else if *egressEnabled {
 		logger.Warn("egress selection requested but --proxy is empty; X-Egress will be ignored")
 	}
