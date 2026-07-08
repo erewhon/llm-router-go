@@ -8,10 +8,24 @@ currently in production) with single-binary Go equivalents.
 
 ## Status
 
-**Pre-alpha — scaffold only.** No service is implemented yet. The Python
-stack at `~/Projects/erewhon/llm-router/` remains the production system.
+**In production.** All three binaries are implemented; the Go `router` replaced
+the LiteLLM proxy in a hard cutover and runs the fleet's OpenAI-compatible front
+door. See [`docs/PLAN.md`](docs/PLAN.md) for the migration history and decisions.
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the phased migration plan and decisions.
+## Run it yourself
+
+The `router` is self-contained (no database, tool proxy, or node agents
+required) and works against Amazon Bedrock, LM Studio, or any OpenAI-compatible
+backend:
+
+```sh
+brew tap erewhon/tap
+brew install llm-router
+```
+
+See [`docs/running-on-macos.md`](docs/running-on-macos.md) and the annotated
+[`configs/models.example.yaml`](configs/models.example.yaml) for configuring
+backends and running in the foreground.
 
 ## Binaries
 

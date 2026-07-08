@@ -1,0 +1,111 @@
+# ============================================================================
+# models.example.yaml — annotated LLM Router registry showing every backend.
+#
+# This one file is the source of truth the router reads (‑models‑yaml). It maps
+# incoming model names/aliases to an upstream. The router is a pure
+# OpenAI‑compatible reverse proxy: it forwards /v1/chat/completions (and the
+# other /v1/* endpoints) to a backend's api_base, optionally attaching a bearer
+# token, and streams the response straight back.
+#
+# Run it in the foreground:
+#   llm-router -models-yaml ./models.yaml -addr :4010
+#
+# Minimal laptop setup (e.g. Bedrock + local LM Studio) uses only
+# `backend: external` models and needs NO `nodes:` block at all — delete it.
+# ============================================================================
+
+# `nodes:` is only needed for LOCALLY‑HOSTED models (backend: vllm | llamacpp |
+# lmstudio) that reference a node by name. External models ignore it entirely.
+nodes:
+  workstation:
+    host: 127.0.0.1        # hostname or LAN IP of the node running the engine
+    gpu: nvidia            # amd | nvidia | intel | none
+    vram_gb: 24
+    agent_port: 8100       # node‑agent port (only relevant if you run node‑agent)
+
+models:
+  # --- Scenario 1: local vLLM / SGLang model on a node --------------------
+  # backend: vllm covers both vLLM and SGLang — both speak OpenAI /v1. The
+  # upstream URL is derived as http://<node.host>:<api_port>/v1.
+  qwen3-coder:
+    hf_repo: Qwen/Qwen3-Coder-30B-A3B-Instruct  # written into the upstream "model" field
+    backend: vllm
+    node: workstation                 # must match a key under `nodes:` above
+    api_port: 5391                    # defaults to 5391 if omitted
+    vram_gb: 24
+    aliases: [coder]
+    capabilities: [text, tool_calling]
+    vllm_args:                        # informational / used by node‑agent launch
+      tool_call_parser: qwen3_coder
+      max_model_len: 262144
+
+  # --- Scenario 2: LM Studio on THIS machine (localhost) ------------------
+  # LM Studio serves an OpenAI‑compatible API on http://localhost:1234/v1.
+  # On a laptop the simplest path is backend: external + explicit api_base:
+  # no `nodes:` entry, no api_key. hf_repo is the model identifier LM Studio
+  # shows for the loaded model (Settings → the model's "API identifier").
+  local-lmstudio:
+    hf_repo: qwen2.5-coder-7b-instruct
+    backend: external
+    api_base: http://localhost:1234/v1
+    aliases: [local, lmstudio]
+    capabilities: [text, tool_calling]
+
+  # (Alternative) LM Studio running on a *fleet node* — use the lmstudio
+  # backend + a node, with api_port set to LM Studio's port:
+  #   lmstudio-node:
+  #     hf_repo: some-model
+  #     backend: lmstudio
+  #     node: workstation
+  #     api_port: 1234
+
+  # --- Scenario 3: Amazon Bedrock (Anthropic Claude) ----------------------
+  # Claude over the OpenAI Chat Completions format is served by the
+  # bedrock-mantle endpoint: https://bedrock-mantle.<region>.api.aws/v1
+  # Auth is a Bedrock API key sent as a bearer token. Export it first:
+  #   export AWS_BEARER_TOKEN_BEDROCK="<your Bedrock API key>"
+  # The api_key value below is an ENV VAR NAME — any value not starting with
+  # "sk-" is treated as the name of an env var to read — so the secret never
+  # lives in this file. Confirm the exact model id for your region with:
+  #   curl https://bedrock-mantle.us-east-1.api.aws/v1/models \
+  #        -H "Authorization: Bearer $AWS_BEARER_TOKEN_BEDROCK"
+  bedrock-claude:
+    hf_repo: anthropic.claude-sonnet-4-5   # confirm exact id via /v1/models
+    backend: external
+    api_base: https://bedrock-mantle.us-east-1.api.aws/v1
+    api_key: AWS_BEARER_TOKEN_BEDROCK
+    aliases: [claude, sonnet]
+    capabilities: [text, tool_calling]
+
+  # --- Scenario 4: OpenCode Zen (pay‑as‑you‑go external catalog) -----------
+  #   export OPENCODE_ZEN_API_KEY="<your zen key>"
+  big-pickle:
+    hf_repo: big-pickle
+    backend: external
+    api_base: https://opencode.ai/zen/v1
+    api_key: OPENCODE_ZEN_API_KEY
+    capabilities: [text, tool_calling]
+    tags: [zen]
+    input_cost_per_million: 0        # optional; drives cost metrics only
+    output_cost_per_million: 0
+
+  # --- Scenario 5: OpenCode "Go" flat‑rate subscription catalog -----------
+  # Same key as Zen, different base URL (/zen/go/v1).
+  kimi-k2-code:
+    hf_repo: kimi-k2.7-code
+    backend: external
+    api_base: https://opencode.ai/zen/go/v1
+    api_key: OPENCODE_ZEN_API_KEY
+    aliases: [kimi]
+    capabilities: [text, tool_calling]
+
+  # --- Scenario 6: an embeddings model (non‑chat api_class) ---------------
+  # api_class selects the OpenAI endpoint family. Default is "chat"; set it
+  # for embeddings/rerank/tts/stt/image_gen/etc. so /v1/embeddings routes here.
+  qwen3-embedding:
+    hf_repo: Qwen/Qwen3-Embedding-4B
+    backend: external
+    api_base: http://localhost:5404/v1
+    api_class: embeddings
+    aliases: [embedding]
+    capabilities: [text]

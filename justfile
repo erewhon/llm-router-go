@@ -27,6 +27,10 @@ build-arm64:
     GOOS=linux GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/arm64/tool-proxy ./cmd/tool-proxy
     GOOS=linux GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/arm64/router    ./cmd/router
 
+# cross-compile a macOS (Apple Silicon) router binary for local testing on a Mac
+build-darwin:
+    GOOS=darwin GOARCH=arm64 go build -ldflags='{{ ldflags }}' -o bin/darwin-arm64/llm-router ./cmd/router
+
 # run tests
 test:
     go test ./...

@@ -1,0 +1,83 @@
+# GoReleaser — builds the `router` binary as the `llm-router` command and
+# publishes a Homebrew formula to github.com/erewhon/homebrew-tap on each
+# `vX.Y.Z` tag. Only the router ships via Homebrew (node-agent/tool-proxy are
+# fleet-internal). Docs: https://goreleaser.com
+version: 2
+
+project_name: llm-router
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: llm-router
+    main: ./cmd/router
+    binary: llm-router
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: llm-router
+    ids: [llm-router]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - docs/running-on-macos.md
+      - configs/models.example.yaml
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: erewhon
+    name: llm-router-go
+
+# Homebrew: a cask installs the pre-built `llm-router` binary on macOS.
+# (Homebrew-on-Linux has no casks — Linux users grab the release tarball
+# directly; the fleet deploys via rsync anyway.)
+homebrew_casks:
+  - name: llm-router
+    binaries:
+      - llm-router
+    repository:
+      owner: erewhon
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/erewhon/llm-router-go"
+    description: "OpenAI-compatible LLM router — one front door for Amazon Bedrock, LM Studio, and other OpenAI-compatible backends"
+    commit_author:
+      name: goreleaser-bot
+      email: noreply@byrnes.org
+    # The binary is unsigned: strip the Gatekeeper quarantine bit on install so
+    # it runs without a "developer cannot be verified" prompt.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/llm-router"]
+          end
+    caveats: |
+      A sample multi-backend config ships in the release archive as
+      configs/models.example.yaml. Quick start:
+
+        mkdir -p ~/.config/llm-router
+        curl -fsSL https://raw.githubusercontent.com/erewhon/llm-router-go/main/configs/models.example.yaml \
+          -o ~/.config/llm-router/models.yaml
+        llm-router -models-yaml ~/.config/llm-router/models.yaml -addr :4010
+
+      For Amazon Bedrock, export a Bedrock API key first:
+        export AWS_BEARER_TOKEN_BEDROCK="<your key>"

@@ -1,0 +1,35 @@
+name: release
+
+# Tag a version to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+# GoReleaser builds darwin/linux (amd64+arm64) archives, publishes a GitHub
+# Release, and updates Formula/llm-router.rb in erewhon/homebrew-tap.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so GoReleaser can build the changelog
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          # Default token: creates the Release in THIS repo.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT (repo scope) that can push to erewhon/homebrew-tap. Add it under
+          # Settings → Secrets and variables → Actions.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
