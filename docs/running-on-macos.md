@@ -129,3 +129,8 @@ aliases (`claude`, `sonnet`, `local`, …).
 - Bedrock's `bedrock-mantle` endpoint does not support AWS Guardrails or
   cross-region inference profiles; use `bedrock-runtime` (a different API) if you
   need those. For plain chat, `bedrock-mantle` is the right choice.
+
+## See also
+
+- [Local Orpheus TTS on macOS](orpheus-say-macos.md) — run the `orpheus-say`
+  text-to-speech CLI against a local mlx-audio Orpheus server on the same laptop.
