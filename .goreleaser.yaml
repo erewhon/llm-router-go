@@ -1,7 +1,7 @@
-# GoReleaser — builds the `router` binary as the `llm-router` command and
-# publishes a Homebrew formula to github.com/erewhon/homebrew-tap on each
-# `vX.Y.Z` tag. Only the router ships via Homebrew (node-agent/tool-proxy are
-# fleet-internal). Docs: https://goreleaser.com
+# GoReleaser — builds the front-door `router` (as `llm-router`) and the
+# `orpheus-say` TTS CLI, and publishes a Homebrew cask for each to
+# github.com/erewhon/homebrew-tap on every `vX.Y.Z` tag. (node-agent/tool-proxy
+# stay fleet-internal — rsync-deployed, not shipped here.) Docs: https://goreleaser.com
 version: 2
 
 project_name: llm-router
@@ -25,16 +25,38 @@ builds:
       - amd64
       - arm64
 
+  - id: orpheus-say
+    main: ./cmd/orpheus-say
+    binary: orpheus-say
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: llm-router
     ids: [llm-router]
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "llm-router_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     files:
       - LICENSE
       - README.md
       - docs/running-on-macos.md
       - configs/models.example.yaml
+
+  - id: orpheus-say
+    ids: [orpheus-say]
+    name_template: "orpheus-say_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
 
 checksum:
   name_template: checksums.txt
@@ -50,6 +72,8 @@ release:
 homebrew_casks:
   - name: llm-router
     binaries:
+      - llm-router
+    ids:
       - llm-router
     repository:
       owner: erewhon
@@ -81,3 +105,34 @@ homebrew_casks:
 
       For Amazon Bedrock, export a Bedrock API key first:
         export AWS_BEARER_TOKEN_BEDROCK="<your key>"
+
+  - name: orpheus-say
+    binaries:
+      - orpheus-say
+    ids:
+      - orpheus-say
+    repository:
+      owner: erewhon
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/erewhon/llm-router-go"
+    description: "Command-line Orpheus text-to-speech: speak text via an OpenAI /v1/audio/speech endpoint and play it on the default audio output"
+    commit_author:
+      name: goreleaser-bot
+      email: noreply@byrnes.org
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/orpheus-say"]
+          end
+    caveats: |
+      orpheus-say speaks text via an Orpheus /v1/audio/speech endpoint and plays
+      it on your default audio output (macOS: afplay; Linux: paplay/ffplay/aplay).
+
+      Point it at your Orpheus server, then talk:
+        export ORPHEUS_URL=http://<host>:5397   # or a local mlx-audio server
+        orpheus-say "Hello there"
+        echo "piped text works too" | orpheus-say
