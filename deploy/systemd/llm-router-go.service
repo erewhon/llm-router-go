@@ -45,7 +45,18 @@ ExecStart=/usr/local/bin/llm-router-go \
     --postgres-dsn=${ROUTER_PG_DSN} \
     --wellknown-provider-id=llm \
     "--wellknown-provider-name=LLM Router" \
-    --wellknown-base-url=https://llm.bcc.sh/v1
+    --wellknown-base-url=https://llm.bcc.sh/v1 \
+    --dashboard \
+    --dashboard-addr=:4011 \
+    --dashboard-public-url=https://llm.bcc.sh
+
+# --dashboard serves the status UI on :4011 — the port the retired Python
+# litellm-dashboard used, so the hub Caddy front door (llm-dashboard.bcc.sh
+# → euclid's Tailscale IP :4011, gated by oauth2-proxy) needs no change. The
+# listener carries NO bearer auth (matching the old Python behaviour); it binds
+# all interfaces because Caddy reaches it over Tailscale, and UFW + oauth2-proxy
+# are the access boundary. --dashboard-public-url only sets the copy-paste base
+# URL shown in the dashboard's Connection card.
 
 # Secrets land here from `ho secret get llm-router/api-key` via
 # deploy/scripts/deploy-router-secrets.sh. The `-` prefix makes the unit

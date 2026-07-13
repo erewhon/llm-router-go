@@ -26,6 +26,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,10 @@ type Router struct {
 	started       time.Time
 	metrics       *routerMetrics
 	wellKnown     WellKnownConfig
+	dashConfig    DashboardConfig
+	// nodeFetcher probes one node agent for the dashboard. Defaults to the
+	// real HTTP fetchNodeMetrics; tests set a stub to stay hermetic.
+	nodeFetcher func(ctx context.Context, host string, agentPort int) nodeMetric
 }
 
 // Option configures a Router at construction time.
@@ -137,6 +142,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		sink:          reqlog.NopSink{},
 		version:       "dev",
 		started:       time.Now(),
+		nodeFetcher:   fetchNodeMetrics,
 	}
 	for _, opt := range opts {
 		opt(r)

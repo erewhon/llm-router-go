@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,13 +33,13 @@ func main() {
 func run(args []string) int {
 	fs := flag.NewFlagSet("router", flag.ContinueOnError)
 	var (
-		addr        = fs.String("addr", ":4015", "listen address (cutover runs parallel to LiteLLM:4010)")
-		modelsYAML  = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
-		mode        = fs.String("mode", "", `mode tag filter ("big"/"default"/...); empty = all enabled models`)
-		logLevel    = fs.String("log-level", "info", "log level: debug, info, warn, error")
-		logFormat   = fs.String("log-format", "json", "log format: json or text")
-		shutdownTo  = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
-		postgresDSN = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
+		addr         = fs.String("addr", ":4015", "listen address (cutover runs parallel to LiteLLM:4010)")
+		modelsYAML   = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
+		mode         = fs.String("mode", "", `mode tag filter ("big"/"default"/...); empty = all enabled models`)
+		logLevel     = fs.String("log-level", "info", "log level: debug, info, warn, error")
+		logFormat    = fs.String("log-format", "json", "log format: json or text")
+		shutdownTo   = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
+		postgresDSN  = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
 		toolProxyURL = fs.String("tool-proxy-url", "", `address tool_proxy models route to; empty falls back to $ROUTER_TOOL_PROXY_URL, then the built-in default`)
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
@@ -53,6 +54,14 @@ func run(args []string) int {
 		// pattern: load that env var from systemd's EnvironmentFile so the
 		// key isn't visible in /proc/PID/cmdline).
 		apiKeys = fs.String("api-keys", "", `comma-separated bearer tokens accepted on /v1/*; empty falls back to $ROUTER_API_KEYS, then disables auth`)
+
+		// Dashboard: the status UI baked into the binary, served on its own
+		// listener (separate auth boundary from /v1/*). Off by default so
+		// existing deployments are unaffected; the loopback-default addr keeps
+		// it safe to enable without auth on a local instance.
+		dashboard     = fs.Bool("dashboard", false, "serve the status dashboard UI on --dashboard-addr")
+		dashboardAddr = fs.String("dashboard-addr", "127.0.0.1:4011", "listen address for the dashboard; carries NO bearer auth, so keep it on loopback unless fronted by your own auth")
+		dashboardURL  = fs.String("dashboard-public-url", "", "public OpenAI-compatible base URL shown in the dashboard's Connection card (e.g. https://llm.bcc.sh); empty derives http://localhost:<port> from --addr")
 
 		showVer = fs.Bool("version", false, "print version and exit")
 	)
@@ -160,6 +169,35 @@ func run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if *dashboard {
+		apiBase := *dashboardURL
+		if apiBase == "" {
+			apiBase = deriveAPIBase(*addr)
+		}
+		if !isLoopbackBind(*dashboardAddr) {
+			logger.Warn("dashboard listener is NOT loopback — it has no bearer auth and its /api/chat can invoke any model; front it with your own auth (oauth2-proxy) or bind 127.0.0.1",
+				"addr", *dashboardAddr)
+		}
+		dashHandler := httpx.Chain(
+			rt.DashboardHandler(router.DashboardConfig{APIBase: apiBase}),
+			httpx.RequestID,
+			httpx.AccessLog(logger.With("svc", "dashboard")),
+			httpx.Recover(logger),
+		)
+		dashSrv := &http.Server{
+			Addr:              *dashboardAddr,
+			Handler:           dashHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			logger.Info("dashboard starting", "addr", *dashboardAddr, "public_url", apiBase)
+			if err := httpx.ServeContext(ctx, dashSrv, *shutdownTo); err != nil {
+				logger.Error("dashboard server stopped with error", "err", err)
+				stop() // take the whole process down if the dashboard listener dies
+			}
+		}()
+	}
+
 	logger.Info("starting", "addr", *addr, "version", version,
 		"models_yaml", *modelsYAML, "mode", *mode,
 		"models", len(registry.ModelsForMode(*mode)))
@@ -169,6 +207,38 @@ func run(args []string) int {
 	}
 	logger.Info("shutdown complete")
 	return 0
+}
+
+// deriveAPIBase turns a listen address (":4010", "0.0.0.0:4010",
+// "192.168.42.240:4010") into the base URL a local client would hit. A
+// wildcard or empty host collapses to localhost — the dashboard's Connection
+// card is a copy-paste hint, and "http://0.0.0.0:4010" isn't dialable.
+func deriveAPIBase(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://localhost:4010"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// isLoopbackBind reports whether addr binds only the loopback interface. An
+// empty or wildcard host ("":4011, "0.0.0.0:4011") is NOT loopback — it's
+// reachable from the network, so the dashboard's no-auth warning fires.
+func isLoopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func splitCSV(s string) []string {

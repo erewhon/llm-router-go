@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Router</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --text-dim: #8b8fa3;
+    --accent: #6c8cff;
+    --green: #4ade80;
+    --yellow: #fbbf24;
+    --red: #f87171;
+    --orange: #fb923c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--text-dim); font-size: 0.875rem; margin-bottom: 2rem; }
+  .stats {
+    display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    min-width: 140px;
+  }
+  .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+  .stat-label {
+    font-size: 0.75rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+
+  .section-title {
+    font-size: 1rem; font-weight: 600; margin: 2rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Nodes */
+  .nodes { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .node-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    min-width: 230px;
+    flex: 1 1 230px;
+    overflow-wrap: anywhere;
+  }
+  .node-card { cursor: pointer; transition: border-color 0.2s; }
+  .node-card:hover { border-color: var(--accent); }
+  .node-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .node-name { font-weight: 600; margin-bottom: 0.5rem; }
+
+  .filter-bar {
+    display: flex; gap: 0.4rem; flex-wrap: wrap;
+    margin-bottom: 0.75rem; align-items: center;
+  }
+  .filter-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.25rem 0.6rem; border-radius: 12px;
+    font-size: 0.7rem; font-weight: 500;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text-dim); cursor: pointer;
+    transition: all 0.2s; user-select: none;
+  }
+  .filter-chip:hover { border-color: var(--accent); color: var(--text); }
+  .filter-chip.active { background: rgba(108, 140, 255, 0.15); border-color: var(--accent); color: var(--accent); }
+  .filter-chip .count { opacity: 0.6; }
+  .clear-btn {
+    font-size: 0.7rem; color: var(--text-dim); cursor: pointer;
+    background: none; border: none; padding: 0.25rem 0.4rem;
+    text-decoration: underline;
+  }
+  .clear-btn:hover { color: var(--accent); }
+  .node-detail { font-size: 0.8rem; color: var(--text-dim); }
+  .node-detail span { color: var(--text); }
+
+  /* GPU metric rows */
+  .metric-row {
+    display: flex; align-items: center; gap: 0.4rem;
+    margin-top: 0.4rem;
+    /* When a card is narrow (e.g. 5 nodes in one row), let the value text
+       drop below the bar instead of overflowing the card's right edge. */
+    flex-wrap: wrap; row-gap: 0.2rem;
+  }
+  .metric-label {
+    font-size: 0.65rem; font-weight: 600;
+    color: var(--text-dim); width: 2rem;
+    text-transform: uppercase; flex-shrink: 0;
+  }
+  .vram-bar-track {
+    flex: 1; height: 6px; min-width: 40px;
+    background: var(--border); border-radius: 3px;
+    overflow: hidden;
+  }
+  .vram-bar-fill {
+    height: 100%; border-radius: 3px;
+    transition: width 0.6s ease, background 0.6s ease;
+  }
+  .vram-bar-fill.green { background: var(--green); }
+  .vram-bar-fill.yellow { background: var(--yellow); }
+  .vram-bar-fill.red { background: var(--red); }
+  .vram-bar-fill.grey { background: var(--text-dim); }
+  .vram-text {
+    font-size: 0.7rem; color: var(--text-dim);
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .vram-text strong { color: var(--text); font-weight: 600; }
+  .node-offline {
+    font-size: 0.8rem; color: var(--text-dim);
+    margin-top: 0.5rem; font-style: italic;
+  }
+
+  /* Quick-chat dialog */
+  .page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+  .chat-open-btn {
+    flex-shrink: 0; cursor: pointer; font-size: 0.85rem; font-weight: 600;
+    color: var(--accent); background: rgba(108,140,255,0.12);
+    border: 1px solid var(--accent); border-radius: 8px; padding: 0.5rem 0.9rem;
+  }
+  .chat-open-btn:hover { background: rgba(108,140,255,0.22); }
+  .chat-dialog {
+    width: min(680px, 92vw); max-height: 86vh; padding: 0;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .chat-dialog::backdrop { background: rgba(0,0,0,0.55); }
+  .chat-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.85rem 1rem; border-bottom: 1px solid var(--border); }
+  .chat-head strong { font-size: 0.95rem; flex-shrink: 0; }
+  .chat-model { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
+  .chat-x { cursor: pointer; background: none; border: none; color: var(--text-dim); font-size: 1.1rem; line-height: 1; }
+  .chat-x:hover { color: var(--text); }
+  .chat-output { padding: 1rem; overflow-y: auto; min-height: 110px; max-height: 46vh; font-size: 0.9rem; line-height: 1.5; }
+  .chat-placeholder { color: var(--text-dim); font-style: italic; }
+  .chat-answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat-err { color: var(--red); white-space: pre-wrap; }
+  .chat-reasoning { margin-bottom: 0.7rem; border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.6rem; }
+  .chat-reasoning summary { cursor: pointer; color: var(--text-dim); font-size: 0.78rem; }
+  .chat-reasoning-body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-dim); font-size: 0.82rem; margin-top: 0.4rem; }
+  .chat-metrics { padding: 0.45rem 1rem; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.72rem; font-variant-numeric: tabular-nums; min-height: 1rem; }
+  .chat-inputrow { display: flex; gap: 0.5rem; padding: 0.8rem 1rem 1rem; border-top: 1px solid var(--border); }
+  .chat-input { flex: 1; resize: vertical; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; font-size: 0.85rem; font-family: inherit; }
+  .chat-send, .chat-stop { flex-shrink: 0; cursor: pointer; font-weight: 600; font-size: 0.85rem; border-radius: 6px; padding: 0 1rem; }
+  .chat-send { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+  .chat-send:disabled { opacity: 0.5; cursor: default; }
+  .chat-stop { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid var(--red); }
+
+  /* Models table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  th {
+    text-align: left;
+    padding: 0.75rem 1rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(108, 140, 255, 0.04); }
+
+  .model-id { font-weight: 600; }
+  .model-repo { font-size: 0.75rem; color: var(--text-dim); }
+
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    margin: 0.1rem 0.15rem;
+  }
+  .badge-backend { background: rgba(108, 140, 255, 0.15); color: var(--accent); }
+  .badge-router { background: rgba(251, 191, 36, 0.18); color: var(--yellow); }
+  .badge-ovms { background: rgba(0, 180, 216, 0.18); color: #00b4d8; }
+  .badge-tts { background: rgba(192, 132, 252, 0.15); color: #c084fc; }
+  .badge-image { background: rgba(251, 146, 60, 0.15); color: var(--orange); }
+  .badge-music { background: rgba(244, 114, 182, 0.15); color: #f472b6; }
+  .badge-stt { background: rgba(45, 212, 191, 0.15); color: #2dd4bf; }
+  .badge-embed { background: rgba(0, 180, 216, 0.15); color: #00b4d8; }
+  .badge-alias { background: rgba(139, 143, 163, 0.15); color: var(--text-dim); }
+  .badge-cap { background: rgba(74, 222, 128, 0.12); color: var(--green); }
+  .badge-on { background: rgba(74, 222, 128, 0.15); color: var(--green); }
+  .badge-off { background: rgba(139, 143, 163, 0.1); color: var(--text-dim); }
+  .badge-tool { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+  .badge-multi { background: rgba(251, 146, 60, 0.15); color: var(--orange); }
+  .badge-tag { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
+
+  .health-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+    vertical-align: middle;
+  }
+  .health-healthy { background: var(--green); }
+  .health-routed { background: var(--green); }
+  .health-unhealthy { background: var(--red); }
+  .health-unknown { background: var(--text-dim); }
+  .health-running { background: var(--green); }
+  .health-starting { background: var(--yellow); }
+  .health-stopped { background: var(--text-dim); }
+  .health-error { background: var(--red); }
+  .health-disabled { background: var(--text-dim); }
+
+  tr.disabled td { opacity: 0.45; }
+
+  .toggle-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-dim);
+  }
+  .toggle-row label { cursor: pointer; user-select: none; }
+  .toggle-row input[type="checkbox"] { cursor: pointer; }
+
+  .api-base {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+  }
+
+  .copy-btn {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text-dim); cursor: pointer; padding: 2px 6px;
+    font-size: 0.65rem; margin-left: 0.4rem; vertical-align: middle;
+    transition: all 0.2s;
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .copy-btn.copied { border-color: var(--green); color: var(--green); }
+
+  .alias-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem 2rem;
+  }
+  .alias-item {
+    display: flex; gap: 0.5rem; align-items: baseline;
+  }
+  .alias-name {
+    font-weight: 600; font-size: 0.85rem;
+    color: var(--accent); white-space: nowrap;
+  }
+  .alias-desc {
+    font-size: 0.8rem; color: var(--text-dim);
+  }
+
+  .loading { color: var(--text-dim); padding: 2rem; text-align: center; }
+  .error { color: var(--red); padding: 1rem; }
+
+  @media (max-width: 768px) {
+    body { padding: 1rem; }
+    .stats { flex-direction: column; }
+    table { font-size: 0.8rem; }
+    th, td { padding: 0.5rem; }
+  }
+</style>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1>LLM Router</h1>
+      <p class="subtitle">Model registry and routing status</p>
+    </div>
+    <button class="chat-open-btn" onclick="openChat()">&#128172; Chat</button>
+  </div>
+
+  <div id="content"><p class="loading">Loading...</p></div>
+
+  <dialog id="chatDialog" class="chat-dialog">
+    <div class="chat-head">
+      <strong>Quick Chat</strong>
+      <select id="chatModel" class="chat-model"></select>
+      <button class="chat-x" onclick="closeChat()" title="Close">&#10005;</button>
+    </div>
+    <div id="chatOutput" class="chat-output"><div class="chat-placeholder">Pick a model, type a message, &#8984;/Ctrl+Enter to send. No system prompt.</div></div>
+    <div id="chatMetrics" class="chat-metrics"></div>
+    <div class="chat-inputrow">
+      <textarea id="chatInput" class="chat-input" rows="2" placeholder="Message&#8230;"></textarea>
+      <button id="chatSend" class="chat-send" onclick="sendChat()">Send</button>
+      <button id="chatStop" class="chat-stop" onclick="stopChat()" style="display:none">Stop</button>
+    </div>
+  </dialog>
+
+<script>
+// Sparkline history per node: { vram_pct: [], gpu_busy_pct: [] }
+const nodeHistory = {};
+const SPARK_MAX = 60; // ~2 min at 2s intervals
+
+// Last full data from /api/models (refreshed every 30s)
+let lastData = null;
+
+// Previous router-metrics sample — used to derive req/s + tok/s from the
+// cumulative counters between polls.
+let routerPrev = null;
+
+function updateHistory(nm) {
+  for (const [name, m] of Object.entries(nm)) {
+    if (!nodeHistory[name]) nodeHistory[name] = {vram: [], gpu: []};
+    if (m.reachable) {
+      // memory-utilisation history: VRAM on GPU nodes, RAM on CPU-only nodes
+      const memPct = (m.vram_pct !== null && m.vram_pct !== undefined)
+        ? m.vram_pct
+        : ((m.ram_pct !== null && m.ram_pct !== undefined) ? m.ram_pct : null);
+      if (memPct !== null) {
+        nodeHistory[name].vram.push(memPct);
+        if (nodeHistory[name].vram.length > SPARK_MAX)
+          nodeHistory[name].vram.shift();
+      }
+      if (m.gpu_busy_pct !== null) {
+        nodeHistory[name].gpu.push(m.gpu_busy_pct);
+        if (nodeHistory[name].gpu.length > SPARK_MAX)
+          nodeHistory[name].gpu.shift();
+      }
+    }
+  }
+}
+
+async function load() {
+  const el = document.getElementById('content');
+  try {
+    const r = await fetch('/api/models');
+    lastData = await r.json();
+    updateHistory(lastData.node_metrics || {});
+    await fetchRouterMetrics();
+    el.innerHTML = render(lastData);
+  } catch (e) {
+    el.innerHTML = `<p class="error">Failed to load: ${e.message}</p>`;
+  }
+}
+
+async function fetchRouterMetrics() {
+  if (!lastData) return;
+  try {
+    const rr = await fetch('/api/router-metrics');
+    const rd = await rr.json();
+    if (rd && rd.reachable) {
+      const now = Date.now() / 1000;
+      const tokTotal = (rd.tokens_prompt || 0) + (rd.tokens_completion || 0);
+      if (routerPrev && now > routerPrev.ts) {
+        const dt = now - routerPrev.ts;
+        rd.reqPerSec = Math.max(0, (rd.total_requests - routerPrev.total) / dt);
+        rd.tokPerSec = Math.max(0, (tokTotal - routerPrev.tok) / dt);
+      }
+      routerPrev = { total: rd.total_requests, tok: tokTotal, ts: now };
+    }
+    lastData.router = rd;
+  } catch (_) { /* keep previous router data on a failed poll */ }
+}
+
+async function pollMetrics() {
+  if (!lastData) return;
+  try {
+    const r = await fetch('/api/node-metrics');
+    const nm = await r.json();
+    lastData.node_metrics = nm;
+    // Also update agent_state on models from fresh metrics
+    const stateMap = {};
+    const reqMap = {};
+    for (const m of Object.values(nm)) {
+      for (const mdl of (m.models || [])) {
+        stateMap[mdl.model_id] = mdl.state;
+        reqMap[mdl.model_id] = {
+          running: mdl.requests_running || 0,
+          waiting: mdl.requests_waiting || 0,
+          avg_tok_per_s: mdl.avg_tok_per_s || null,
+          total_requests: mdl.total_requests || 0,
+        };
+      }
+    }
+    for (const m of lastData.models) {
+      m.agent_state = stateMap[m.id] || null;
+      const reqs = reqMap[m.id] || {};
+      m.requests_running = reqs.running || 0;
+      m.requests_waiting = reqs.waiting || 0;
+      m.avg_tok_per_s = reqs.avg_tok_per_s || null;
+      m.total_requests = reqs.total_requests || 0;
+    }
+    updateHistory(nm);
+    await fetchRouterMetrics();
+    document.getElementById('content').innerHTML = render(lastData);
+  } catch (_) { /* next poll will retry */ }
+}
+
+function sparklineSvg(vals, color) {
+  if (!vals || vals.length < 2) return '';
+  const w = 48, h = 16;
+  const coords = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * w;
+    const y = h - (v / 100) * h;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"` +
+    ` style="vertical-align:middle">` +
+    `<polyline points="${coords}" fill="none" stroke="${color}"` +
+    ` stroke-width="1.5" stroke-linecap="round"` +
+    ` stroke-linejoin="round"/></svg>`;
+}
+
+let showHidden = false;
+let selectedNode = null;
+let selectedCaps = new Set();
+
+function toggleHidden(checked) {
+  showHidden = checked;
+  applyFilters();
+}
+
+function selectNode(name) {
+  selectedNode = selectedNode === name ? null : name;
+  document.getElementById('content').innerHTML = render(lastData);
+}
+
+function toggleCap(cap) {
+  if (selectedCaps.has(cap)) selectedCaps.delete(cap);
+  else selectedCaps.add(cap);
+  document.getElementById('content').innerHTML = render(lastData);
+}
+
+function clearFilters() {
+  selectedNode = null;
+  selectedCaps.clear();
+  document.getElementById('content').innerHTML = render(lastData);
+}
+
+function applyFilters() {
+  document.querySelectorAll('tr[data-model]').forEach(tr => {
+    const node = tr.dataset.nodes || '';
+    const caps = (tr.dataset.caps || '').split(',');
+    const tags = (tr.dataset.tags || '').split(',');
+    const isDisabled = tr.classList.contains('disabled');
+
+    let visible = true;
+    if (isDisabled && !showHidden) visible = false;
+    if (selectedNode && !node.split(',').includes(selectedNode))
+      visible = false;
+    if (selectedCaps.size > 0) {
+      const all = [...caps, ...tags];
+      const match = [...selectedCaps].some(c => all.includes(c));
+      if (!match) visible = false;
+    }
+    tr.style.display = visible ? '' : 'none';
+  });
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'copied';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
+function vramBarColor(pct) {
+  if (pct >= 90) return 'red';
+  if (pct >= 70) return 'yellow';
+  return 'green';
+}
+
+function fmtUptime(s) {
+  if (s == null) return '?';
+  s = Math.floor(s);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function modelType(m) {
+  // Determine display type for a model
+  const id = m.id, tags = m.tags || [], caps = m.capabilities || [];
+  const isRouter = ['auto','auto-free','auto-full','coder-resilient'].includes(id);
+  if (isRouter) return { label: 'router', badge: 'badge-router' };
+  if (tags.includes('embedding') || tags.includes('reranker'))
+    return { label: m.backend === 'external' && m.nodes.includes('euclid') ? 'ovms' : m.backend, badge: 'badge-embed' };
+  if (tags.includes('stt'))
+    return { label: m.backend === 'external' && m.nodes.includes('euclid') ? 'ovms' : m.backend, badge: 'badge-stt' };
+  if (tags.includes('tts'))
+    return { label: 'tts', badge: 'badge-tts' };
+  if (tags.includes('image_gen') || tags.includes('image_edit'))
+    return { label: 'image', badge: 'badge-image' };
+  if (tags.includes('music_gen'))
+    return { label: 'music', badge: 'badge-music' };
+  if (tags.includes('gui_agent'))
+    return { label: 'gui-agent', badge: 'badge-router' };
+  return { label: m.backend, badge: 'badge-backend' };
+}
+
+function isRouterModel(m) {
+  return ['auto','auto-free','auto-full','coder-resilient'].includes(m.id);
+}
+
+function render(data) {
+  const { nodes, models, model_count, node_count, litellm_url, node_metrics } = data;
+  const nm = node_metrics || {};
+
+  // Stats
+  const alwaysOn = models.filter(m => m.always_on && m.enabled !== false).length;
+  const running = models.filter(m => m.enabled !== false && (m.agent_state === 'running' || isRouterModel(m))).length;
+
+  // Fleet VRAM totals
+  let fleetVramTotal = 0, fleetVramUsed = 0;
+  for (const [name, m] of Object.entries(nm)) {
+    if (m.reachable && m.vram_total_gb) {
+      fleetVramTotal += m.vram_total_gb;
+      fleetVramUsed += m.vram_used_gb || 0;
+    }
+  }
+
+  // Fleet CPU RAM totals — system RAM (MemTotal/MemAvailable) summed over
+  // nodes whose RAM is a distinct pool from VRAM. Unified-memory nodes (the
+  // GB10 Sparks) are excluded: their /proc/meminfo == nvidia-smi, so their
+  // memory is already in Fleet VRAM. This is whole-system RAM, not model-only
+  // (e.g. hekaton's figure includes ZFS ARC; delphi's includes local VMs).
+  let fleetRamTotal = 0, fleetRamUsed = 0;
+  for (const [name, m] of Object.entries(nm)) {
+    const node = nodes[name] || {};
+    if (m.reachable && m.ram_total_gb && !node.unified_memory) {
+      fleetRamTotal += m.ram_total_gb;
+      fleetRamUsed += m.ram_used_gb || 0;
+    }
+  }
+
+  let html = `
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value">${model_count}</div>
+        <div class="stat-label">Models</div></div>
+      <div class="stat">
+        <div class="stat-value">${node_count}</div>
+        <div class="stat-label">Nodes</div></div>
+      <div class="stat">
+        <div class="stat-value">${alwaysOn}</div>
+        <div class="stat-label">Always On</div></div>
+      <div class="stat">
+        <div class="stat-value">${running}</div>
+        <div class="stat-label">Running</div></div>
+      <div class="stat">
+        <div class="stat-value">${fleetVramUsed.toFixed(0)}<span style="font-size:0.9rem;color:var(--text-dim)"> / ${fleetVramTotal.toFixed(0)} GB</span></div>
+        <div class="stat-label">Fleet VRAM</div></div>
+      <div class="stat">
+        <div class="stat-value">${fleetRamUsed.toFixed(0)}<span style="font-size:0.9rem;color:var(--text-dim)"> / ${fleetRamTotal.toFixed(0)} GB</span></div>
+        <div class="stat-label">Fleet CPU RAM</div></div>
+    </div>`;
+
+  // Router (Go) request metrics — live counters from the router's own
+  // /health + /metrics. Sits up top; the live Nodes section follows directly.
+  const rt = data.router;
+  if (rt && rt.reachable) {
+    const errPct = rt.total_requests > 0 ? (rt.errors / rt.total_requests * 100).toFixed(1) : '0.0';
+    const reqps = rt.reqPerSec != null ? (rt.reqPerSec >= 10 ? rt.reqPerSec.toFixed(0) : rt.reqPerSec.toFixed(1)) : '-';
+    const tokps = rt.tokPerSec != null ? rt.tokPerSec.toFixed(0) : '-';
+    const avgLat = rt.avg_latency_ms != null ? rt.avg_latency_ms.toFixed(0) : '-';
+    const totalTok = (rt.tokens_prompt || 0) + (rt.tokens_completion || 0);
+    const topModels = (rt.top_models || []).slice(0, 5)
+      .map(([m, n]) => `${m} <span style="color:var(--text-dim)">${n}</span>`).join(' · ')
+      || '<span style="color:var(--text-dim)">no traffic since restart</span>';
+    html += `
+      <div class="section-title">Router</div>
+      <div class="nodes">
+        <div class="node-card">
+          <div class="node-name">llm-router-go <span class="badge badge-on">${rt.version || '?'}</span></div>
+          <div class="node-detail" style="margin-top:0.4rem">mode <strong>${rt.mode || '?'}</strong> · up ${fmtUptime(rt.uptime_seconds)}</div>
+          <div class="node-detail">${rt.models || 0} models active</div>
+        </div>
+        <div class="node-card">
+          <div class="node-name">Requests</div>
+          <div class="metric-row"><span class="metric-label">total</span><span class="vram-text"><strong>${(rt.total_requests || 0).toLocaleString()}</strong></span></div>
+          <div class="metric-row"><span class="metric-label">errors</span><span class="vram-text">${rt.errors || 0} <span style="color:var(--text-dim)">(${errPct}%)</span></span></div>
+          <div class="metric-row"><span class="metric-label">rate</span><span class="vram-text"><strong>${reqps}</strong> req/s</span></div>
+        </div>
+        <div class="node-card">
+          <div class="node-name">Throughput</div>
+          <div class="metric-row"><span class="metric-label">tokens</span><span class="vram-text"><strong>${totalTok.toLocaleString()}</strong></span></div>
+          <div class="metric-row"><span class="metric-label">rate</span><span class="vram-text"><strong>${tokps}</strong> tok/s</span></div>
+          <div class="metric-row"><span class="metric-label">avg latency</span><span class="vram-text">${avgLat} ms</span></div>
+        </div>
+        <div class="node-card" style="flex:2">
+          <div class="node-name">Top models <span style="color:var(--text-dim);font-weight:400">by requests</span></div>
+          <div class="node-detail" style="margin-top:0.4rem;line-height:1.7">${topModels}</div>
+        </div>
+      </div>`;
+  }
+
+  // Connection / Apps / Aliases are reference material: build them into
+  // `lowerHtml` and append AFTER the live Nodes + Models sections, so the
+  // operational view sits at the top of the page.
+  let lowerHtml = '';
+  const publicUrl = '%%API_BASE%%';
+  lowerHtml += `
+    <div class="section-title">Connection</div>
+    <div class="nodes">
+      <div class="node-card" style="flex:2">
+        <div class="node-name">Quick Start</div>
+        <div class="node-detail" style="margin-top:0.5rem">
+          <strong>Host:</strong> <span class="api-base">${publicUrl}</span>
+          <button class="copy-btn" onclick="copyText('${publicUrl}', this)">copy</button>
+        </div>
+        <div class="node-detail" style="margin-top:0.5rem">
+          <strong>API Key:</strong> <span class="api-base">%%API_KEY%%</span>
+          <button class="copy-btn" onclick="copyText('%%API_KEY%%', this)">copy</button>
+        </div>
+        <div class="node-detail" style="margin-top:0.5rem">
+          <strong>Model:</strong> <span>use the model ID or any alias from the table below</span>
+        </div>
+      </div>
+      <div class="node-card" style="flex:3">
+        <div class="node-name">Example</div>
+        <div style="margin-top:0.5rem">
+          <span class="api-base">curl ${publicUrl}/v1/chat/completions \<br>
+          &nbsp;&nbsp;-H "Authorization: Bearer %%API_KEY%%" \<br>
+          &nbsp;&nbsp;-H "Content-Type: application/json" \<br>
+          &nbsp;&nbsp;-d '{"model":"${models[0]?.aliases?.[0] || models[0]?.id || 'MODEL'}","messages":[{"role":"user","content":"Hello"}]}'</span>
+        </div>
+      </div>
+    </div>`;
+
+  // Quick-launch app links
+  lowerHtml += `
+    <div class="section-title">Apps</div>
+    <div class="nodes">
+      <div class="node-card" style="cursor:default; display:flex; gap:1rem; flex-wrap:wrap; align-items:center; padding:0.75rem 1.25rem">
+        <a href="https://grafana.bcc.sh" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:500">Grafana</a>
+        <a href="https://llm-dashboard.bcc.sh" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:500">Dashboard</a>
+        <a href="http://192.168.42.159:5403" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:500">ACE-Step Music</a>
+      </div>
+    </div>`;
+
+  // Alias descriptions — auto-generated from enabled models with aliases
+  const aliasItems = [];
+  for (const m of models) {
+    if (m.enabled === false || isRouterModel(m)) continue;
+    for (const a of m.aliases) {
+      aliasItems.push({ name: a, model: m.id, type: modelType(m).label });
+    }
+  }
+  lowerHtml += `
+    <details class="alias-details">
+    <summary class="section-title" style="cursor:pointer;user-select:none">Model Aliases <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(${aliasItems.length}, click to expand)</span></summary>
+    <div class="alias-list" style="grid-template-columns: repeat(4, 1fr); margin-top:0.5rem">`;
+  for (const a of aliasItems) {
+    lowerHtml += `<div class="alias-item">
+      <span class="alias-name">${a.name}</span>
+      <span class="alias-desc">${a.model}</span>
+    </div>`;
+  }
+  lowerHtml += `</div></details>`;
+
+  // Nodes
+  html += `<div class="section-title">Nodes</div><div class="nodes">`;
+  for (const [name, n] of Object.entries(nodes)) {
+    const m = nm[name] || {};
+    const reachable = m.reachable === true;
+    const isActive = selectedNode === name;
+    html += `<div class="node-card${isActive ? ' active' : ''}" onclick="selectNode('${name}')">
+        <div class="node-name">${name}</div>
+        <div class="node-detail">Host: <span>${n.host}</span></div>
+        ${n.gpu === 'none'
+          ? `<div class="node-detail">Compute: <span>CPU</span> &middot; <span>no GPU</span></div>`
+          : `<div class="node-detail">GPU: <span>${n.gpu.toUpperCase()}</span>
+          &middot; <span>${n.vram_gb} GB</span></div>`}`;
+
+    if (reachable && n.gpu === 'none' && m.ram_pct !== null && m.ram_pct !== undefined) {
+      // CPU-only node: RAM is the memory signal in place of VRAM. On a
+      // dedicated inference box this tracks what the loaded LLM is holding.
+      const color = vramBarColor(m.ram_pct);
+      const hist = nodeHistory[name] || {vram:[], gpu:[]};
+      html += `
+        <div class="metric-row">
+          <span class="metric-label">RAM</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${color}"
+              style="width:${m.ram_pct}%"></div>
+          </div>
+          <span class="vram-text"><strong>${m.ram_used_gb}</strong>
+            / ${m.ram_total_gb} GB</span>
+          ${sparklineSvg(hist.vram, 'var(--accent)')}
+        </div>`;
+    } else if (reachable && m.vram_pct !== null) {
+      const color = vramBarColor(m.vram_pct);
+      const hist = nodeHistory[name] || {vram:[], gpu:[]};
+      const busy = m.gpu_busy_pct;
+      html += `
+        <div class="metric-row">
+          <span class="metric-label">MEM</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${color}"
+              style="width:${m.vram_pct}%"></div>
+          </div>
+          <span class="vram-text"><strong>${m.vram_used_gb}</strong>
+            / ${m.vram_total_gb} GB</span>
+          ${sparklineSvg(hist.vram, 'var(--accent)')}
+        </div>`;
+      if (busy !== null && busy !== undefined) {
+        const bColor = busy >= 90 ? 'red' : busy >= 50 ? 'yellow' : 'green';
+        html += `
+        <div class="metric-row">
+          <span class="metric-label">GPU</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${bColor}"
+              style="width:${busy}%"></div>
+          </div>
+          <span class="vram-text"><strong>${busy}%</strong></span>
+          ${sparklineSvg(hist.gpu, 'var(--green)')}
+        </div>`;
+      }
+    } else if (reachable) {
+      html += `<div class="node-offline">No metrics</div>`;
+    } else {
+      html += `<div class="node-offline">Agent offline</div>`;
+    }
+
+    // Disk usage
+    if (reachable && m.disk_free_gb !== null && m.disk_free_gb !== undefined
+        && m.disk_total_gb !== null && m.disk_total_gb !== undefined) {
+      const diskUsed = (m.disk_total_gb - m.disk_free_gb).toFixed(0);
+      const diskPct = ((m.disk_total_gb - m.disk_free_gb) / m.disk_total_gb * 100).toFixed(1);
+      const diskColor = diskPct >= 90 ? 'red' : diskPct >= 75 ? 'yellow' : 'green';
+      html += `
+        <div class="metric-row">
+          <span class="metric-label">DISK</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${diskColor}"
+              style="width:${diskPct}%"></div>
+          </div>
+          <span class="vram-text"><strong>${diskUsed}</strong>
+            / ${m.disk_total_gb.toFixed(0)} GB
+            (${m.disk_free_gb.toFixed(0)} free)</span>
+        </div>`;
+    }
+
+    // Per-node co-located services (none configured currently)
+    const svcs = m.services || [];
+    for (const svc of svcs) {
+      html += `<div style="margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border)">`;
+      const dot = svc.reachable ? 'health-running' : 'health-stopped';
+      const lbl = svc.label || svc.name;
+      html += `<div style="font-size:0.8rem;font-weight:500">` +
+        `<span class="health-dot ${dot}"></span>${lbl}</div>`;
+      if (svc.reachable && svc.vram_used_gb !== null && svc.vram_total_gb !== null) {
+        const svcPct = (svc.vram_used_gb / svc.vram_total_gb * 100).toFixed(1);
+        const svcColor = vramBarColor(parseFloat(svcPct));
+        html += `
+          <div class="metric-row">
+            <span class="metric-label">MEM</span>
+            <div class="vram-bar-track">
+              <div class="vram-bar-fill ${svcColor}"
+                style="width:${svcPct}%"></div>
+            </div>
+            <span class="vram-text"><strong>${svc.vram_used_gb}</strong>
+              / ${svc.vram_total_gb} GB</span>
+          </div>`;
+      }
+      if (svc.queue_running > 0 || svc.queue_pending > 0) {
+        html += `<div style="font-size:0.7rem;color:var(--text-dim);margin-top:2px">` +
+          `Queue: ${svc.queue_running} running, ${svc.queue_pending} pending</div>`;
+      }
+      html += `</div>`;
+    }
+
+    html += `</div>`;
+  }
+  html += `</div>`;
+
+  // Models table
+  const hiddenCount = models.filter(m => m.enabled === false || m.agent_state === 'stopped').length;
+  html += `<div class="section-title">Models</div>`;
+
+  // Capability/tag filter chips
+  const capCounts = {}, tagCounts = {};
+  const showTags = ['tts','stt','image_gen','image_edit','music_gen','fim','gui_agent','embedding','reranker','thinking','zen'];
+  for (const m of models) {
+    if (m.enabled === false) continue;
+    for (const c of m.capabilities) { capCounts[c] = (capCounts[c] || 0) + 1; }
+    for (const t of m.tags) { if (showTags.includes(t)) tagCounts[t] = (tagCounts[t] || 0) + 1; }
+  }
+  const hasFilters = selectedNode || selectedCaps.size > 0;
+  const allChips = [
+    ...Object.entries(capCounts).map(([k,v]) => [k,v]),
+    ...Object.entries(tagCounts).map(([k,v]) => [k,v]),
+  ].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  html += `<div class="filter-bar">`;
+  for (const [label, n] of allChips) {
+    const active = selectedCaps.has(label) ? ' active' : '';
+    html += `<span class="filter-chip${active}"` +
+      ` onclick="toggleCap('${label}')">${label}` +
+      ` <span class="count">${n}</span></span>`;
+  }
+  if (hasFilters) {
+    html += `<button class="clear-btn" onclick="clearFilters()">clear filters</button>`;
+  }
+  html += `</div>`;
+
+  if (hiddenCount > 0) {
+    html += `<div class="toggle-row">
+      <input type="checkbox" id="show-hidden" ${showHidden ? 'checked' : ''} onchange="toggleHidden(this.checked)">
+      <label for="show-hidden">Show disabled/stopped models (${hiddenCount})</label>
+    </div>`;
+  }
+  html += `<table><thead><tr>
+    <th>Model</th><th>Backend</th><th>Node(s)</th>
+    <th>VRAM</th><th>Aliases</th><th>Capabilities</th>
+    <th>Flags</th><th>Health</th><th>API Base</th>
+  </tr></thead><tbody>`;
+
+  for (const m of models) {
+    const nodeStr = m.nodes.map(n =>
+      n === m.head_node && m.nodes.length > 1 ? `<strong>${n}</strong>` : n
+    ).join(', ');
+
+    const aliases = m.aliases.map(a => `<span class="badge badge-alias">${a}</span>`).join(' ');
+    const caps = m.capabilities.map(c => `<span class="badge badge-cap">${c}</span>`).join(' ');
+
+    let flags = '';
+    if (m.enabled === false) flags += '<span class="badge badge-off">disabled</span> ';
+    if (m.always_on) flags += '<span class="badge badge-on">always-on</span> ';
+    else flags += '<span class="badge badge-off">on-demand</span> ';
+    if (m.tool_proxy) flags += '<span class="badge badge-tool">tool-proxy</span> ';
+    if (m.nodes.length > 1) flags += '<span class="badge badge-multi">multi-node</span> ';
+    if (m.tags) m.tags.forEach(t => { flags += `<span class="badge badge-tag">${t}</span> `; });
+
+    // Determine status: prefer node-agent state; externals (Zen) fall back to
+    // the registry-derived "routed". Router models have no backend to probe.
+    let statusClass, statusLabel;
+    if (isRouterModel(m)) {
+      statusClass = 'health-healthy';
+      statusLabel = 'router';
+    } else if (m.agent_state) {
+      statusClass = `health-${m.agent_state}`;
+      statusLabel = m.agent_state;
+    } else {
+      statusClass = `health-${m.health}`;
+      statusLabel = m.health === 'routed' ? 'healthy' : m.health;
+    }
+
+    // Secondary indicator slot (reused below for request activity).
+    let healthExtra = '';
+
+    // Request activity + throughput indicator
+    const reqRunning = m.requests_running || 0;
+    const reqWaiting = m.requests_waiting || 0;
+    const tokPerS = m.avg_tok_per_s;
+    const totalReqs = m.total_requests || 0;
+
+    let activityParts = [];
+    if (reqRunning > 0 || reqWaiting > 0) {
+      activityParts.push(`<span style="color:var(--yellow)">⚡ ${reqRunning} active` +
+        (reqWaiting > 0 ? ` +${reqWaiting}w` : '') + `</span>`);
+    }
+    if (tokPerS) {
+      activityParts.push(`<span style="color:var(--text-dim)">${tokPerS} tok/s</span>`);
+    }
+    if (totalReqs > 0) {
+      activityParts.push(`<span style="color:var(--text-dim)">${totalReqs} reqs</span>`);
+    }
+    if (activityParts.length > 0) {
+      healthExtra += `<div style="font-size:0.7rem;margin-top:2px">` +
+        activityParts.join(' · ') + `</div>`;
+    }
+
+    const isHidden = m.enabled === false || m.agent_state === 'stopped';
+    const nodeList = m.nodes.length > 0 ? m.nodes.join(',') : 'external';
+    const capList = m.capabilities.join(',');
+    const tagList = (m.tags || []).join(',');
+
+    // Visibility: check disabled, node filter, cap filter
+    let visible = true;
+    if (isHidden && !showHidden) visible = false;
+    if (selectedNode && !m.nodes.includes(selectedNode))
+      visible = false;
+    if (selectedCaps.size > 0) {
+      const all = [...m.capabilities, ...(m.tags || [])];
+      if (![...selectedCaps].some(c => all.includes(c))) visible = false;
+    }
+
+    const classes = [isHidden ? 'disabled' : ''].filter(Boolean).join(' ');
+    html += `<tr data-model="${m.id}" data-nodes="${nodeList}" data-caps="${capList}" data-tags="${tagList}"${classes ? ` class="${classes}"` : ''}${!visible ? ' style="display:none"' : ''}>
+      <td><div class="model-id">${m.id}</div><div class="model-repo">${m.hf_repo.split('#')[0]}</div>
+        ${m.gguf_file ? `<div class="model-repo">${m.gguf_file}</div>` : ''}</td>
+      <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span>${(() => {
+        const repo = m.hf_repo.split('#')[0].toLowerCase();
+        if (repo.includes('fp8')) return ' <span class="badge badge-tag">FP8</span>';
+        if (repo.includes('fp16')) return ' <span class="badge badge-tag">FP16</span>';
+        if (repo.includes('@q8_0') || repo.includes('-q8')) return ' <span class="badge badge-tag">Q8</span>';
+        if (repo.includes('@q6_k') || repo.includes('-q6')) return ' <span class="badge badge-tag">Q6</span>';
+        if (repo.includes('@q4_k') || repo.includes('-q4') || repo.includes('gptq-int4')) return ' <span class="badge badge-tag">Q4</span>';
+        if (repo.includes('@q3_k') || repo.includes('-q3')) return ' <span class="badge badge-tag">Q3</span>';
+        if (m.backend === 'vllm' && !repo.includes('gptq') && !repo.includes('awq')) return ' <span class="badge badge-tag">FP16</span>';
+        return '';
+      })()}</td>
+      <td>${nodeStr}</td>
+      <td>${m.vram_gb ? m.vram_gb + ' GB' : '<span style="color:var(--text-dim)">—</span>'}</td>
+      <td>${aliases || '<span style="color:var(--text-dim)">—</span>'}</td>
+      <td>${caps}</td>
+      <td>${flags}</td>
+      <td><span style="white-space:nowrap"><span class="health-dot ${statusClass}"></span>${statusLabel}</span>${healthExtra}</td>
+      <td><span class="api-base">${m.api_base}</span></td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // Reference sections (Connection / Apps / Aliases) below the live data.
+  html += lowerHtml;
+  return html;
+}
+
+load();
+setInterval(load, 30000);       // full refresh (LiteLLM + nodes)
+setInterval(pollMetrics, 2000);  // fast GPU metrics only
+
+// ----------------------------------------------------------------------------
+// Quick Chat: one user message -> one model, streamed, with TTFT/tok/s metrics.
+// Non-chat models (embeddings/rerank/stt/tts/image/music) are filtered out the
+// same way modelType() classifies them by tag.
+// ----------------------------------------------------------------------------
+let chatAbort = null;
+
+function chatCapable(m) {
+  if (!m.enabled) return false;
+  const t = m.tags || [];
+  const nonChat = ['embedding','reranker','stt','tts','image_gen','image_edit','music_gen'];
+  return !nonChat.some(x => t.includes(x));
+}
+
+function openChat() {
+  const sel = document.getElementById('chatModel');
+  const models = ((lastData && lastData.models) ? lastData.models : []).filter(chatCapable);
+  sel.innerHTML = models.length
+    ? models.map(m => {
+        const where = m.head_node ? ' · ' + m.head_node
+                    : (m.backend === 'external' ? ' · external' : '');
+        return '<option value="' + m.id + '">' + m.id + where + '</option>';
+      }).join('')
+    : '<option value="">(model list still loading…)</option>';
+  const prev = localStorage.getItem('chatModel');
+  if (prev && models.some(m => m.id === prev)) sel.value = prev;
+  document.getElementById('chatDialog').showModal();
+  document.getElementById('chatInput').focus();
+}
+
+function closeChat() {
+  stopChat();
+  document.getElementById('chatDialog').close();
+}
+
+function stopChat() {
+  if (chatAbort) { chatAbort.abort(); chatAbort = null; }
+  const send = document.getElementById('chatSend');
+  const stop = document.getElementById('chatStop');
+  send.disabled = false; send.style.display = ''; stop.style.display = 'none';
+}
+
+async function sendChat() {
+  const model = document.getElementById('chatModel').value;
+  const input = document.getElementById('chatInput');
+  const msg = input.value.trim();
+  if (!model || !msg) return;
+  localStorage.setItem('chatModel', model);
+
+  const out = document.getElementById('chatOutput');
+  const metricsEl = document.getElementById('chatMetrics');
+  out.innerHTML = '';
+  const reasoningWrap = document.createElement('details');
+  reasoningWrap.className = 'chat-reasoning';
+  reasoningWrap.innerHTML = '<summary>Reasoning</summary><div class="chat-reasoning-body"></div>';
+  const reasoningBody = reasoningWrap.querySelector('.chat-reasoning-body');
+  const answer = document.createElement('div');
+  answer.className = 'chat-answer';
+  out.appendChild(answer);
+  metricsEl.textContent = '';
+
+  const send = document.getElementById('chatSend');
+  const stop = document.getElementById('chatStop');
+  send.disabled = true; send.style.display = 'none'; stop.style.display = '';
+
+  const t0 = performance.now();
+  let tFirst = null, deltaTokens = 0, usageTokens = null, promptTokens = null;
+  let answerText = '', reasoningText = '', gotReasoning = false;
+  chatAbort = new AbortController();
+
+  const fmtMetrics = (done) => {
+    const now = performance.now();
+    const elapsed = (now - t0) / 1000;
+    const ttft = (tFirst !== null) ? (tFirst - t0) / 1000 : null;
+    const toks = (usageTokens !== null) ? usageTokens : deltaTokens;
+    const genWindow = ((tFirst !== null) ? (now - tFirst) : 0) / 1000;
+    const tps = (toks > 0 && genWindow > 0.01) ? (toks / genWindow) : null;
+    const parts = [
+      'TTFT ' + (ttft !== null ? ttft.toFixed(2) + 's' : '—'),
+      (tps !== null ? tps.toFixed(1) : '—') + ' tok/s',
+      toks + ' tok' + (usageTokens === null ? ' (est)' : ''),
+      elapsed.toFixed(1) + 's elapsed',
+    ];
+    if (promptTokens !== null) parts.push(promptTokens + ' prompt');
+    metricsEl.textContent = parts.join('  ·  ') + (done ? '' : '  …');
+  };
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: model, message: msg}),
+      signal: chatAbort.signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    streamLoop:
+    while (true) {
+      const r = await reader.read();
+      if (r.done) break;
+      buf += dec.decode(r.value, {stream: true});
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        for (const line of frame.split('\n')) {
+          const s = line.trim();
+          if (!s.startsWith('data:')) continue;
+          const data = s.slice(5).trim();
+          if (data === '[DONE]') continue;
+          let obj;
+          try { obj = JSON.parse(data); } catch (e) { continue; }
+          if (obj.error) {
+            answer.innerHTML = '<span class="chat-err">' + obj.error + '</span>';
+            chatAbort.abort();
+            break streamLoop;
+          }
+          const choice = (obj.choices && obj.choices[0]) || {};
+          const delta = choice.delta || {};
+          if (delta.reasoning_content) {
+            if (tFirst === null) tFirst = performance.now();
+            deltaTokens++;
+            reasoningText += delta.reasoning_content;
+            if (!gotReasoning) { gotReasoning = true; out.insertBefore(reasoningWrap, answer); }
+            reasoningBody.textContent = reasoningText;
+          }
+          if (delta.content) {
+            if (tFirst === null) tFirst = performance.now();
+            deltaTokens++;
+            answerText += delta.content;
+            answer.textContent = answerText;
+          }
+          if (obj.usage) {
+            if (obj.usage.completion_tokens != null) usageTokens = obj.usage.completion_tokens;
+            if (obj.usage.prompt_tokens != null) promptTokens = obj.usage.prompt_tokens;
+          }
+          fmtMetrics(false);
+          out.scrollTop = out.scrollHeight;
+        }
+      }
+    }
+    fmtMetrics(true);
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      fmtMetrics(true);
+      metricsEl.textContent += ' (stopped)';
+    } else {
+      if (!answerText) answer.innerHTML = '<span class="chat-err">' + ((e && e.message) || e) + '</span>';
+      fmtMetrics(true);
+    }
+  } finally {
+    stopChat();
+  }
+}
+
+// Cmd/Ctrl+Enter sends; Esc closes (native <dialog> behaviour handles Esc).
+document.addEventListener('keydown', (e) => {
+  const dlg = document.getElementById('chatDialog');
+  if (dlg && dlg.open && (e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault(); sendChat();
+  }
+});
+</script>
+</body>
+</html>

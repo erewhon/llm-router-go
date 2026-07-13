@@ -73,12 +73,18 @@ ssh -t "$HOST" "
 "
 
 if [[ "$CUTOVER" == "true" ]]; then
-    echo "==> Cutting over: stop litellm-proxy, start llm-router-go..."
+    echo "==> Cutting over: retire litellm-proxy + litellm-dashboard, (re)start llm-router-go..."
+    # The dashboard UI is now baked into the router binary (served on :4011 via
+    # --dashboard), so the standalone Python litellm-dashboard is retired here.
+    # `restart` (not just `enable --now`) guarantees an already-running router
+    # picks up the freshly installed binary + unit.
     ssh -t "$HOST" "
         set -e
         sudo systemctl stop litellm-proxy || true
         sudo systemctl disable litellm-proxy || true
-        sudo systemctl enable --now llm-router-go
+        sudo systemctl disable --now litellm-dashboard || true
+        sudo systemctl enable llm-router-go
+        sudo systemctl restart llm-router-go
         echo
         systemctl status llm-router-go --no-pager | head -12
     "

@@ -511,6 +511,47 @@ since ~13:30 CDT. LiteLLM (`litellm-proxy.service`) stopped + disabled.
 - Rollback: `just rollback-to-litellm` (in the Python repo's justfile).
   LiteLLM is still installed, just disabled.
 
+#### Phase 3b.v — dashboard baked into the router (done 2026-07-13)
+
+Folds the standalone Python dashboard (`src/llm_router/dashboard.py`, a
+FastAPI app that ran as `litellm-dashboard.service` on euclid `:4011`) into
+the router binary, so a single `go install` / `brew install llm-router`
+ships the status UI with no second service and no Python.
+
+- [x] New `internal/router/dashboard.go` + `dashboard.html`. The frontend is
+      the Python page embedded **byte-exact** via `//go:embed` (extracted with
+      `ast.literal_eval`, no import side-effects); only three homelab-specific
+      strings became `%%API_BASE%%` / `%%API_KEY%%` placeholders substituted at
+      serve time from `DashboardConfig`.
+- [x] The three read-only endpoints reproduce the Python JSON shapes exactly:
+      `/api/models` (registry + concurrent node-agent fan-out), `/api/node-metrics`,
+      and `/api/router-metrics`. The last reads the Prometheus registry
+      **in-process** via a new `routerMetrics.snapshot()` (Gather + walk the
+      `router_*` families) instead of the Python's HTTP self-hop + text parse.
+- [x] `/api/chat` expands `{model, message}` and **re-enters `handleProxy`
+      in-process** as a `/v1/chat/completions` request — same routing + reqlog +
+      metrics path a real call takes, and it bypasses the API-key auth the
+      dashboard listener doesn't carry. A pre-stream routing failure is converted
+      to an SSE `data: {"error": …}` frame (`sseErrorWriter`) so the frontend
+      renders the router's actual message, matching the old Python relay.
+- [x] Served on its own listener so `/v1/*` and its bearer auth are untouched:
+      `--dashboard` (off by default), `--dashboard-addr` (default
+      `127.0.0.1:4011` — safe to run with no auth locally), `--dashboard-public-url`
+      (Connection-card base URL; empty derives `http://localhost:<port>` from
+      `--addr`). A non-loopback `--dashboard-addr` logs a warning (no bearer auth;
+      `/api/chat` can invoke any model). Node fetch is injectable
+      (`Router.nodeFetcher`) so the handler tests stay hermetic.
+- [x] `config.NodeDefinition` gained `UnifiedMemory bool` (already in
+      `models.yaml`) so the Fleet CPU-RAM card excludes unified-memory nodes.
+- [x] 5 new tests (models JSON shape incl. disabled/routed/agent-state,
+      router-metrics rollup, chat SSE error frame, missing-field 400, HTML
+      substitution). Verified live: page renders against the real fleet and a
+      streaming chat to `nemotron-3-super` flowed through.
+- [x] Deployed to euclid on `:4011` via `deploy-router.sh --cutover`, retiring
+      `litellm-dashboard.service`. The hub Caddy front door
+      (`llm-dashboard.bcc.sh` → euclid Tailscale IP `:4011`, oauth2-proxy gated)
+      is unchanged — same port, same all-interfaces bind, same access boundary.
+
 ## Cross-cutting concerns
 
 ### Deploy

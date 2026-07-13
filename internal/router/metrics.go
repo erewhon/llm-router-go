@@ -91,6 +91,77 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 // Handler returns the http.Handler the router mounts at /metrics.
 func (m *routerMetrics) Handler() http.Handler { return m.handler }
 
+// metricsSnapshot is an in-process rollup of the request counters, matching
+// what the Python dashboard used to derive by scraping /metrics and parsing the
+// Prometheus text. Reading the registry directly avoids the HTTP self-hop.
+type metricsSnapshot struct {
+	TotalRequests    int
+	Errors           int // requests with status >= 400
+	ByStatus         map[string]int
+	ByModel          map[string]int
+	TokensPrompt     int
+	TokensCompletion int
+	DurationSum      float64 // seconds, summed across all requests
+	DurationCount    float64 // number of observed requests
+}
+
+// snapshot walks the Prometheus registry and aggregates the router_* families
+// the dashboard cares about. Errors from Gather collapse to a zero snapshot —
+// the dashboard treats it the same as "no traffic yet".
+func (m *routerMetrics) snapshot() metricsSnapshot {
+	s := metricsSnapshot{ByStatus: map[string]int{}, ByModel: map[string]int{}}
+	families, err := m.reg.Gather()
+	if err != nil {
+		return s
+	}
+	for _, mf := range families {
+		switch mf.GetName() {
+		case "router_requests_total":
+			for _, metric := range mf.GetMetric() {
+				v := int(metric.GetCounter().GetValue())
+				var status, model string
+				for _, lp := range metric.GetLabel() {
+					switch lp.GetName() {
+					case "status":
+						status = lp.GetValue()
+					case "model":
+						model = lp.GetValue()
+					}
+				}
+				s.TotalRequests += v
+				s.ByStatus[status] += v
+				if code, err := strconv.Atoi(status); err == nil && code >= 400 {
+					s.Errors += v
+				}
+				s.ByModel[model] += v
+			}
+		case "router_request_duration_seconds":
+			for _, metric := range mf.GetMetric() {
+				h := metric.GetHistogram()
+				s.DurationSum += h.GetSampleSum()
+				s.DurationCount += float64(h.GetSampleCount())
+			}
+		case "router_upstream_tokens_total":
+			for _, metric := range mf.GetMetric() {
+				v := int(metric.GetCounter().GetValue())
+				var kind string
+				for _, lp := range metric.GetLabel() {
+					if lp.GetName() == "kind" {
+						kind = lp.GetValue()
+					}
+				}
+				switch kind {
+				case "prompt":
+					s.TokensPrompt += v
+				case "completion":
+					s.TokensCompletion += v
+				}
+			}
+		}
+	}
+	return s
+}
+
 // Observe records one Record's worth of telemetry. Called from handleProxy's
 // defer alongside the reqlog Sink, so every request — including 400/404 —
 // shows up in the metrics. Unresolved model names collapse into a single

@@ -101,6 +101,10 @@ type NodeDefinition struct {
 	VRAMGB    int                          `yaml:"vram_gb"`
 	AgentPort int                          `yaml:"agent_port,omitempty"`
 	Services  map[string]ServiceDefinition `yaml:"services,omitempty"`
+	// UnifiedMemory marks a node whose RAM and VRAM are the same pool (Apple
+	// Silicon, GB10 Sparks, Strix Halo). The dashboard excludes these from the
+	// aggregate Fleet CPU-RAM card so their VRAM isn't double-counted as RAM.
+	UnifiedMemory bool `yaml:"unified_memory,omitempty"`
 }
 
 // UnmarshalYAML default-initialises AgentPort to 8100 before decoding,
