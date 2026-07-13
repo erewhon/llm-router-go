@@ -1,6 +1,6 @@
 # Decision Doc — Large-MoE Host Build (the "bigger than the Sparks" box)
 
-**Status:** Scoped · **Date:** 2026-06-12 (scope locked 2026-06-13) · **Owner:** Steven
+**Status:** Scoped · **Date:** 2026-06-12 (scope locked 2026-06-13; K2.7-Code added 2026-06-14) · **Owner:** Steven
 
 ## Scope (locked)
 
@@ -175,12 +175,18 @@ Real hybrid data points (`ik_llama.cpp`, DeepSeek 671B): EPYC 9334-QS + RTX 3070
 | Qwen3-Coder-480B-A35B | 35B | ~270 GB | ✅ standard Qwen3 MoE | likely | well-supported |
 | MiniMax M3 428B-A23B | 23B | ~240 GB | ⚠️ **not yet** — MSA + multimodal, no GGUF/arch support yet | n/a | wait for llama.cpp arch PR; lower active = faster once supported |
 | Nemotron-3 Ultra 550B-A55B | 55B | ~300 GB | ⚠️ Mamba-hybrid arch support uncertain | has MTP | **A55B = compute-heavy**, slower decode even on big BW |
-| Kimi-K2-class ~1T-A32B | 32B | ~550 GB | ✅ (llama.cpp) | — | needs **768 GB** at Q4; Q2 fits ~340 GB |
+| **Kimi K2.7-Code** 1T-A32B | 32B | IQ4_XS ~495 / Q4_K_XL ~584 GB | ✅ GGUF day-1 (Unsloth) | — | native INT4 (QAT) → Q4 ≈ lossless, no gain above it. Near-lossless Q4 wants **768 GB**; **IQ4_XS (495 GB) fits 576**; Q2_K_XL ~339 GB, IQ1_M ~304 GB |
 
 Takeaways: **DeepSeek-671B is the natural primary target** (mature support, MTP,
 fits 512–576 GB). Active-param count drives decode — M3 (A23B) will be the
 *fastest* of the giants once it has GGUF support; Nemotron Ultra (A55B) the
-slowest. Kimi at Q4 is the only one that forces 768 GB.
+slowest. **Kimi K2.7-Code (released 2026-06-12) is the model that sets the
+576-vs-768 GB decision:** its **A32B is *fewer* active params than DeepSeek's
+A37B**, so it **decodes at a similar t/s** on this box — the 1 T total only
+dictates *RAM*, not speed. At 576 GB you run it at IQ4_XS (495 GB); only 768 GB
+buys near-lossless Q4 (584 GB). Because it ships **native INT4 (QAT)**, Q4 is
+effectively lossless and there's no reason to go above it. (Access today:
+Moonshot's API — **not yet on the Zen endpoint**, which tops out at `kimi-k2.6`.)
 
 ### Coding quality vs RAM — the buying lens
 
@@ -195,14 +201,15 @@ SEAL), not the ~7-point headline.
 | DeepSeek V3.2 (671B-A37B, MIT) | ~67–73% | ~380 GB | ✅ comfortable |
 | Qwen3-Coder-480B-A35B (Apache-2.0) | ~65–67% | ~270 GB | ✅ comfortable |
 | MiniMax M2.7 (230B, non-commercial) | ~78% *unconfirmed* (official SWE-Pro 56%) | ~140 GB | ✅ easy |
-| Kimi K2.6 (1T-A32B, mod-MIT) | ~80% (vendor) | ~550 GB | ⚠️ tight — wants 768 GB or Q3 |
+| Kimi **K2.7-Code** (1T-A32B, mod-MIT, coding-tuned) | ~80%+ (vendor; +21.8% Kimi Code Bench v2 vs K2.6) | IQ4_XS ~495 / Q4 ~584 GB | ⚠️ IQ4_XS fits; near-lossless Q4 → 768 GB |
 | DeepSeek V4 Pro (1.6T-A49B, MIT) | ~80% (aggregators) | ~800 GB+ | ❌ Tier C+ (768 GB–1 TB) |
 | *ref:* Claude Opus 4.7 / 4.8 | 87.6 / 88.6% (vendor, API-only) | — | not self-hostable |
 
 The knee: the **576 GB hedge comfortably runs the ~65–73% tier** (DeepSeek
 V3.2-671B, Qwen3-Coder-480B) — very good, self-hosted, ~10–20 *effective* points
-behind Opus. Chasing the **~80% open tier costs RAM** — Kimi K2.6 is borderline
-at Q4 (wants ~768 GB) and DeepSeek V4 Pro (1.6 T) is squarely 768 GB–1 TB. **No
+behind Opus. Chasing the **~80% open tier costs RAM** — Kimi K2.7-Code runs at
+IQ4_XS (495 GB) on 576 GB but wants **768 GB** for near-lossless Q4, and DeepSeek
+V4 Pro (1.6 T) is squarely 768 GB–1 TB. **No
 open model matches Opus 4.7/4.8 for hard agentic coding yet**; the choice is
 "very good + owned" vs "best + rented."
 
@@ -439,6 +446,7 @@ Platform/RAM/benchmarks: llama.cpp Discussions #11765 / #11733 / #11881;
 ik_llama.cpp Discussions #258 / #477; ahelpme.com EPYC 9554 bench; Digital
 Spaceport EPYC DeepSeek; Chips and Cheese / StorageReview Turin; Phoronix DDR5
 EPYC scaling; TrendForce / Tom's Hardware / TechPowerUp DRAM pricing; RunAIHome
-Kimi K2 guide. GPU pricing/fit: XiongjieDai GPU benchmarks, LocalLLM.in 96 GB
+Kimi K2 guide; Kimi K2.7-Code release 2026-06-12 (MarkTechPost; HF
+`unsloth/Kimi-K2.7-Code-GGUF` for exact quant sizes). GPU pricing/fit: XiongjieDai GPU benchmarks, LocalLLM.in 96 GB
 RTX PRO 6000, eBay used-market spot checks. (Full URL list in the research
 threads that produced this doc.)
