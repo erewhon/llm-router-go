@@ -191,9 +191,11 @@ func run(args []string) int {
 		}
 		go func() {
 			logger.Info("dashboard starting", "addr", *dashboardAddr, "public_url", apiBase)
+			// Soft-fail, like the reqlog sink: the dashboard is auxiliary, so a
+			// bind error (e.g. the old service still holds the port mid-rollout)
+			// is logged loudly but must never take down inference on --addr.
 			if err := httpx.ServeContext(ctx, dashSrv, *shutdownTo); err != nil {
-				logger.Error("dashboard server stopped with error", "err", err)
-				stop() // take the whole process down if the dashboard listener dies
+				logger.Error("dashboard listener stopped with error; router continues without it", "err", err)
 			}
 		}()
 	}
