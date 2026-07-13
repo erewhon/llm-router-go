@@ -103,6 +103,16 @@
     color: var(--text-dim); width: 2rem;
     text-transform: uppercase; flex-shrink: 0;
   }
+  /* Router stat rows (Requests/Throughput): the labels are whole words
+     ("errors", "avg latency"), not the short "VRAM"/"RAM" the 2rem
+     .metric-label was sized for — so they get a wider, no-wrap column that
+     also keeps the values aligned. (Distinct from the header-card
+     .stat-label, which is a block label under a big number.) */
+  .rstat-label {
+    font-size: 0.65rem; font-weight: 600;
+    color: var(--text-dim); width: 5.5rem;
+    text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
+  }
   .vram-bar-track {
     flex: 1; height: 6px; min-width: 40px;
     background: var(--border); border-radius: 3px;
@@ -598,15 +608,15 @@ function render(data) {
         </div>
         <div class="node-card">
           <div class="node-name">Requests</div>
-          <div class="metric-row"><span class="metric-label">total</span><span class="vram-text"><strong>${(rt.total_requests || 0).toLocaleString()}</strong></span></div>
-          <div class="metric-row"><span class="metric-label">errors</span><span class="vram-text">${rt.errors || 0} <span style="color:var(--text-dim)">(${errPct}%)</span></span></div>
-          <div class="metric-row"><span class="metric-label">rate</span><span class="vram-text"><strong>${reqps}</strong> req/s</span></div>
+          <div class="metric-row"><span class="rstat-label">total</span><span class="vram-text"><strong>${(rt.total_requests || 0).toLocaleString()}</strong></span></div>
+          <div class="metric-row"><span class="rstat-label">errors</span><span class="vram-text">${rt.errors || 0} <span style="color:var(--text-dim)">(${errPct}%)</span></span></div>
+          <div class="metric-row"><span class="rstat-label">rate</span><span class="vram-text"><strong>${reqps}</strong> req/s</span></div>
         </div>
         <div class="node-card">
           <div class="node-name">Throughput</div>
-          <div class="metric-row"><span class="metric-label">tokens</span><span class="vram-text"><strong>${totalTok.toLocaleString()}</strong></span></div>
-          <div class="metric-row"><span class="metric-label">rate</span><span class="vram-text"><strong>${tokps}</strong> tok/s</span></div>
-          <div class="metric-row"><span class="metric-label">avg latency</span><span class="vram-text">${avgLat} ms</span></div>
+          <div class="metric-row"><span class="rstat-label">tokens</span><span class="vram-text"><strong>${totalTok.toLocaleString()}</strong></span></div>
+          <div class="metric-row"><span class="rstat-label">rate</span><span class="vram-text"><strong>${tokps}</strong> tok/s</span></div>
+          <div class="metric-row"><span class="rstat-label">avg latency</span><span class="vram-text">${avgLat} ms</span></div>
         </div>
         <div class="node-card" style="flex:2">
           <div class="node-name">Top models <span style="color:var(--text-dim);font-weight:400">by requests</span></div>
