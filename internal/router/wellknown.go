@@ -85,11 +85,23 @@ type wellKnownPrvOpts struct {
 type wellKnownModel struct {
 	Name  string         `json:"name"`
 	Limit wellKnownLimit `json:"limit"`
+	// Cost is omitted for models the registry doesn't price (nil). OpenCode
+	// renders per-request $ from it; without it, no cost shows.
+	Cost *wellKnownCost `json:"cost,omitempty"`
 }
 
 type wellKnownLimit struct {
 	Context int `json:"context"`
 	Output  int `json:"output"`
+}
+
+// wellKnownCost mirrors the OpenCode config schema's model.cost object. Values
+// are USD per 1M tokens — the same unit as models.yaml's *_cost_per_million,
+// so they map across directly. cache_read/cache_write are omitted (the
+// registry has no cache pricing).
+type wellKnownCost struct {
+	Input  float64 `json:"input"`
+	Output float64 `json:"output"`
 }
 
 // buildWellKnown materializes the document from the router's active model set
@@ -110,10 +122,22 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 		if m.APIClass != config.APIClassChat {
 			continue
 		}
+		// Emit cost when the registry prices the model — including an explicit
+		// 0/0 for free local models (accurate: OpenCode shows $0.00). Omit it
+		// only when unpriced (both nil), so those models simply show no cost
+		// rather than a misleading zero. Shared across the model's aliases.
+		var cost *wellKnownCost
+		if m.InputCostPerMillion != nil || m.OutputCostPerMillion != nil {
+			cost = &wellKnownCost{
+				Input:  derefFloat(m.InputCostPerMillion),
+				Output: derefFloat(m.OutputCostPerMillion),
+			}
+		}
 		emit := func(name string) {
 			models[name] = wellKnownModel{
 				Name:  name,
 				Limit: wellKnownLimit{Context: ctxLimit, Output: outLimit},
+				Cost:  cost,
 			}
 		}
 		if len(m.Aliases) == 0 {
@@ -172,4 +196,11 @@ func (rt *Router) handleWellKnown(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(rt.buildWellKnown()); err != nil {
 		rt.logger.ErrorContext(r.Context(), "well-known encode failed", "err", err)
 	}
+}
+
+func derefFloat(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

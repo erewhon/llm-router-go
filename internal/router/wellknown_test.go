@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/erewhon/llm-router-go/internal/config"
 )
 
 // wellKnownResp mirrors the wire JSON for assertions. As of the 2026-06-06
@@ -24,8 +26,9 @@ type wellKnownResp struct {
 }
 
 // Convenience accessors to keep older assertions compact.
-func (r *wellKnownResp) Schema() string                                 { return r.Config.Schema }
-func (r *wellKnownResp) Provider() map[string]wellKnownTestProv         { return r.Config.Provider }
+func (r *wellKnownResp) Schema() string                         { return r.Config.Schema }
+func (r *wellKnownResp) Provider() map[string]wellKnownTestProv { return r.Config.Provider }
+
 type wellKnownTestProv struct {
 	NPM     string `json:"npm"`
 	Name    string `json:"name"`
@@ -39,6 +42,10 @@ type wellKnownTestProv struct {
 			Context int `json:"context"`
 			Output  int `json:"output"`
 		} `json:"limit"`
+		Cost *struct {
+			Input  float64 `json:"input"`
+			Output float64 `json:"output"`
+		} `json:"cost"`
 	} `json:"models"`
 }
 
@@ -48,6 +55,64 @@ func getWellKnown(t *testing.T, rt *Router) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/opencode", nil)
 	rt.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func TestWellKnown_EmitsCostFromRegistry(t *testing.T) {
+	const yaml = `
+nodes:
+  n1: {host: n1.local, gpu: nvidia, vram_gb: 80}
+models:
+  priced-ext:
+    hf_repo: zen/priced
+    backend: external
+    api_base: https://api.example/v1
+    input_cost_per_million: 3.0
+    output_cost_per_million: 15.0
+    aliases: [priced]
+  free-local:
+    hf_repo: local/free
+    backend: vllm
+    node: n1
+    input_cost_per_million: 0
+    output_cost_per_million: 0
+    aliases: [freebie]
+  unpriced-ext:
+    hf_repo: zen/unpriced
+    backend: external
+    api_base: https://api.example/v1
+    aliases: [nocost]
+`
+	reg, err := config.LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	rt := New(reg, nil, WithWellKnown(WellKnownConfig{
+		ProviderID: "llm", ProviderName: "LLM Router", BaseURL: "https://llm/v1",
+	}))
+
+	rec := getWellKnown(t, rt)
+	var resp wellKnownResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	models := resp.Provider()["llm"].Models
+
+	// Priced external → cost carries the registry's $/1M values.
+	if c := models["priced"].Cost; c == nil {
+		t.Errorf("priced model omitted cost")
+	} else if c.Input != 3.0 || c.Output != 15.0 {
+		t.Errorf("priced cost = %v/%v, want 3/15", c.Input, c.Output)
+	}
+	// Free local → cost present, explicit 0/0 (accurate $0.00, not omitted).
+	if c := models["freebie"].Cost; c == nil {
+		t.Errorf("free model omitted cost, want explicit 0/0")
+	} else if c.Input != 0 || c.Output != 0 {
+		t.Errorf("free cost = %v/%v, want 0/0", c.Input, c.Output)
+	}
+	// Unpriced → no cost object at all (OpenCode shows no cost, not $0).
+	if c := models["nocost"].Cost; c != nil {
+		t.Errorf("unpriced model should omit cost, got %+v", c)
+	}
 }
 
 func TestWellKnown_DisabledReturns404(t *testing.T) {
