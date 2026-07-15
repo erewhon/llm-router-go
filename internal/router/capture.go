@@ -87,28 +87,30 @@ func (s *streamTailCapture) Tail() []byte { return s.buf.Bytes() }
 // ---------------------------------------------------------------------------
 
 // parseUsage extracts an OpenAI-shape `usage` object from a non-streaming
-// response body. Returns nil if the body has no usage field. The three
-// fields are returned as *int so a real 0 (e.g. rerank with zero billable
-// tokens) is distinguishable from "absent".
-func parseUsage(body []byte) (prompt, completion, total *int) {
+// response body. Returns nil if the body has no usage field. The token counts
+// are *int so a real 0 (e.g. rerank with zero billable tokens) is
+// distinguishable from "absent". tokPerSec carries Atlas' non-standard
+// `response_token/s` (the engine's own measured decode rate) when present.
+func parseUsage(body []byte) (prompt, completion, total *int, tokPerSec *float64) {
 	var r struct {
 		Usage *struct {
-			PromptTokens     *int `json:"prompt_tokens"`
-			CompletionTokens *int `json:"completion_tokens"`
-			TotalTokens      *int `json:"total_tokens"`
+			PromptTokens     *int     `json:"prompt_tokens"`
+			CompletionTokens *int     `json:"completion_tokens"`
+			TotalTokens      *int     `json:"total_tokens"`
+			RespTokPerSec    *float64 `json:"response_token/s"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil || r.Usage == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return r.Usage.PromptTokens, r.Usage.CompletionTokens, r.Usage.TotalTokens
+	return r.Usage.PromptTokens, r.Usage.CompletionTokens, r.Usage.TotalTokens, r.Usage.RespTokPerSec
 }
 
 // extractSSEUsage scans the tail bytes of an SSE stream for the last
 // `data: { ... "usage": {...} ... }` event and returns the parsed usage.
 // Robust to a truncated leading event (the tail may start mid-event after
 // the rolling buffer wraps).
-func extractSSEUsage(tail []byte) (prompt, completion, total *int) {
+func extractSSEUsage(tail []byte) (prompt, completion, total *int, tokPerSec *float64) {
 	// Walk lines, find data: payloads, parse each, keep the last usage seen.
 	for _, line := range bytes.Split(tail, []byte("\n")) {
 		line = bytes.TrimRight(line, "\r")
@@ -119,11 +121,11 @@ func extractSSEUsage(tail []byte) (prompt, completion, total *int) {
 		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}
-		if p, c, tot := parseUsage(data); p != nil || c != nil || tot != nil {
-			prompt, completion, total = p, c, tot
+		if p, c, tot, tps := parseUsage(data); p != nil || c != nil || tot != nil || tps != nil {
+			prompt, completion, total, tokPerSec = p, c, tot, tps
 		}
 	}
-	return prompt, completion, total
+	return prompt, completion, total, tokPerSec
 }
 
 // contentTypeIsSSE reports whether the value indicates Server-Sent Events.

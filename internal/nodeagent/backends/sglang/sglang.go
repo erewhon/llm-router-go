@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
@@ -28,25 +27,10 @@ import (
 // DefaultPort is the conventional SGLang port on the user's fleet.
 const DefaultPort = 5391
 
-// Backend probes an SGLang, vLLM, or Atlas backend over HTTP (all three
-// share the OpenAI /v1/models API and a Prometheus /metrics endpoint).
+// Backend probes an SGLang (or vLLM-compatible) backend over HTTP.
 type Backend struct {
 	host   string
 	client *http.Client
-
-	// prevGen holds the last (token counter, timestamp) per model so the
-	// driver can derive tok/s from Atlas' monotonic
-	// atlas_generation_tokens_total counter across on-demand scrapes.
-	// SGLang/vLLM report throughput directly and don't touch this.
-	// Guarded by mu; keyed by modelID (a node may host more than one model).
-	mu      sync.Mutex
-	prevGen map[string]genSample
-}
-
-// genSample is one reading of a cumulative generated-token counter.
-type genSample struct {
-	tokens float64
-	at     time.Time
 }
 
 // New returns a Backend that probes host:<port>. host is typically
@@ -60,7 +44,6 @@ func New(host string) *Backend {
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		prevGen: map[string]genSample{},
 	}
 }
 
@@ -102,51 +85,13 @@ func (b *Backend) Status(ctx context.Context, modelID string, model *config.Mode
 		s.RequestsRunning = snap.running
 		s.RequestsWaiting = snap.waiting
 		s.TotalRequests = snap.total
-		switch {
-		case snap.avgTokPerSec > 0:
-			// SGLang/vLLM expose throughput directly (gauge or histogram).
+		if snap.avgTokPerSec > 0 {
 			v := snap.avgTokPerSec
 			s.AvgTokPerSec = &v
-		case snap.hasGenTokens:
-			// Atlas exposes only a cumulative token counter; derive a rate
-			// from the delta since this model's previous scrape.
-			if v, ok := b.tokRate(modelID, snap.genTokens, time.Now()); ok {
-				s.AvgTokPerSec = &v
-			}
 		}
 	}
 
 	return s
-}
-
-// tokRate turns Atlas' monotonic atlas_generation_tokens_total counter into an
-// average tokens/sec over the interval since modelID was last probed. It
-// returns (0, false) on the first sample, when no time elapsed, when the
-// counter went backwards (an engine restart resets it), or when the interval
-// was idle (no new tokens) — matching the gauge/histogram path's convention of
-// reporting only when >0. Because probing is on-demand, the rate reflects the
-// dashboard's refresh interval: accurate during sustained generation, 0 (nil)
-// when idle.
-func (b *Backend) tokRate(modelID string, tokens float64, now time.Time) (float64, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.prevGen == nil {
-		b.prevGen = map[string]genSample{}
-	}
-	prev, had := b.prevGen[modelID]
-	b.prevGen[modelID] = genSample{tokens: tokens, at: now}
-	if !had {
-		return 0, false
-	}
-	dt := now.Sub(prev.at).Seconds()
-	if dt <= 0 {
-		return 0, false
-	}
-	delta := tokens - prev.tokens
-	if delta <= 0 {
-		return 0, false
-	}
-	return roundOneDecimal(delta / dt), true
 }
 
 // checkServing fetches /v1/models. It returns (true, nil) when the

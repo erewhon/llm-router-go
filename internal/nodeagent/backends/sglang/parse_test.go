@@ -116,36 +116,25 @@ func TestRoundOneDecimal(t *testing.T) {
 	}
 }
 
-func TestParseMetrics_Atlas(t *testing.T) {
-	// Atlas exposes atlas_*-prefixed counters/gauges and, unlike SGLang/vLLM,
-	// no throughput gauge or per-output-token histogram (its one histogram is
-	// time-to-first-token). parseMetrics should surface the request gauges and
-	// the raw generated-token counter (hasGenTokens) while leaving
-	// avgTokPerSec at 0 — the driver derives the rate from the counter.
+func TestParseMetrics_AtlasRequestGauges(t *testing.T) {
+	// Atlas exposes atlas_*-prefixed request gauges; tok/s is measured at the
+	// router, not here, so avgTokPerSec stays 0.
 	body := []byte(`
-# HELP atlas_requests_active Currently active requests
 # TYPE atlas_requests_active gauge
-atlas_requests_active 3
+atlas_requests_active 2
 # TYPE atlas_requests_total counter
 atlas_requests_total 100
-# HELP atlas_generation_tokens_total Total tokens generated
 # TYPE atlas_generation_tokens_total counter
 atlas_generation_tokens_total 12345
-# TYPE atlas_time_to_first_token_seconds histogram
-atlas_time_to_first_token_seconds_sum 4.5
-atlas_time_to_first_token_seconds_count 8
 `)
 	m := parseMetrics(body)
-	if m.running != 3 {
-		t.Errorf("running = %d, want 3", m.running)
+	if m.running != 2 {
+		t.Errorf("running = %d, want 2", m.running)
 	}
 	if m.total != 100 {
 		t.Errorf("total = %d, want 100", m.total)
 	}
-	if !m.hasGenTokens || m.genTokens != 12345 {
-		t.Errorf("genTokens = %v (has=%v), want 12345 true", m.genTokens, m.hasGenTokens)
-	}
 	if m.avgTokPerSec != 0 {
-		t.Errorf("avgTokPerSec = %v, want 0 (Atlas has no gauge/histogram; rate is driver-side)", m.avgTokPerSec)
+		t.Errorf("avgTokPerSec = %v, want 0 (router measures Atlas tok/s)", m.avgTokPerSec)
 	}
 }

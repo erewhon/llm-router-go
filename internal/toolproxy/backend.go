@@ -76,6 +76,12 @@ type usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// RespTokPerSec passes the backend engine's own decode rate (Atlas'
+	// non-standard response_token/s) straight through to the client, so the
+	// router can record accurate tok/s for tool-proxy-routed models instead of
+	// falling back to a prefill-inflated completion/latency estimate. Pointer +
+	// omitempty so engines that don't report it don't emit a bogus 0.
+	RespTokPerSec *float64 `json:"response_token/s,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

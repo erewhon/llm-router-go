@@ -239,7 +239,21 @@ func (rt *Router) fetchAllNodeMetrics(ctx context.Context) map[string]nodeMetric
 // ---------------------------------------------------------------------------
 
 func (rt *Router) handleDashNodeMetrics(w http.ResponseWriter, r *http.Request) {
-	writeDashJSON(w, rt.fetchAllNodeMetrics(r.Context()))
+	metrics := rt.fetchAllNodeMetrics(r.Context())
+	// Overlay the router's own per-response tok/s so the fast poll carries the
+	// same figure as /api/models. This is the uniform, backend-agnostic source
+	// (incl. Atlas, whose Prometheus counter can't be rated); the node-agent
+	// value only fills in where the router hasn't measured recently.
+	now := time.Now()
+	for name, nm := range metrics {
+		for i := range nm.Models {
+			if v, ok := rt.tokStats.get(nm.Models[i].ModelID, now); ok {
+				nm.Models[i].AvgTokPerS = &v
+			}
+		}
+		metrics[name] = nm
+	}
+	writeDashJSON(w, metrics)
 }
 
 type dashModel struct {
@@ -330,6 +344,14 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		reqs := agentReqs[id]
 		apiBase, _ := rt.registry.APIBase(id, nil)
 
+		// tok/s: prefer the router's own per-response measurement (uniform
+		// across backends, incl. Atlas whose Prometheus counter can't be
+		// rated); fall back to the node-agent's engine gauge (SGLang/vLLM).
+		avgTok := reqs.AvgTokPerS
+		if v, ok := rt.tokStats.get(id, time.Now()); ok {
+			avgTok = &v
+		}
+
 		models = append(models, dashModel{
 			ID:              id,
 			HFRepo:          m.HFRepo,
@@ -348,7 +370,7 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 			AgentState:      statePtr,
 			RequestsRunning: reqs.RequestsRunning,
 			RequestsWaiting: reqs.RequestsWaiting,
-			AvgTokPerS:      reqs.AvgTokPerS,
+			AvgTokPerS:      avgTok,
 			TotalRequests:   reqs.TotalRequests,
 			GGUFFile:        m.GGUFFile,
 		})

@@ -62,6 +62,9 @@ type Router struct {
 	// nodeFetcher probes one node agent for the dashboard. Defaults to the
 	// real HTTP fetchNodeMetrics; tests set a stub to stay hermetic.
 	nodeFetcher func(ctx context.Context, host string, agentPort int) nodeMetric
+	// tokStats holds the most recent measured tok/s per model, learned from
+	// response usage while proxying. Feeds the dashboard throughput tile.
+	tokStats *tokTracker
 }
 
 // Option configures a Router at construction time.
@@ -143,6 +146,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		version:       "dev",
 		started:       time.Now(),
 		nodeFetcher:   fetchNodeMetrics,
+		tokStats:      newTokTracker(),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -218,11 +222,15 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.APIClass = string(resolved.APIClass)
 				lr.ViaToolProxy = resolved.ViaToolProxy
 			}
+			var tokPerSec *float64
 			switch {
 			case cap.jsonBody != nil:
-				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = parseUsage(cap.jsonBody)
+				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = parseUsage(cap.jsonBody)
 			case cap.sseTail != nil:
-				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = extractSSEUsage(cap.sseTail.Tail())
+				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = extractSSEUsage(cap.sseTail.Tail())
+			}
+			if resolved != nil {
+				rt.tokStats.record(resolved.ModelID, tokPerSec, lr.CompletionTokens, lr.LatencyMS, time.Now())
 			}
 			rt.sink.Log(lr)
 			rt.metrics.Observe(lr)

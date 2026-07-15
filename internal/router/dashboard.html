@@ -948,8 +948,8 @@ function render(data) {
 }
 
 load();
-setInterval(load, 30000);       // full refresh (LiteLLM + nodes)
-setInterval(pollMetrics, 2000);  // fast GPU metrics only
+setInterval(load, 30000);       // full refresh (registry + nodes)
+setInterval(pollMetrics, 1000);  // fast live metrics (GPU, requests, tok/s)
 
 // ----------------------------------------------------------------------------
 // Quick Chat: one user message -> one model, streamed, with TTFT/tok/s metrics.
