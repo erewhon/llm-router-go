@@ -9,10 +9,18 @@ import (
 // SGLang or vLLM /metrics endpoint. Both engines share the protocol but
 // expose slightly different metric names; the parser accepts both.
 type metricsSnapshot struct {
-	running       int
-	waiting       int
-	total         int
-	avgTokPerSec  float64
+	running      int
+	waiting      int
+	total        int
+	avgTokPerSec float64
+
+	// genTokens is the cumulative generated-token counter (Atlas'
+	// atlas_generation_tokens_total). Atlas exposes no throughput gauge or
+	// per-output-token latency histogram, so the driver turns this counter
+	// into a rate across successive scrapes. hasGenTokens distinguishes a
+	// genuine 0 from the metric being absent (SGLang/vLLM don't emit it).
+	genTokens    float64
+	hasGenTokens bool
 }
 
 // parseMetrics reads Prometheus text-format exposition and pulls out the
@@ -24,6 +32,10 @@ type metricsSnapshot struct {
 //  2. The `inter_token_latency_seconds` histogram (SGLang) or
 //     `time_per_output_token_seconds` (vLLM) — sum/count gives mean
 //     latency per token, which inverts to tok/s.
+//
+// Atlas exposes neither, only the `atlas_generation_tokens_total` counter;
+// parseMetrics records it (genTokens/hasGenTokens) and leaves avgTokPerSec
+// at 0 so the stateful driver can turn it into a rate across scrapes.
 func parseMetrics(data []byte) metricsSnapshot {
 	var m metricsSnapshot
 	var ttSum float64
@@ -68,6 +80,20 @@ func parseMetrics(data []byte) metricsSnapshot {
 			ttSum = val
 		case "inter_token_latency_seconds_count", "time_per_output_token_seconds_count":
 			ttCount = int(val)
+
+		// Atlas (Avarok) exposes atlas_*-prefixed metrics and, unlike
+		// SGLang/vLLM, neither a throughput gauge nor a per-output-token
+		// latency histogram — only counters (its one histogram is
+		// time-to-FIRST-token, i.e. prefill, not decode). Surface the
+		// request gauges directly and hand the generated-token counter to
+		// the driver, which derives tok/s as a rate across scrapes.
+		case "atlas_requests_active":
+			m.running = int(val)
+		case "atlas_requests_total":
+			m.total = int(val)
+		case "atlas_generation_tokens_total":
+			m.genTokens = val
+			m.hasGenTokens = true
 		}
 	}
 

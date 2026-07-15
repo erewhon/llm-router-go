@@ -196,3 +196,29 @@ func TestStatus_NilModelMatchedPort(t *testing.T) {
 		t.Errorf("state = %q, want running", s.State)
 	}
 }
+
+func TestBackend_tokRate(t *testing.T) {
+	b := New("localhost")
+	base := time.Now()
+
+	// First sample establishes a baseline: no rate yet.
+	if v, ok := b.tokRate("m", 1000, base); ok {
+		t.Errorf("first sample: got (%v, true), want (_, false)", v)
+	}
+	// 500 new tokens over 5s -> 100 tok/s.
+	if v, ok := b.tokRate("m", 1500, base.Add(5*time.Second)); !ok || v != 100 {
+		t.Errorf("rate = %v (ok=%v), want (100, true)", v, ok)
+	}
+	// Idle interval (no new tokens) -> no rate reported.
+	if v, ok := b.tokRate("m", 1500, base.Add(10*time.Second)); ok {
+		t.Errorf("idle: got (%v, true), want (_, false)", v)
+	}
+	// Counter reset (engine restart) -> no rate reported.
+	if v, ok := b.tokRate("m", 200, base.Add(15*time.Second)); ok {
+		t.Errorf("reset: got (%v, true), want (_, false)", v)
+	}
+	// Per-model rate state is independent.
+	if _, ok := b.tokRate("other", 5000, base.Add(16*time.Second)); ok {
+		t.Errorf("new model first sample: want (_, false)")
+	}
+}
