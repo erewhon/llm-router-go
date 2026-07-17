@@ -1,6 +1,7 @@
 package router
 
 import (
+	"compress/gzip"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,11 @@ type anthropicUpstream struct {
 	xForwarded  string
 	respHeaders map[string]string
 	respBody    string
+	// gzipResp mimics api.anthropic.com: when the request advertises gzip, the
+	// response body is gzip-compressed with a Content-Encoding: gzip header.
+	gzipResp bool
+	// acceptEnc records the Accept-Encoding the upstream actually received.
+	acceptEnc string
 }
 
 func (u *anthropicUpstream) server(t *testing.T) *httptest.Server {
@@ -32,8 +38,16 @@ func (u *anthropicUpstream) server(t *testing.T) *httptest.Server {
 		u.apiKey = r.Header.Get("x-api-key")
 		u.betaHeader = r.Header.Get("anthropic-beta")
 		u.xForwarded = r.Header.Get("X-Forwarded-For")
+		u.acceptEnc = r.Header.Get("Accept-Encoding")
 		for k, v := range u.respHeaders {
 			w.Header().Set(k, v)
+		}
+		if u.gzipResp && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			gz := gzip.NewWriter(w)
+			_, _ = io.WriteString(gz, u.respBody)
+			_ = gz.Close()
+			return
 		}
 		_, _ = io.WriteString(w, u.respBody)
 	}))
@@ -152,6 +166,66 @@ func TestAnthropic_SSE_CapturesUsageFromEvents(t *testing.T) {
 		lr.CacheCreationInputTokens == nil || *lr.CacheCreationInputTokens != 5 ||
 		lr.CacheReadInputTokens == nil || *lr.CacheReadInputTokens != 200 {
 		t.Errorf("SSE usage wrong: in=%v out=%v cc=%v cr=%v",
+			lr.PromptTokens, lr.CompletionTokens, lr.CacheCreationInputTokens, lr.CacheReadInputTokens)
+	}
+}
+
+// TestAnthropic_SSE_CapturesUsage_GzipResponse is the regression for the v0.6.0
+// bug where a gzip'd upstream response made the usage tee scan compressed bytes
+// and log NULL tokens. Claude Code always sends Accept-Encoding: gzip, so
+// api.anthropic.com returns a gzip'd SSE stream; the router must decode it
+// before parsing usage. Without stripping the client's Accept-Encoding upstream
+// (so the Go transport re-adds gzip and transparently decompresses), the usage
+// assertions below fail with nil tokens.
+func TestAnthropic_SSE_CapturesUsage_GzipResponse(t *testing.T) {
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_creation_input_tokens":5,"cache_read_input_tokens":200,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}` + "\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+	up := &anthropicUpstream{
+		respHeaders: map[string]string{"Content-Type": "text/event-stream"},
+		respBody:    sse,
+		gzipResp:    true,
+	}
+	srv := up.server(t)
+	defer srv.Close()
+
+	mem := &reqlog.MemorySink{}
+	rt := newTestRouter(t, &transportRedirect{to: srv.URL, rt: http.DefaultTransport}, WithSink(mem))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip") // what Claude Code sends
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	// The upstream still received a gzip-capable request: the router stripped the
+	// client's header and the Go transport re-added its own (then decompressed).
+	if !strings.Contains(up.acceptEnc, "gzip") {
+		t.Errorf("upstream Accept-Encoding = %q, want gzip still requested", up.acceptEnc)
+	}
+	// The client received the full, decoded stream.
+	if !strings.Contains(rec.Body.String(), "message_stop") {
+		t.Errorf("client did not receive the full SSE stream")
+	}
+	recs := mem.Records()
+	if len(recs) != 1 {
+		t.Fatalf("reqlog records = %d, want 1", len(recs))
+	}
+	lr := recs[0]
+	if lr.PromptTokens == nil || *lr.PromptTokens != 100 ||
+		lr.CompletionTokens == nil || *lr.CompletionTokens != 42 ||
+		lr.CacheCreationInputTokens == nil || *lr.CacheCreationInputTokens != 5 ||
+		lr.CacheReadInputTokens == nil || *lr.CacheReadInputTokens != 200 {
+		t.Errorf("gzip SSE usage wrong (compressed body not decoded before parse?): in=%v out=%v cc=%v cr=%v",
 			lr.PromptTokens, lr.CompletionTokens, lr.CacheCreationInputTokens, lr.CacheReadInputTokens)
 	}
 }

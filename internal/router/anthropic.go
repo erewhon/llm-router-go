@@ -121,6 +121,12 @@ func (rt *Router) anthropicProxy(w http.ResponseWriter, r *http.Request, backend
 			pr.Out.Body = io.NopCloser(bytes.NewReader(body))
 			pr.Out.ContentLength = int64(len(body))
 			pr.Out.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			// Strip the client's Accept-Encoding so the upstream response reaches
+			// ModifyResponse decoded: the Go transport re-adds gzip itself and
+			// transparently decompresses it. Otherwise Anthropic returns a gzip'd
+			// body (Claude Code always sends Accept-Encoding: gzip) and the usage
+			// tee/parse below would scan compressed bytes and log NULL tokens.
+			pr.Out.Header.Del("Accept-Encoding")
 			// Deliberately NOT calling pr.SetXForwarded() and NOT touching
 			// Authorization / x-api-key / anthropic-* — the client's headers are
 			// copied to pr.Out as-is, so the passthrough stays transparent.
