@@ -296,7 +296,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			"model", model, "backend_model", res.BackendModel,
 			"backend_url", res.BackendURL, "resolved_via", res.ModelID,
 			"via_tool_proxy", res.ViaToolProxy)
-		rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, cap)
+		rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap)
 	}
 }
 
@@ -305,15 +305,19 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 // SSE streaming via FlushInterval. SetURL joins backendRoot's path with the
 // inbound path, so any path prefix on an external api_base is kept and the
 // endpoint generalises to /v1/completions, /v1/embeddings, etc. When
-// authBearer is non-empty it replaces the Authorization header (external
-// providers); local/tool-proxy hops pass "".
+// authBearer is non-empty it is attached as the upstream credential (external
+// providers); local/tool-proxy hops pass "". By default it replaces the
+// Authorization header as "Bearer <authBearer>"; when authHeader is non-empty
+// the key is instead written verbatim to that header (e.g. "X-Api-Key") and any
+// inbound Authorization header is stripped so the router's own token never
+// leaks upstream.
 //
 // cap (non-nil) records what we learn about the response for the reqlog
 // sink: for JSON responses we buffer the body so usage tokens can be parsed
 // in handleProxy's defer; for SSE we wrap the response body with a rolling
 // 64KB tail buffer so the final `usage` chunk (if present) is captured
 // without holding the whole stream in memory.
-func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer string, cap *responseCapture) {
+func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture) {
 	target, err := url.Parse(backendRoot)
 	if err != nil {
 		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
@@ -329,7 +333,12 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 			pr.Out.ContentLength = int64(len(body))
 			pr.Out.Header.Set("Content-Length", strconv.Itoa(len(body)))
 			if authBearer != "" {
-				pr.Out.Header.Set("Authorization", "Bearer "+authBearer)
+				if authHeader != "" {
+					pr.Out.Header.Del("Authorization")
+					pr.Out.Header.Set(authHeader, authBearer)
+				} else {
+					pr.Out.Header.Set("Authorization", "Bearer "+authBearer)
+				}
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {

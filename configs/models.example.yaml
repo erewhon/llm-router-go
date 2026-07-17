@@ -109,3 +109,17 @@ models:
     api_class: embeddings
     aliases: [embedding]
     capabilities: [text]
+
+  # --- Scenario 7: self-hosted API behind a custom auth header ------------
+  # Default auth is "Authorization: Bearer <api_key>". If the upstream instead
+  # wants the key in a custom header (e.g. X-Api-Key), set api_key_header: the
+  # resolved api_key is sent verbatim in that header (NO "Bearer " prefix), and
+  # the router's own front-door token is stripped so it never leaks upstream.
+  # Omit api_key_header for the default bearer scheme.
+  internal-model:
+    hf_repo: some-internal-model         # the model id the server reports
+    backend: external
+    api_base: https://internal.example/v1
+    api_key: INTERNAL_API_KEY            # env var name (or sk-… literal)
+    api_key_header: X-Api-Key            # custom header name; case-insensitive
+    capabilities: [text, tool_calling]

@@ -17,9 +17,14 @@ type resolveResult struct {
 	// forwarding: the hf_repo (bare, "#suffix" stripped) for local + external
 	// models, or the registry key for tool-proxy-routed models.
 	BackendModel string
-	// AuthBearer is the resolved bearer token for external providers; "" for
-	// local backends and the tool proxy.
+	// AuthBearer is the resolved key for external providers; "" for local
+	// backends and the tool proxy. Sent as "Authorization: Bearer <value>"
+	// unless AuthHeader overrides the destination header.
 	AuthBearer string
+	// AuthHeader, when non-empty, is the header name the key is written to
+	// verbatim (no "Bearer " prefix), from the model's api_key_header. Empty
+	// means the default "Authorization: Bearer" scheme.
+	AuthHeader string
 	// ModelID is the registry key that matched.
 	ModelID string
 	// ResolvedFrom records the model name the caller sent.
@@ -151,15 +156,17 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 		backendModel = id
 	}
 
-	auth := ""
+	auth, authHeader := "", ""
 	if m.Backend == config.BackendExternal {
 		auth = rt.resolveKey(m.APIKey)
+		authHeader = m.APIKeyHeader
 	}
 
 	return resolveResult{
 		BackendURL:   root,
 		BackendModel: backendModel,
 		AuthBearer:   auth,
+		AuthHeader:   authHeader,
 		ModelID:      id,
 		ResolvedFrom: original,
 		ViaToolProxy: viaToolProxy,

@@ -143,26 +143,31 @@ type AliasOverride struct {
 }
 
 type ModelDefinition struct {
-	HFRepo               string                   `yaml:"hf_repo"`
-	Backend              BackendType              `yaml:"backend,omitempty"`
-	Node                 string                   `yaml:"node,omitempty"`
-	MultiNode            *MultiNodeConfig         `yaml:"multi_node,omitempty"`
-	VRAMGB               int                      `yaml:"vram_gb,omitempty"`
-	AlwaysOn             bool                     `yaml:"always_on,omitempty"`
-	Enabled              bool                     `yaml:"enabled"`
-	ToolProxy            bool                     `yaml:"tool_proxy,omitempty"`
-	Aliases              []string                 `yaml:"aliases,omitempty"`
-	AliasOverrides       map[string]AliasOverride `yaml:"alias_overrides,omitempty"`
-	Capabilities         []ModelCapability        `yaml:"capabilities,omitempty"`
-	Tags                 []string                 `yaml:"tags,omitempty"`
-	VllmArgs             VllmArgs                 `yaml:"vllm_args,omitempty"`
-	GGUFFile             string                   `yaml:"gguf_file,omitempty"`
-	APIPort              int                      `yaml:"api_port,omitempty"`
-	APIBase              string                   `yaml:"api_base,omitempty"`
-	APIKey               string                   `yaml:"api_key,omitempty"`
-	APIClass             APIClass                 `yaml:"api_class,omitempty"`
-	InputCostPerMillion  *float64                 `yaml:"input_cost_per_million,omitempty"`
-	OutputCostPerMillion *float64                 `yaml:"output_cost_per_million,omitempty"`
+	HFRepo         string                   `yaml:"hf_repo"`
+	Backend        BackendType              `yaml:"backend,omitempty"`
+	Node           string                   `yaml:"node,omitempty"`
+	MultiNode      *MultiNodeConfig         `yaml:"multi_node,omitempty"`
+	VRAMGB         int                      `yaml:"vram_gb,omitempty"`
+	AlwaysOn       bool                     `yaml:"always_on,omitempty"`
+	Enabled        bool                     `yaml:"enabled"`
+	ToolProxy      bool                     `yaml:"tool_proxy,omitempty"`
+	Aliases        []string                 `yaml:"aliases,omitempty"`
+	AliasOverrides map[string]AliasOverride `yaml:"alias_overrides,omitempty"`
+	Capabilities   []ModelCapability        `yaml:"capabilities,omitempty"`
+	Tags           []string                 `yaml:"tags,omitempty"`
+	VllmArgs       VllmArgs                 `yaml:"vllm_args,omitempty"`
+	GGUFFile       string                   `yaml:"gguf_file,omitempty"`
+	APIPort        int                      `yaml:"api_port,omitempty"`
+	APIBase        string                   `yaml:"api_base,omitempty"`
+	APIKey         string                   `yaml:"api_key,omitempty"`
+	// APIKeyHeader, when set, carries the resolved api_key in this header
+	// verbatim (raw value, no "Bearer " prefix) instead of the default
+	// "Authorization: Bearer <key>". For upstreams that expect an API-key
+	// header such as "X-Api-Key". Empty preserves the default bearer scheme.
+	APIKeyHeader         string   `yaml:"api_key_header,omitempty"`
+	APIClass             APIClass `yaml:"api_class,omitempty"`
+	InputCostPerMillion  *float64 `yaml:"input_cost_per_million,omitempty"`
+	OutputCostPerMillion *float64 `yaml:"output_cost_per_million,omitempty"`
 }
 
 // UnmarshalYAML default-initialises Backend, Enabled, Capabilities, and

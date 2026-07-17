@@ -58,6 +58,15 @@ models:
     api_base: https://api.lit.example/v1
     api_key: sk-literal-123
 
+  # external with a custom auth header (raw key, no Bearer prefix)
+  zen-hdr:
+    hf_repo: zen/hdr
+    backend: external
+    api_base: https://api.hdr.example/v1
+    api_key: ZEN_TEST_KEY
+    api_key_header: X-Api-Key
+    aliases: [hdr]
+
   # external pointing at the tool proxy (auto-router stub)
   auto:
     hf_repo: auto
@@ -309,6 +318,39 @@ func TestChat_External_ForwardsWithBearer(t *testing.T) {
 	}
 	if auth != "Bearer secret-key" {
 		t.Errorf("Authorization = %q, want Bearer secret-key (env-resolved)", auth)
+	}
+}
+
+func TestChat_External_ForwardsWithCustomHeader(t *testing.T) {
+	var apiKey, auth string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKey = r.Header.Get("X-Api-Key")
+		auth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"hi"}}]}`))
+	}))
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	// Inbound carries the router's own front-door token; with a custom
+	// api_key_header it must be replaced by the upstream key, not leaked.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"hdr","messages":[]}`)) // alias of zen-hdr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-router-master")
+	rt.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// key delivered raw (no "Bearer " prefix) in the configured header...
+	if apiKey != "secret-key" {
+		t.Errorf("X-Api-Key = %q, want secret-key (env-resolved, raw)", apiKey)
+	}
+	// ...and the router's own token stripped so it never reaches the provider.
+	if auth != "" {
+		t.Errorf("Authorization = %q, want empty (router token must not leak upstream)", auth)
 	}
 }
 
