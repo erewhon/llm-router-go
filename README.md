@@ -27,6 +27,16 @@ See [`docs/running-on-macos.md`](docs/running-on-macos.md) and the annotated
 [`configs/models.example.yaml`](configs/models.example.yaml) for configuring
 backends and running in the foreground.
 
+### Request logging
+
+Every request is logged (one row each, including ones rejected before an
+upstream call). By default this goes to a local **SQLite** file — no server to
+run — at `$XDG_STATE_HOME/llm-router/requests.db` (override with
+`--sqlite-path`). Point `--postgres-dsn` at a Postgres instance to use that
+instead (it takes precedence), or pass `--reqlog=off` to disable logging
+entirely. Query the SQLite log with any tool: `sqlite3 requests.db 'select
+model, status, latency_ms from router_requests order by id desc limit 20'`.
+
 ## Binaries
 
 | Binary       | Replaces (Python)                              | Listens on |

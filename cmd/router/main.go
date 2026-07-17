@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,21 @@ import (
 // version is overridden via -ldflags="-X main.version=$(git describe ...)".
 var version = "dev"
 
+// defaultReqlogPath returns the zero-config SQLite request-log location:
+// $XDG_STATE_HOME/llm-router/requests.db, falling back to ~/.local/state and
+// then the OS temp dir if the home directory can't be determined.
+func defaultReqlogPath() string {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = filepath.Join(home, ".local", "state")
+		} else {
+			base = os.TempDir()
+		}
+	}
+	return filepath.Join(base, "llm-router", "requests.db")
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -39,7 +55,9 @@ func run(args []string) int {
 		logLevel     = fs.String("log-level", "info", "log level: debug, info, warn, error")
 		logFormat    = fs.String("log-format", "json", "log format: json or text")
 		shutdownTo   = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
-		postgresDSN  = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); empty disables`)
+		postgresDSN  = fs.String("postgres-dsn", "", `Postgres DSN for request logging (e.g. "postgres://user:pw@host/db"); when set it takes precedence over SQLite`)
+		sqlitePath   = fs.String("sqlite-path", "", "path to the SQLite request-log DB; empty uses $XDG_STATE_HOME/llm-router/requests.db. Ignored when --postgres-dsn is set")
+		reqlogMode   = fs.String("reqlog", "auto", `request logging: "auto" (Postgres if --postgres-dsn, else a local SQLite file) or "off" to disable`)
 		toolProxyURL = fs.String("tool-proxy-url", "", `address tool_proxy models route to; empty falls back to $ROUTER_TOOL_PROXY_URL, then the built-in default`)
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
@@ -116,22 +134,45 @@ func run(args []string) int {
 			APIKey:       *wellKnownAPIKey,
 		}),
 	}
+	// Request logging. Precedence: --reqlog=off disables entirely; otherwise
+	// --postgres-dsn (if set) wins, else a local SQLite file (the zero-config
+	// default). Any sink open failure soft-fails to NopSink — a request-log
+	// outage must never take down the proxy — logged loudly so the gap shows
+	// in the journal.
 	var sink reqlog.Sink = reqlog.NopSink{}
-	if *postgresDSN != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ps, err := reqlog.NewPostgres(ctx, *postgresDSN, logger.With("subsys", "reqlog"))
-		cancel()
-		if err != nil {
-			// Soft-fail: a request-log DB outage must never take down the
-			// proxy. Fall back to NopSink (sink is already NopSink) and run
-			// without logging — loudly, so the gap is visible in the journal.
-			logger.Warn("reqlog postgres unavailable; falling back to NopSink (requests will NOT be logged)",
-				"err", err, "dsn", reqlog.RedactDSN(*postgresDSN))
+	switch strings.ToLower(*reqlogMode) {
+	case "off", "none", "disable", "disabled":
+		logger.Info("reqlog disabled (--reqlog=off); requests will NOT be logged")
+	case "auto", "":
+		if *postgresDSN != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ps, err := reqlog.NewPostgres(ctx, *postgresDSN, logger.With("subsys", "reqlog"))
+			cancel()
+			if err != nil {
+				logger.Warn("reqlog postgres unavailable; falling back to NopSink (requests will NOT be logged)",
+					"err", err, "dsn", reqlog.RedactDSN(*postgresDSN))
+			} else {
+				sink = ps
+				defer ps.Close()
+				logger.Info("reqlog enabled", "backend", "postgres", "dsn", reqlog.RedactDSN(*postgresDSN))
+			}
 		} else {
-			sink = ps
-			defer ps.Close()
-			logger.Info("reqlog enabled", "dsn", reqlog.RedactDSN(*postgresDSN))
+			path := *sqlitePath
+			if path == "" {
+				path = defaultReqlogPath()
+			}
+			ss, err := reqlog.NewSQLite(path, logger.With("subsys", "reqlog"))
+			if err != nil {
+				logger.Warn("reqlog sqlite unavailable; falling back to NopSink (requests will NOT be logged)",
+					"err", err, "path", path)
+			} else {
+				sink = ss
+				defer ss.Close()
+				logger.Info("reqlog enabled", "backend", "sqlite", "path", path)
+			}
 		}
+	default:
+		logger.Warn("unknown --reqlog value; request logging disabled", "value", *reqlogMode)
 	}
 	routerOpts = append(routerOpts, router.WithSink(sink))
 
