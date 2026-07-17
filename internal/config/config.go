@@ -72,6 +72,11 @@ const (
 	APIClassTTS        APIClass = "tts"
 	APIClassSTT        APIClass = "stt"
 	APIClassMusicGen   APIClass = "music_gen"
+	// APIClassAnthropic is a transparent passthrough of the Anthropic Messages
+	// API (/v1/messages). Unlike the OpenAI classes it forwards the body
+	// verbatim and does not inject router credentials — the client's own
+	// Authorization/x-api-key headers pass through. See internal/router/anthropic.go.
+	APIClassAnthropic APIClass = "anthropic"
 )
 
 var validAPIClasses = map[APIClass]struct{}{
@@ -83,6 +88,7 @@ var validAPIClasses = map[APIClass]struct{}{
 	APIClassTTS:        {},
 	APIClassSTT:        {},
 	APIClassMusicGen:   {},
+	APIClassAnthropic:  {},
 }
 
 // ---------------------------------------------------------------------------

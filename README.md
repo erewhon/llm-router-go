@@ -37,6 +37,19 @@ instead (it takes precedence), or pass `--reqlog=off` to disable logging
 entirely. Query the SQLite log with any tool: `sqlite3 requests.db 'select
 model, status, latency_ms from router_requests order by id desc limit 20'`.
 
+### Anthropic gateway (measurement tap)
+
+With an `api_class: anthropic` entry in `models.yaml` (see Scenario 8 in the
+example config), the router exposes `/v1/messages` as a **transparent
+passthrough** to `api.anthropic.com`. Point Claude Code at it —
+`ANTHROPIC_BASE_URL=http://router:4010` — and every request is logged with the
+prompt-cache token splits (`cache_creation_input_tokens` /
+`cache_read_input_tokens`) and a prefix hash chain for diagnosing cache
+divergence, while the body is forwarded byte-for-byte. The client's own
+credentials pass through untouched (the router injects none and does not gate
+`/v1/messages` behind `--api-keys`), so Claude Code Max keeps its subscription
+billing.
+
 ## Binaries
 
 | Binary       | Replaces (Python)                              | Listens on |

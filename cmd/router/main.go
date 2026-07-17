@@ -192,7 +192,10 @@ func run(args []string) int {
 	} else {
 		logger.Info("API key auth enabled", "keys", len(authKeys), "source", apiKeysFrom)
 	}
-	authExempt := []string{"/health", "/metrics", "/.well-known/opencode"}
+	// /health, /metrics, /.well-known/opencode are always exempt; the Anthropic
+	// passthrough is too — it carries the caller's own credentials, which the
+	// router forwards untouched rather than gating behind its front-door bearer.
+	authExempt := append([]string{"/health", "/metrics", "/.well-known/opencode"}, router.AnthropicPaths...)
 
 	handler := httpx.Chain(
 		rt.Handler(),

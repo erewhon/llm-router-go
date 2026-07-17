@@ -123,3 +123,20 @@ models:
     api_key: INTERNAL_API_KEY            # env var name (or sk-… literal)
     api_key_header: X-Api-Key            # custom header name; case-insensitive
     capabilities: [text, tool_calling]
+
+  # --- Scenario 8: Anthropic Messages passthrough (api_class: anthropic) ---
+  # A transparent tap for the Anthropic Messages API. Point Claude Code (or any
+  # Anthropic SDK client) at the router with ANTHROPIC_BASE_URL=http://router:4010
+  # and every /v1/messages call is logged (cache-token splits + a prefix hash
+  # chain) while being forwarded byte-for-byte to api.anthropic.com. This is a
+  # SINGLE gateway entry — the request's model id is forwarded/logged as-is, so
+  # you do NOT register each Claude model. Auth is passthrough: the client's own
+  # Authorization / x-api-key / anthropic-* headers go upstream untouched (the
+  # router adds NO credentials of its own), and /v1/messages is exempt from the
+  # router's --api-keys front-door bearer. Do NOT set api_key here.
+  anthropic-gateway:
+    hf_repo: anthropic-passthrough       # unused for routing; forwarded model comes from the body
+    backend: external
+    api_base: https://api.anthropic.com  # the passthrough target
+    api_class: anthropic
+    capabilities: [text, tool_calling, vision]

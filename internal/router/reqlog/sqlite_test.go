@@ -95,3 +95,77 @@ func TestSQLiteSink_RoundTrip(t *testing.T) {
 		t.Errorf("backend_model = %q, want NULL", *backendModel2)
 	}
 }
+
+// TestSQLiteSink_MigratesOldSchema opens a DB created by an older binary (the
+// v0.5.0 schema, before the Anthropic cache/prefix columns) and asserts
+// NewSQLite adds the missing columns without losing existing rows, then accepts
+// a record that populates them.
+func TestSQLiteSink_MigratesOldSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Pre-v0.6 schema: no cache_creation_input_tokens / cache_read_input_tokens
+	// / prefix_hash_chain columns.
+	const oldSchema = `
+CREATE TABLE router_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, ts TEXT NOT NULL,
+    method TEXT NOT NULL, path TEXT NOT NULL, model TEXT NOT NULL,
+    backend_model TEXT, backend_url TEXT, resolved_via TEXT, api_class TEXT,
+    via_tool_proxy INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER, error TEXT);`
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(oldSchema); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if _, err := seed.Exec(
+		`INSERT INTO router_requests (ts, method, path, model, status, latency_ms) VALUES (?,?,?,?,?,?)`,
+		"2026-07-17T00:00:00Z", "POST", "/v1/chat/completions", "old-model", 200, 10); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	seed.Close()
+
+	// Opening through NewSQLite must migrate the table in place.
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite (migrate): %v", err)
+	}
+	cc, cr := 100, 900
+	sink.Log(Record{
+		Method: "POST", Path: "/v1/messages", Model: "claude-sonnet-4-5", APIClass: "anthropic",
+		Status: 200, LatencyMS: 42,
+		CacheCreationInputTokens: &cc, CacheReadInputTokens: &cr, PrefixHashChain: "aa,bb,cc",
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM router_requests").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("row count = %d, want 2 (legacy row preserved + new row)", n)
+	}
+	var (
+		cc2, cr2 *int
+		chain    *string
+	)
+	if err := db.QueryRow(`SELECT cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain
+	                         FROM router_requests WHERE model = ?`, "claude-sonnet-4-5").
+		Scan(&cc2, &cr2, &chain); err != nil {
+		t.Fatalf("query migrated row: %v", err)
+	}
+	if cc2 == nil || *cc2 != 100 || cr2 == nil || *cr2 != 900 || chain == nil || *chain != "aa,bb,cc" {
+		t.Errorf("migrated columns wrong: cc=%v cr=%v chain=%v", cc2, cr2, chain)
+	}
+}

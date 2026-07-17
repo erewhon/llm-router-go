@@ -73,6 +73,13 @@ models:
     backend: external
     api_base: http://192.168.42.240:5392/v1
 
+  # Anthropic Messages passthrough target (single gateway)
+  anthropic-gateway:
+    hf_repo: anthropic-passthrough
+    backend: external
+    api_base: https://api.anthropic.example/v1
+    api_class: anthropic
+
   # disabled -> not routable, not listed
   ghost-disabled:
     hf_repo: ghost/x

@@ -31,7 +31,16 @@ type Record struct {
 	PromptTokens     *int
 	CompletionTokens *int
 	TotalTokens      *int
-	Error            string
+	// Anthropic prompt-cache token splits (api_class "anthropic" only). Nil for
+	// every other class and for Anthropic responses that report no caching.
+	CacheCreationInputTokens *int
+	CacheReadInputTokens     *int
+	// PrefixHashChain is a rolling per-segment hash of the rendered prompt
+	// prefix in cache order (tools → system → each message), hashes only, never
+	// content. Empty for non-anthropic requests. Consecutive requests in a
+	// session diff to pinpoint where the cached prefix diverged.
+	PrefixHashChain string
+	Error           string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

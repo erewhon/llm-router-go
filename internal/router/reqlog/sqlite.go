@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     prompt_tokens     INTEGER,
     completion_tokens INTEGER,
     total_tokens      INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens     INTEGER,
+    prefix_hash_chain TEXT,
     error             TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
@@ -44,12 +47,23 @@ CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (re
 CREATE INDEX IF NOT EXISTS router_requests_model_idx ON router_requests (model);
 `
 
+// sqliteMigrations are columns added after v0.5.0. SQLite has no
+// "ADD COLUMN IF NOT EXISTS", so migrateSQLite adds only the ones a table
+// created by an older binary is missing (a fresh DB already has them from
+// SQLiteSchemaSQL, so nothing runs).
+var sqliteMigrations = []struct{ name, ddl string }{
+	{"cache_creation_input_tokens", "ALTER TABLE router_requests ADD COLUMN cache_creation_input_tokens INTEGER"},
+	{"cache_read_input_tokens", "ALTER TABLE router_requests ADD COLUMN cache_read_input_tokens INTEGER"},
+	{"prefix_hash_chain", "ALTER TABLE router_requests ADD COLUMN prefix_hash_chain TEXT"},
+}
+
 const sqliteInsertSQL = `
 INSERT INTO router_requests
   (request_id, ts, method, path, model, backend_model, backend_url, resolved_via,
    api_class, via_tool_proxy, stream, status, latency_ms,
-   prompt_tokens, completion_tokens, total_tokens, error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   prompt_tokens, completion_tokens, total_tokens,
+   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain, error)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -96,6 +110,10 @@ func NewSQLite(path string, logger *slog.Logger) (*SQLiteSink, error) {
 	if _, err := db.Exec(SQLiteSchemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("reqlog: bootstrap schema: %w", err)
+	}
+	if err := migrateSQLite(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("reqlog: migrate schema: %w", err)
 	}
 	stmt, err := db.Prepare(sqliteInsertSQL)
 	if err != nil {
@@ -162,11 +180,49 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.ResolvedVia), nullIfEmpty(rec.APIClass),
 		b2i(rec.ViaToolProxy), b2i(rec.Stream), rec.Status, rec.LatencyMS,
 		rec.PromptTokens, rec.CompletionTokens, rec.TotalTokens,
-		nullIfEmpty(rec.Error),
+		rec.CacheCreationInputTokens, rec.CacheReadInputTokens,
+		nullIfEmpty(rec.PrefixHashChain), nullIfEmpty(rec.Error),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)
 	}
+}
+
+// migrateSQLite adds any sqliteMigrations columns the table is missing. Reads
+// the current column set via PRAGMA table_info so re-runs (and fresh DBs that
+// already have every column) are no-ops.
+func migrateSQLite(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(router_requests)")
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dfltValue        any
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, m := range sqliteMigrations {
+		if have[m.name] {
+			continue
+		}
+		if _, err := db.Exec(m.ddl); err != nil {
+			return fmt.Errorf("add column %s: %w", m.name, err)
+		}
+	}
+	return nil
 }
 
 func b2i(b bool) int {

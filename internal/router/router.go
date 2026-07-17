@@ -170,12 +170,29 @@ func (rt *Router) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/embeddings", rt.handleProxy(config.APIClassEmbeddings, true))
 	mux.HandleFunc("POST /v1/rerank", rt.handleProxy(config.APIClassRerank, true))
 
+	// Anthropic Messages passthrough — registered only when an
+	// api_class:anthropic target is configured. Both paths bypass the
+	// front-door bearer (see AnthropicPaths / main.go) and forward the client's
+	// own credentials untouched.
+	if id, root := rt.anthropicBackendRoot(); root != "" {
+		h := rt.handleAnthropic(id, root)
+		mux.HandleFunc("POST /v1/messages", h)
+		mux.HandleFunc("POST /v1/messages/count_tokens", h)
+		rt.logger.Info("anthropic passthrough enabled", "backend_url", root, "resolved_via", id)
+	}
+
 	mux.HandleFunc("GET /v1/models", rt.handleModels)
 	mux.HandleFunc("GET /health", rt.handleHealth)
 	mux.Handle("GET /metrics", rt.metrics.Handler())
 	mux.HandleFunc("GET /.well-known/opencode", rt.handleWellKnown)
 	return mux
 }
+
+// AnthropicPaths are the passthrough endpoints that must be exempt from the
+// front-door bearer auth: the Anthropic Messages API carries the caller's own
+// credentials, which the router forwards untouched. Wired into RequireBearer's
+// exempt list by main.go.
+var AnthropicPaths = []string{"/v1/messages", "/v1/messages/count_tokens"}
 
 // ---------------------------------------------------------------------------
 // Generic POST handler — resolve, enforce api_class, rewrite model, forward.

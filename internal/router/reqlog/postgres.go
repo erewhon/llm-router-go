@@ -35,20 +35,29 @@ CREATE TABLE IF NOT EXISTS router_requests (
     prompt_tokens     INTEGER,
     completion_tokens INTEGER,
     total_tokens      INTEGER,
+    cache_creation_input_tokens INTEGER,
+    cache_read_input_tokens     INTEGER,
+    prefix_hash_chain TEXT,
     error             TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
 CREATE INDEX IF NOT EXISTS router_requests_model_idx ON router_requests (model);
+
+-- Migrations for tables created before the Anthropic passthrough (idempotent).
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS prefix_hash_chain TEXT;
 `
 
 const insertSQL = `
 INSERT INTO router_requests
   (request_id, ts, method, path, model, backend_model, backend_url, resolved_via,
    api_class, via_tool_proxy, stream, status, latency_ms,
-   prompt_tokens, completion_tokens, total_tokens, error)
+   prompt_tokens, completion_tokens, total_tokens,
+   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain, error)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -146,7 +155,8 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfEmpty(rec.ResolvedVia), nullIfEmpty(rec.APIClass),
 		rec.ViaToolProxy, rec.Stream, rec.Status, rec.LatencyMS,
 		rec.PromptTokens, rec.CompletionTokens, rec.TotalTokens,
-		nullIfEmpty(rec.Error),
+		rec.CacheCreationInputTokens, rec.CacheReadInputTokens,
+		nullIfEmpty(rec.PrefixHashChain), nullIfEmpty(rec.Error),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)
