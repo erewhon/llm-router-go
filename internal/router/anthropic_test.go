@@ -259,3 +259,70 @@ func TestAnthropicPrefixChain_DeterministicAndDiverges(t *testing.T) {
 		t.Errorf("final link should diverge when the last message differs")
 	}
 }
+
+func TestAnthropicPrefixChain_IgnoresCacheControl(t *testing.T) {
+	// The same conversation with the breakpoint marker on message 0 vs
+	// message 1 — Claude Code moves it every request — must hash
+	// identically: the cache keys on content, not marker placement.
+	withMarkerOn := func(idx int) []byte {
+		marker := `,"cache_control":{"type":"ephemeral"}`
+		msgs := []string{
+			`{"role":"user","content":[{"type":"text","text":"one"M0}]}`,
+			`{"role":"assistant","content":[{"type":"text","text":"two"M1}]}`,
+		}
+		for i := range msgs {
+			m := ""
+			if i == idx {
+				m = marker
+			}
+			msgs[i] = strings.Replace(msgs[i], "M0", m, 1)
+			msgs[i] = strings.Replace(msgs[i], "M1", m, 1)
+		}
+		return []byte(`{"model":"m","tools":[{"name":"t"}],"system":"S","messages":[` +
+			strings.Join(msgs, ",") + `]}`)
+	}
+	_, c0 := anthropicPrefixChain(withMarkerOn(0))
+	_, c1 := anthropicPrefixChain(withMarkerOn(1))
+	if c0 == "" || c0 != c1 {
+		t.Errorf("marker rotation changed the chain:\n %q\n %q", c0, c1)
+	}
+
+	// Markers on a tool definition and on a system block wash out too.
+	plain := `{"model":"m","tools":[{"name":"t"}],"system":[{"type":"text","text":"S"}],"messages":[{"role":"user","content":"x"}]}`
+	marked := `{"model":"m","tools":[{"name":"t","cache_control":{"type":"ephemeral","ttl":"1h"}}],` +
+		`"system":[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"x"}]}`
+	_, cp := anthropicPrefixChain([]byte(plain))
+	_, cm := anthropicPrefixChain([]byte(marked))
+	if cp == "" || cp != cm {
+		t.Errorf("tools/system markers changed the chain:\n %q\n %q", cp, cm)
+	}
+}
+
+func TestAnthropicPrefixChain_CanonicalizesButKeepsContent(t *testing.T) {
+	// Key order is serialization noise, not content: identical chains.
+	a := `{"model":"m","tools":[{"name":"t"}],"system":"S","messages":[{"role":"user","content":"x"}]}`
+	b := `{"model":"m","tools":[{"name":"t"}],"system":"S","messages":[{"content":"x","role":"user"}]}`
+	_, ca := anthropicPrefixChain([]byte(a))
+	_, cb := anthropicPrefixChain([]byte(b))
+	if ca == "" || ca != cb {
+		t.Errorf("key order changed the chain:\n %q\n %q", ca, cb)
+	}
+
+	// A cache_control key nested INSIDE user data (a tool_use input) is
+	// content — stripping is deliberately not recursive — so it must
+	// still diverge the chain.
+	base := `{"model":"m","tools":[{"name":"t"}],"system":"S","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"1","name":"t","input":{"payload":%s}}]}]}`
+	_, cx := anthropicPrefixChain([]byte(strings.Replace(base, "%s", `{"cache_control":"keep-me"}`, 1)))
+	_, cy := anthropicPrefixChain([]byte(strings.Replace(base, "%s", `{}`, 1)))
+	if cx == "" || cx == cy {
+		t.Errorf("nested cache_control in user data was stripped: chains should differ")
+	}
+
+	// Big integers survive canonicalization without float rounding: two
+	// values that would collide as float64 stay distinct.
+	_, ci := anthropicPrefixChain([]byte(strings.Replace(base, "%s", `9007199254740993`, 1)))
+	_, cj := anthropicPrefixChain([]byte(strings.Replace(base, "%s", `9007199254740992`, 1)))
+	if ci == "" || ci == cj {
+		t.Errorf("adjacent big ints hashed identically: float round-trip in canonicalization")
+	}
+}

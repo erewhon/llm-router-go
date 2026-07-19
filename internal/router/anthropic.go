@@ -288,9 +288,18 @@ func (c *anthropicSSECapture) handleLine(line []byte) {
 
 // anthropicPrefixChain computes the request model and a rolling per-segment hash
 // of the rendered prompt prefix in Anthropic cache order — tools, then system,
-// then each message — hashing the raw JSON bytes of each segment (never logging
-// content). Each entry is the cumulative digest through that segment, so two
-// requests share a chain prefix up to the point their cached prefix diverged.
+// then each message (never logging content). Each entry is the cumulative
+// digest through that segment, so two requests share a chain prefix up to the
+// point their cached prefix diverged.
+//
+// Segments are canonicalized before hashing: parsed, stripped of
+// cache_control markers, and re-marshaled with sorted keys. Anthropic's
+// cache keys on content and ignores marker placement, and Claude Code moves
+// its breakpoint marker to the newest message on every request — hashing
+// raw bytes made the previous final message (and the tools array) "diverge"
+// on every single turn while the cache stayed warm. Canonicalized, chain
+// divergence means content divergence.
+//
 // Returns ("","") if the body isn't a parseable Anthropic request.
 func anthropicPrefixChain(body []byte) (model, chain string) {
 	var req struct {
@@ -305,7 +314,7 @@ func anthropicPrefixChain(body []byte) (model, chain string) {
 	h := sha256.New()
 	var parts []string
 	feed := func(seg []byte) {
-		h.Write(seg)
+		h.Write(canonicalSegment(seg))
 		parts = append(parts, hex.EncodeToString(h.Sum(nil))[:16])
 	}
 	if len(req.Tools) > 0 {
@@ -318,4 +327,50 @@ func anthropicPrefixChain(body []byte) (model, chain string) {
 		feed(m)
 	}
 	return req.Model, strings.Join(parts, ",")
+}
+
+// canonicalSegment renders one chain segment in a marker-free canonical
+// form: cache_control removed from every position the API accepts it, keys
+// sorted by re-marshaling, numbers passed through json.Number so no float
+// round-trip perturbs them. Unparseable segments hash as their raw bytes —
+// a segment must never drop out of the chain.
+func canonicalSegment(seg []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(seg))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return seg
+	}
+	stripCacheControl(v)
+	out, err := json.Marshal(v)
+	if err != nil {
+		return seg
+	}
+	return out
+}
+
+// stripCacheControl removes cache_control at the positions Anthropic
+// accepts markers: entries of a tools or system-blocks array, a message
+// object, and the blocks of a message's content array. Deliberately not
+// recursive — user data nested deeper (say a tool input whose JSON happens
+// to contain a cache_control key) is content and must keep affecting the
+// hash.
+func stripCacheControl(v any) {
+	switch t := v.(type) {
+	case []any: // tools, or system as a block array
+		for _, e := range t {
+			if em, ok := e.(map[string]any); ok {
+				delete(em, "cache_control")
+			}
+		}
+	case map[string]any: // a message
+		delete(t, "cache_control")
+		if content, ok := t["content"].([]any); ok {
+			for _, b := range content {
+				if bm, ok := b.(map[string]any); ok {
+					delete(bm, "cache_control")
+				}
+			}
+		}
+	}
 }
