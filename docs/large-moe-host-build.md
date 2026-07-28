@@ -134,6 +134,40 @@ GB**, which is why the DDR4 Milan path stays tempting despite being slower.
 > which runs at only 8/12 of bandwidth (~300 GB/s) → ~1/3 slower decode for a
 > bit more capacity. Choose DIMM size to fill all 12 slots.
 
+> **Corollary — the rule is about stick COUNT, not capacity (added 2026-07-28):**
+> smaller DIMMs across all 12 channels give **exactly the same bandwidth**, and
+> therefore the same decode speed, as large ones. Capacity buys you *which models
+> fit*; channel count buys you *how fast they run*. These are independent knobs,
+> and in a DRAM price surge that separation is worth real money:
+>
+> | Config | Capacity | Bandwidth | DDR5 cost @ ~$15/GB | Largest model @ Q4 |
+> |---|---|---|---|---|
+> | 12×16 GB | 192 GB | **full** | **~$2.9k** | ~300B total |
+> | 12×24 GB | 288 GB | **full** | ~$4.3k | ~450B total |
+> | 12×32 GB | 384 GB | **full** | ~$5.8k | ~600B total |
+> | 12×48 GB | 576 GB | **full** | ~$8.6k | ~900B total (the spec) |
+>
+> **Why this now matters:** this doc specced 576 GB around a DeepSeek-671B-A37B
+> target, where that capacity is genuinely required. But the open-weights trend
+> since is toward **large total / small active** — Ling-flash-2.0 (100B-**A6.1B**),
+> gpt-oss-120b (A5.1B), GLM-4.5-Air (106B-A12B), and Thinking Machines'
+> **Inkling-Small (276B-A12B, Apache 2.0, unreleased as of 2026-07-28)**. Kimi K3
+> (2.8T-**A104B**) is the conspicuous exception, and it is out of reach on cost
+> grounds regardless (see "Why K3 is not a target" below).
+>
+> An A12B model in the 276B class needs only **192 GB** and decodes at
+> **~30–50 t/s** on Genoa — roughly **3× DeepSeek-671B's decode on identical
+> hardware**, because decode is bandwidth-bound and A12B moves a third the bytes
+> per token that A37B does. Same box, same twelve channels, **a third of the RAM
+> bill**.
+>
+> **Decision guidance:** do not treat 576 GB as settled. Before buying DIMMs, ask
+> which model class you actually want resident. If the answer has drifted from
+> "DeepSeek-671B-class" to "276B-class with tiny active," 12×16 or 12×24 GB saves
+> **$4–6k** at zero speed cost — and 1DPC leaves every channel free for a future
+> capacity upgrade without re-buying what you have. If the answer is still
+> DeepSeek-671B, the original 576 GB spec stands unchanged.
+
 ---
 
 ## GPU choice (NVIDIA; size is the question)
@@ -176,6 +210,8 @@ Real hybrid data points (`ik_llama.cpp`, DeepSeek 671B): EPYC 9334-QS + RTX 3070
 | MiniMax M3 428B-A23B | 23B | ~240 GB | ⚠️ **not yet** — MSA + multimodal, no GGUF/arch support yet | n/a | wait for llama.cpp arch PR; lower active = faster once supported |
 | Nemotron-3 Ultra 550B-A55B | 55B | ~300 GB | ⚠️ Mamba-hybrid arch support uncertain | has MTP | **A55B = compute-heavy**, slower decode even on big BW |
 | **Kimi K2.7-Code** 1T-A32B | 32B | IQ4_XS ~495 / Q4_K_XL ~584 GB | ✅ GGUF day-1 (Unsloth) | — | native INT4 (QAT) → Q4 ≈ lossless, no gain above it. Near-lossless Q4 wants **768 GB**; **IQ4_XS (495 GB) fits 576**; Q2_K_XL ~339 GB, IQ1_M ~304 GB |
+| Inkling-Small 276B-A12B | 12B | ~175 GB | ⚠️ **none** — no llama.cpp arch (SGLang/vLLM/HF only) | — | Apache 2.0, unreleased as of 2026-07-28. **A12B → ~30–50 t/s on Genoa**; needs only **192 GB** (12×16) |
+| **Kimi K3** 2.8T-A104B | **104B** | **1.56 TB** (native MXFP4, as released) | ❌ **none** — KDA + AttnRes + Stable LatentMoE all novel | — | ❌ **not a target — see below.** RAM bill alone is ~$46–70k |
 
 Takeaways: **DeepSeek-671B is the natural primary target** (mature support, MTP,
 fits 512–576 GB). Active-param count drives decode — M3 (A23B) will be the
@@ -187,6 +223,63 @@ dictates *RAM*, not speed. At 576 GB you run it at IQ4_XS (495 GB); only 768 GB
 buys near-lossless Q4 (584 GB). Because it ships **native INT4 (QAT)**, Q4 is
 effectively lossless and there's no reason to go above it. (Access today:
 Moonshot's API — **not yet on the Zen endpoint**, which tops out at `kimi-k2.6`.)
+
+### Why Kimi K3 is not a target (costed 2026-07-28)
+
+K3's open weights landed 2026-07-27: **2.8T total / A104B active**, natively
+MXFP4 (quantization-aware trained from the SFT stage), shipped as **1.56 TB
+across 96 safetensors shards** — ~4.5 bits/param effective. Costing it properly,
+because the intuition "it's 2.8T, so it needs 4–6 TB and runs at 1 t/s" is wrong
+in *both* directions.
+
+**Capacity — less than you'd guess.** ~1.56 TB of weights plus KV, activations
+and OS → a **~2 TB working set**. K3's fixed-size state handler (rather than a
+growing KV store) keeps the context cost flat, so 1M context does not blow this
+up. You do **not** need 4 TB, let alone 6 TB.
+
+But the DIMM math is unkind at 12 channels, 1DPC:
+
+| Config | Capacity | Speed | Verdict |
+|---|---|---|---|
+| 12×128 GB | 1.536 TB | full | ❌ **misses by ~25 GB** — under the weights alone |
+| 12×192 GB | 2.30 TB | full | ✅ the real config (3DS/TSV RDIMMs) |
+| 12×256 GB | 3.07 TB | full | ✅ comfortable, absurdly expensive |
+| 24×96 GB | 2.30 TB | **2DPC → ~3600–4400** | ❌ bandwidth loss lands straight on decode |
+
+The 12×128 GB near-miss is worth internalizing: the *obvious* big-DIMM config
+does not fit, which pushes you to 192 GB 3DS modules that carry a steep premium
+over commodity sticks — realistically **$20–30/GB, not $15**. That's
+**~$46–70k in RAM alone**, dwarfing the entire rest of the build.
+
+**Speed — better than you'd guess, and it doesn't rescue it.** Decode is
+bandwidth-bound at ~58.5 GB/token (104B active × 0.5625 B/param):
+
+- Genoa, ~440 GB/s usable → **~3–5 t/s**
+- Turin, ~570 GB/s usable → **~4–7 t/s**
+
+Cross-check against this doc's own DeepSeek-671B figure: A104B is 2.8× A37B's
+active count, and 10–15 ÷ 2.8 = 3.5–5.4 t/s. Consistent. So **not 1 t/s** — but
+roughly **a third of DeepSeek-671B's decode on a build costing 4–5× as much.**
+
+**Quantizing down doesn't save it.** K3 is *already* QAT-MXFP4 at ~4.5 bpw;
+there is no bf16 upstream to squeeze. A Q3 requant (~1.19 TB, which *would* fit
+12×128 GB) means quantizing an already-4-bit-native model — unproven and likely
+a steep quality cliff. Q2 (~910 GB) more so.
+
+**Arch support is the hard blocker anyway.** KDA (Kimi Delta Attention),
+AttnRes, and Stable LatentMoE are all novel. The `kimi-linear` arch in recent
+llama.cpp is a *different* model. No GGUF conversions existed as of 2026-07-28.
+
+**Verdict: ❌ hosted-only, permanently.** ~$55–75k of hardware to decode at
+~1/3 the speed of the model this box was built for, gated behind an arch that
+may never be written. The "very good + owned vs best + rented" framing from the
+buying-lens section below applies at full force: that RAM budget buys an
+extraordinary amount of K3 API time. Continue using it via the OpenCode Go
+endpoint (`kimi-k3` / alias `k3`), already wired into the HA routers.
+
+*(Morbid footnote: 2.8T at Q2 (~910 GB) does fit hekaton's 1.5 TB DDR3 — and
+would decode at roughly 0.3–0.5 t/s on AVX1. Technically loadable, practically
+useless. **That** is where the 1 t/s intuition belongs.)*
 
 ### Coding quality vs RAM — the buying lens
 
