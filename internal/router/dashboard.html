@@ -509,6 +509,48 @@ function fmtUptime(s) {
   return `${m}m`;
 }
 
+// Quantization badge. Evidence order: explicit tags (author-supplied, most
+// reliable) -> gguf_file name -> hf_repo string. Returns '' when nothing
+// matches: an unknown quant must render as nothing, never as a guess. The old
+// logic fell back to FP16 for every backend=="vllm" model, which mislabelled
+// every hekaton GGUF (Q4_K_M/UD-Q4_K_XL/MXFP4) and both NVFP4 Sparks — backend
+// is a health-probe driver selector here, not a weight format.
+const QUANT_PATTERNS = [
+  // Longest / most specific first: 'nvfp4' and 'mxfp4' both contain 'fp4',
+  // and 'q4_k_xl' contains 'q4_k'.
+  ['nvfp4', 'NVFP4'], ['mxfp4', 'MXFP4'],
+  ['fp8', 'FP8'], ['bf16', 'BF16'], ['fp16', 'FP16'],
+  ['q8_0', 'Q8'], ['-q8', 'Q8'],
+  ['q6_k', 'Q6'], ['-q6', 'Q6'],
+  ['q5_k', 'Q5'], ['-q5', 'Q5'],
+  ['q4_k_xl', 'Q4_K_XL'], ['q4_k_m', 'Q4_K_M'], ['q4_k_s', 'Q4_K_S'],
+  ['gptq-int4', 'GPTQ-INT4'], ['q4_0', 'Q4'], ['-q4', 'Q4'],
+  ['q3_k', 'Q3'], ['-q3', 'Q3'],
+  ['awq', 'AWQ'], ['gptq', 'GPTQ'],
+];
+function quantBadge(m) {
+  const gguf = (m.gguf_file || '').toLowerCase();
+  const repo = (m.hf_repo || '').split('#')[0].toLowerCase();
+  const hay = [(m.tags || []).join(' '), gguf, repo].join(' ').toLowerCase();
+  for (const [needle, label] of QUANT_PATTERNS) {
+    if (hay.includes(needle)) return ` <span class="badge badge-tag">${label}</span>`;
+  }
+  // Known to be a GGUF build but the specific quant isn't discoverable.
+  if (gguf || repo.endsWith('-gguf')) return ' <span class="badge badge-tag">GGUF</span>';
+  return '';
+}
+
+// Real serving engine. models.yaml `backend` selects which health-probe driver
+// the node agent uses, NOT the engine: Atlas and llama.cpp both declare
+// backend: vllm because they speak the same OpenAI /v1 + Prometheus /metrics
+// shape. Prefer harder evidence before falling back to that field.
+function engineLabel(m) {
+  const tags = m.tags || [];
+  if (tags.includes('atlas')) return 'atlas';
+  if (m.gguf_file || (m.hf_repo || '').toLowerCase().endsWith('-gguf')) return 'llama.cpp';
+  return m.backend;
+}
+
 function modelType(m) {
   // Determine display type for a model
   const id = m.id, tags = m.tags || [], caps = m.capabilities || [];
@@ -526,7 +568,7 @@ function modelType(m) {
     return { label: 'music', badge: 'badge-music' };
   if (tags.includes('gui_agent'))
     return { label: 'gui-agent', badge: 'badge-router' };
-  return { label: m.backend, badge: 'badge-backend' };
+  return { label: engineLabel(m), badge: 'badge-backend' };
 }
 
 function isRouterModel(m) {
@@ -920,17 +962,7 @@ function render(data) {
     html += `<tr data-model="${m.id}" data-nodes="${nodeList}" data-caps="${capList}" data-tags="${tagList}"${classes ? ` class="${classes}"` : ''}${!visible ? ' style="display:none"' : ''}>
       <td><div class="model-id">${m.id}</div><div class="model-repo">${m.hf_repo.split('#')[0]}</div>
         ${m.gguf_file ? `<div class="model-repo">${m.gguf_file}</div>` : ''}</td>
-      <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span>${(() => {
-        const repo = m.hf_repo.split('#')[0].toLowerCase();
-        if (repo.includes('fp8')) return ' <span class="badge badge-tag">FP8</span>';
-        if (repo.includes('fp16')) return ' <span class="badge badge-tag">FP16</span>';
-        if (repo.includes('@q8_0') || repo.includes('-q8')) return ' <span class="badge badge-tag">Q8</span>';
-        if (repo.includes('@q6_k') || repo.includes('-q6')) return ' <span class="badge badge-tag">Q6</span>';
-        if (repo.includes('@q4_k') || repo.includes('-q4') || repo.includes('gptq-int4')) return ' <span class="badge badge-tag">Q4</span>';
-        if (repo.includes('@q3_k') || repo.includes('-q3')) return ' <span class="badge badge-tag">Q3</span>';
-        if (m.backend === 'vllm' && !repo.includes('gptq') && !repo.includes('awq')) return ' <span class="badge badge-tag">FP16</span>';
-        return '';
-      })()}</td>
+      <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span>${quantBadge(m)}</td>
       <td>${nodeStr}</td>
       <td>${m.vram_gb ? m.vram_gb + ' GB' : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td>${aliases || '<span style="color:var(--text-dim)">—</span>'}</td>
