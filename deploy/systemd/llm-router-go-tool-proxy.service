@@ -15,9 +15,16 @@
 #       /etc/systemd/system/llm-router-go-tool-proxy.service
 #   sudo systemctl daemon-reload && sudo systemctl enable --now llm-router-go-tool-proxy
 #
-# Outbound web-tool requests egress via the SOCKS5 VPN (svc-sys-research-vpn
-# nspawn at 192.168.42.219:1080). The auto-router's embedding client talks
+# Outbound web-tool requests egress via the SOCKS5 VPN (delphi svc-sys-research-vpn
+# nspawn at 192.168.42.84:1080). The auto-router's embedding client talks
 # DIRECTLY to the LAN embedder (euclid:5404), NOT through the VPN.
+#
+# 2026-07-24: repointed from euclid's svc-sys-research-vpn (192.168.42.219:1080),
+# masked/decommissioned Jun 27, to delphi's svc-sys-research-vpn (.84). NOTE the
+# delphi mullvad-vpn container (.93) has an MTU-blackholed tunnel — reaches tiny
+# responses but not html.duckduckgo.com/wikipedia — so it is NOT usable for
+# web_search; .84 is the healthy Mullvad exit. max-tool-rounds raised 5->12 so
+# the research agent's multi-fetch loop can synthesize instead of hitting the cap.
 
 [Unit]
 Description=LLM Router Tool Proxy (Go)
@@ -36,16 +43,21 @@ ExecStart=/usr/local/bin/llm-router-go-tool-proxy \
     --models-yaml=/home/erewhon/Projects/erewhon/llm-router/models.yaml \
     --log-format=json \
     --log-level=info \
-    --proxy=socks5://192.168.42.219:1080 \
+    --proxy=socks5://192.168.42.84:1080 \
+    --max-tool-rounds=12 \
     --embed-url=http://192.168.42.240:5404 \
     --embed-model=qwen3-embedding-4b \
     --litellm-url=http://127.0.0.1:4010
 
 # LITELLM_KEY (a valid ROUTER_API_KEY) lets the auto-router's redirect
-# authenticate to the Go router on :4010. TAVILY_API_KEY is intentionally
-# omitted to match the Python proxy (tavily_search stays unregistered). The
-# `-` prefix lets the unit start (auto-route 401s, normal models fine) if the
-# file is missing.
+# authenticate to the Go router on :4010. TAVILY_API_KEY is unset (no key
+# provisioned) — but note tavily_search is still REGISTERED without it, on
+# purpose: clients advertise the tool in their system prompts, and Atlas
+# silently discards a call to a function the request never declared, producing
+# an empty completion with no diagnosis. Registered keyless, the call returns
+# "no API key configured" and the model falls back to web_search. Set
+# TAVILY_API_KEY here to actually enable it. The `-` prefix lets the unit start
+# (auto-route 401s, normal models fine) if the file is missing.
 #   LITELLM_KEY=sk-...
 EnvironmentFile=-/etc/llm-router/tool-proxy.env
 

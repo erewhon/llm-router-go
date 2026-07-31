@@ -99,16 +99,22 @@ func run(args []string) int {
 	reg.Register(tools.Calculator())
 	reg.Register(tools.WebSearch(toolClient))
 	reg.Register(tools.FetchURL(toolClient))
-	// Tavily only when a key is available — otherwise the model would see a
-	// tool it can't use (the tool itself also guards on an empty key).
+	// Tavily is registered even without a key, and deliberately so. Clients
+	// advertise it in their system prompts (the forge general_researcher tells
+	// the model to *prefer* it for current events and named entities), and a
+	// tool call naming a function absent from the request's `tools` array is
+	// silently discarded by Atlas's grammar-constrained decoder — the model's
+	// output vanishes and the caller gets an empty completion with no clue why.
+	// Registered with an empty key the call instead executes and returns
+	// "Tavily search failed: no API key configured", which the model can read
+	// and recover from by falling back to web_search on the next round.
 	tavily := *tavilyKey
 	if tavily == "" {
 		tavily = os.Getenv("TAVILY_API_KEY")
 	}
-	if tavily != "" {
-		reg.Register(tools.Tavily(toolClient, tavily))
-	}
-	logger.Info("tools registered", "tools", reg.Names(), "proxy", *socksProxy)
+	reg.Register(tools.Tavily(toolClient, tavily))
+	logger.Info("tools registered", "tools", reg.Names(), "proxy", *socksProxy,
+		"tavily_key_configured", tavily != "")
 
 	// Auto-router. Its embedding client talks DIRECTLY to the LAN embedder —
 	// it must not route through the web tools' SOCKS5 VPN proxy. activeAliases

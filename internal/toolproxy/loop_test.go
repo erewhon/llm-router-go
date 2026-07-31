@@ -205,6 +205,177 @@ func TestToolLoop_NaturalAnswerNoTools(t *testing.T) {
 	}
 }
 
+// emptyAnswerResp is a terminal completion carrying no content — what a
+// backend returns when the model gives up, or when the engine discards a tool
+// call naming a function the request never declared.
+func emptyAnswerResp(completionTokens int) string {
+	return fmt.Sprintf(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":%d,"total_tokens":%d}}`, completionTokens, completionTokens+1)
+}
+
+// decodeErrorMessage pulls .error.message out of an OpenAI-shaped error body.
+func decodeErrorMessage(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error body: %v\nbody=%s", err, rec.Body.String())
+	}
+	return env.Error.Message
+}
+
+// Path 1: tools ran and all failed (dead egress) — the model gives up and the
+// proxy used to return HTTP 200 with content "".
+func TestToolLoop_EmptyAnswerAfterToolFailureIs502(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		// The calculator is the only tool registered in tests; a bogus
+		// expression makes it return its failure string, standing in for a
+		// search that can't reach its egress.
+		toolCallResp("calculator", `{"expression":"no_such_fn(1)"}`),
+		emptyAnswerResp(27),
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"research something"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	msg := decodeErrorMessage(t, rec)
+	if !strings.Contains(msg, "all 1 tool call(s) failed") {
+		t.Errorf("error message = %q, want it to report that every tool call failed", msg)
+	}
+	// The failing tool must be named, so the journal/caller can see what broke.
+	if !strings.Contains(msg, "calculator") {
+		t.Errorf("error message = %q, want the failing tool named", msg)
+	}
+}
+
+// Path 2: no tool ran at all. The backend burned tokens that never became
+// content (Atlas discarding a call to an undeclared tool). Nothing failed, so
+// a tool-failure-only check would miss this.
+func TestToolLoop_EmptyAnswerWithNoToolsRunIs502(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{emptyAnswerResp(28)}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	msg := decodeErrorMessage(t, rec)
+	if !strings.Contains(msg, "executed no tools") {
+		t.Errorf("error message = %q, want it to report that no tools ran", msg)
+	}
+	// The token count is the tell that the backend generated and dropped output.
+	if !strings.Contains(msg, "28 completion tokens") {
+		t.Errorf("error message = %q, want the backend token count for diagnosis", msg)
+	}
+}
+
+// Streaming must fail the same way, before any SSE byte is written.
+func TestToolLoop_EmptyAnswerStreamingIs502(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{emptyAnswerResp(28)}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "data:") {
+		t.Errorf("streamed SSE before failing; body = %s", rec.Body.String())
+	}
+}
+
+// A real answer must still pass through untouched — the guard must not fire on
+// short-but-valid content.
+func TestToolLoop_ShortAnswerNotTreatedAsEmpty(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{answerResp("4")}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"2+2?"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeCompletion(t, rec).Choices[0].Message.Content; got != "4" {
+		t.Errorf("content = %q, want 4", got)
+	}
+}
+
+// truncatedAnswerResp is a final answer the backend cut short (finish_reason
+// "length") — what Atlas returns when its inter-tool prose budget is exhausted
+// while tool definitions are still attached to the request.
+func truncatedAnswerResp(content string) string {
+	return fmt.Sprintf(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`, content)
+}
+
+func TestToolLoop_TruncatedFinalAnswerRegeneratedWithoutTools(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		toolCallResp("calculator", `{"expression":"2+2"}`),
+		truncatedAnswerResp(`{"answer":"cut off mid-`), // capped while tools attached
+		answerResp(`{"answer":"complete","sources":["a"]}`),
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"research 2+2"}]}`)
+	cc := decodeCompletion(t, rec)
+
+	if got, want := cc.Choices[0].Message.Content, `{"answer":"complete","sources":["a"]}`; got != want {
+		t.Errorf("content = %q, want the regenerated answer %q", got, want)
+	}
+	if cc.Choices[0].FinishReason != "stop" {
+		t.Errorf("finish_reason = %q, want stop after successful regeneration", cc.Choices[0].FinishReason)
+	}
+	if up.callCount() != 3 {
+		t.Fatalf("upstream calls = %d, want 3 (tool call, truncated answer, regeneration)", up.callCount())
+	}
+	// The regeneration must drop the tool definitions — that's what lifts the
+	// backend's inter-tool prose cap.
+	if tools, ok := up.call(2)["tools"]; ok {
+		t.Errorf("regeneration carried tools = %v, want them dropped", tools)
+	}
+	if tc, ok := up.call(2)["tool_choice"]; ok {
+		t.Errorf("regeneration carried tool_choice = %v, want it dropped", tc)
+	}
+	// It must still carry the executed-tool history, or the model loses its research.
+	if role := msgField(up.call(2), -1, "role"); role != "tool" {
+		t.Errorf("regeneration last message role = %v, want tool", role)
+	}
+}
+
+func TestToolLoop_TruncatedFinalKeptWhenRegenerationFails(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		truncatedAnswerResp("partial answer"),
+		`{"choices":[]}`, // regeneration comes back unusable
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degraded, not failed)", rec.Code)
+	}
+	cc := decodeCompletion(t, rec)
+	if cc.Choices[0].Message.Content != "partial answer" {
+		t.Errorf("content = %q, want the truncated answer preserved", cc.Choices[0].Message.Content)
+	}
+	// Truncation must stay visible rather than being relabelled "stop".
+	if cc.Choices[0].FinishReason != "length" {
+		t.Errorf("finish_reason = %q, want length", cc.Choices[0].FinishReason)
+	}
+}
+
 func TestToolLoop_ClientToolReturnedNotExecuted(t *testing.T) {
 	up := &scriptedUpstream{queue: []string{toolCallResp("get_weather", `{"city":"NYC"}`)}}
 	server := httptest.NewServer(up.handler())
@@ -311,6 +482,44 @@ func TestToolLoop_NothinkSkipsInjection(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------
+
+// The loop forces stream=false for its internal rounds, but the client's
+// stream_options survives in the same body map. That pair is invalid per the
+// OpenAI schema: vLLM 400s the whole request ("Stream options can only be
+// defined when `stream=True`"), while Atlas silently tolerated it. Regression
+// for the dashboard quick-chat breaking when archimedes moved to vLLM.
+func TestToolLoop_DropsStreamOptionsOnNonStreamingRounds(t *testing.T) {
+	finalSSE := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	up := &scriptedUpstream{
+		queue: []string{
+			toolCallResp("calculator", `{"expression":"2+2"}`),
+			answerResp("buffered final, discarded"),
+		},
+		sse: finalSSE,
+	}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,`+
+		`"stream_options":{"include_usage":true},`+
+		`"messages":[{"role":"user","content":"2+2?"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if up.callCount() == 0 {
+		t.Fatal("no upstream calls captured")
+	}
+	for i := 0; i < up.callCount(); i++ {
+		call := up.call(i)
+		isStream, _ := call["stream"].(bool)
+		_, hasOpts := call["stream_options"]
+		if !isStream && hasOpts {
+			t.Errorf("call %d: stream=false but stream_options present — vLLM rejects this", i)
+		}
+	}
+}
 
 func TestToolLoop_StreamingReStreamsFinal(t *testing.T) {
 	finalSSE := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
