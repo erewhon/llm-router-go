@@ -1,8 +1,126 @@
 # Decision Doc — Large-MoE Host Build (the "bigger than the Sparks" box)
 
-**Status:** Scoped · **Date:** 2026-06-12 (scope locked 2026-06-13; K2.7-Code added 2026-06-14) · **Owner:** Steven
+**Status:** **RESCOPED 2026-08-02** · **Date:** 2026-06-12 (scope locked 2026-06-13; K2.7-Code added 2026-06-14; **rescoped 2026-08-02 — see below**) · **Owner:** Steven
 
-## Scope (locked)
+---
+
+## ⭐ REVISED SPEC (2026-08-02) — supersedes "Scope (locked)", "TL;DR recommendation" and "The two builds"
+
+**The 671B/Kimi ambition is retired.** Steven's call, 2026-08-02: those targets were
+aspirational, and *"if they're slow, I probably won't use them, even for batch jobs."*
+That removes the single constraint that set the 576 GB capacity target — Kimi
+K2.7-Code at IQ4_XS (495 GB) and DeepSeek-671B-A37B (~377 GB). Both decode at
+4–7 t/s on any tier costed here, which is exactly the speed being rejected.
+
+Everything downstream changes, because **the models actually worth running turned
+out to be big-total/small-active**, and they are far smaller than the giants this
+doc was built around.
+
+### New scope
+
+- **Primary target: the A3B–A16B daily drivers.** Ling-flash-2.0 (58 GB, A6.1B),
+  gpt-oss-120b (63 GB, A5.1B), GLM-4.5-Air (63 GB, A12B), Qwen3-Coder-Next
+  (47 GB, A3B), Qwen3.5-122B (72 GB, A10B), MiniMax M2.7 (120 GB, A10B),
+  Inkling-Small (163 GB, A12B), DeepSeek-V4-Flash (155 GB, A15.6B).
+- **Capacity target: 96 GB VRAM + 256 GB RAM** — *not* 576 GB RAM.
+- **Speed: interactive, i.e. 30 t/s+ on the models in daily use.** Anything that
+  lands in single digits is out of scope by definition now.
+
+### New recommendation — GPU-first, RAM-second
+
+**Single-socket EPYC Milan (Zen 3, DDR4), 8×32 GB = 256 GB filling all 8 channels,
+plus one RTX PRO 6000 Blackwell 96 GB.**
+
+The inversion versus the original doc: **the GPU is now the high-leverage
+purchase and the CPU/RAM side is the cheap commodity.** Going 48 GB → 96 GB of
+VRAM is worth ~2× on the hybrid models and **~10× on the five that become fully
+resident**. Going Milan → Genoa is worth ~1.75–2×. So a 96 GB card on a cheap
+Milan box beats a 48 GB card on an expensive Genoa one — and costs about the same
+as the original Genoa build, because 256 GB of DDR4 replaces 576 GB of DDR5.
+
+**Five models become fully GPU-resident** (projected, 1.8 TB/s × this page's
+0.4–0.7 attainment factor):
+
+| Model | Size | Active | Projected resident decode |
+|---|---|---|---|
+| Qwen3-Coder-Next | 47 GB | A3B | **410–715 t/s** |
+| gpt-oss-120b | 63 GB | A5.1B | **265–465 t/s** |
+| Ling-flash-2.0 | 58 GB | A6.1B | **190–330 t/s** |
+| Qwen3.5-122B | 72 GB | A10B | **115–200 t/s** |
+| GLM-4.5-Air | 63 GB | A12B | **95–170 t/s** |
+
+**The three that don't fit still roughly double**, because `--n-cpu-moe` splits
+expert layers across GPU and CPU. Inkling-Small needs only ~8 GB for non-expert
+weights + KV (its measured 128K KV is just 3.84 GiB — see the SWA note below),
+leaving **~88 GB against a ~166 GB expert pool ≈ half the expert layers on GPU**:
+
+- RAM side ~1.85 GB/token at 190 GB/s ≈ 9.7 ms
+- GPU side ~5.58 GB/token at 1800 GB/s ≈ 3.1 ms
+- → ~78 t/s raw → **~31–55 t/s**, versus 15–30 with a 48 GB card
+
+MiniMax M2.7 (120 GB) does better still — ~80 % of it fits, so it approaches
+resident speeds. DeepSeek-V4-Flash (155 GB) behaves like Inkling-Small.
+
+### Parts list — Milan + RTX PRO 6000 (~$14–16k)
+
+| Part | Pick | ~Price |
+|---|---|---|
+| CPU | EPYC **7543 (32c)** — must be **8-CCD**; 4-CCD parts (7313/7343) cannot saturate 8 channels | $0.4–0.7k |
+| Board | Supermicro **H12SSL-i** (SP3, single socket, 8 DIMM) | $0.4–0.6k |
+| RAM | **8×32 GB DDR4-3200 ECC RDIMM = 256 GB**, 1 DPC, all 8 channels | ~$1.2k |
+| GPU | **RTX PRO 6000 Blackwell 96 GB — Server Edition (passive)** | $11–12k |
+| PSU / chassis / NVMe / cooling | **1.6 kW PSU**, 4U server chassis w/ high-static-pressure fans, 2 TB NVMe | $0.8–1.2k |
+| **Total** | | **~$14–16k** |
+
+Cores: decode is bandwidth-bound and the GPU now handles prefill, so 32c is
+ample. Don't overpay for 64c.
+
+### Why this beats the original Genoa build at similar cost
+
+The original ⭐ Value build (Genoa + 576 GB DDR5 + 48 GB card) was ~$11–16k and
+would host **zero** models fully in VRAM. This one costs about the same and hosts
+five, at 95–715 t/s. On the hybrid models the two are close — Genoa + 48 GB
+projects to ~36–62 t/s for Inkling-Small versus ~31–55 t/s here, because the
+96 GB card's larger expert cache compensates for the slower DDR4.
+
+**If budget later allows, Genoa + a 96 GB card is the genuine best-of-both**
+(~55–96 t/s on Inkling-Small). It is not specced here only because 256 GB does
+not map cleanly onto Genoa's 12 channels — filling them means 12 sticks, and
+DDR5 at 2026 surge prices is precisely the cost this rescope removes.
+
+### What is given up (explicitly)
+
+- **DeepSeek-671B-A37B, Kimi K2.7-Code, GLM-5.2 744B.** All need 377–495 GB and
+  are not meaningfully GPU-assisted at 96 GB. This is the accepted trade, not an
+  oversight — see the decision statement at the top of this section.
+- **No Turin upgrade path.** SP3 is terminal. The original hedge (Genoa now,
+  Turin later on the same DIMMs) does not exist here.
+- **AVX-512, and `ik_llama.cpp`'s IQK fast path.** Zen 3 is AVX2 only. This costs
+  prefill far more than decode — and the GPU now covers prefill, which is the
+  whole premise.
+
+### Cautions before ordering
+
+- **600 W card.** Get the **Server Edition** (passive, front-to-back airflow), not
+  the Workstation Edition — a 600 W flow-through blower is the wrong part for a
+  rack chassis. Size the PSU at 1.6 kW with an EPYC alongside.
+- **SM_120 toolchain freshness.** GB202/Blackwell is the same generation family as
+  the Sparks' GB10 (SM 12.1), where we have been bitten twice: the SGLang/PyTorch
+  12.0 Triton crash, and an NVFP4 path that **silently emitted all-NUL output**
+  until `VLLM_NVFP4_GEMM_BACKEND=marlin` was forced. Expect a shakedown period and
+  verify known-good output before trusting any FP8/FP4 path.
+- **No NVLink on RTX PRO 6000** — and it does not matter here. See the note under
+  "GPU choice".
+
+### Scaling endpoint (not a recommendation)
+
+**2× RTX PRO 6000 = 192 GB, ~$22–24k** would hold Inkling-Small (163 GB) *fully
+resident* → 7.43 GB/token at 1.8 TB/s ≈ 242 t/s raw, **~97–170 t/s**. Cheaper than
+2× A100 80 GB and far more capable. Noted as the ceiling if the budget ever moves.
+
+---
+
+## Scope (SUPERSEDED 2026-08-02 — retained for the reasoning that led here)
 
 - **Primary target: DeepSeek-671B-A37B class** (also Qwen3-Coder-480B-A35B) at
   Q4 → **fits in 576 GB**. *Not* optimizing for Kimi-K2-at-Q4 (would force
@@ -183,15 +301,27 @@ effective than on hekaton. VRAM capacity matters more than raw bandwidth here
 | Quadro RTX 8000 (used) | **48 GB** | 672 GB/s | ~$2,000 | **value 48 GB**, passive (server-friendly) |
 | RTX A6000 (used) | **48 GB** | 768 GB/s | ~$3,000–3,800 | 48 GB, Ampere, passive |
 | RTX 6000 Ada (used) | 48 GB | 960 GB/s | ~$5,600 | 48 GB + FP8, passive |
-| RTX PRO 6000 Blackwell | **96 GB** | 1790 GB/s | ~$8,500 | premium; holds a big chunk of experts |
+| **RTX PRO 6000 Blackwell** | **96 GB** | 1790 GB/s | **~$11–12k (2026-08 market)** | ⭐ **THE PICK (rescope 2026-08-02)** — FP8+FP4, ECC, PCIe 5.0, 600 W |
+| A100 80 GB PCIe | 80 GB | 1935 GB/s | **>$15k** | ❌ rejected — costlier, less VRAM, **no FP8**, ~19.5 TFLOPS FP32 |
 
 - **24 GB**: fits attention + KV + dense; ~0 experts for a 380 GB model. Good
   prefill win, modest decode help. Fine entry point.
-- **48 GB**: the practical sweet spot — holds attention/dense + a real slice of
-  hot experts; passive workstation cards (RTX 8000 / A6000) fit a server chassis
-  (consumer 3090/4090 axial coolers cook in racks). **Recommended.**
-- **96 GB** (RTX PRO 6000 Blackwell): step-function for the very largest models;
-  premium price.
+- **48 GB**: ~~the practical sweet spot~~ **— SUPERSEDED 2026-08-02.** Holds
+  attention/dense + a slice of hot experts, but under the rescope **no model on
+  the target list fits fully in VRAM at 48 GB** (Ling-flash 58, GLM-4.5-Air 63,
+  gpt-oss 63, Qwen3-Coder-Next 47+KV), so everything stays hybrid and RAM-bound.
+- **96 GB** (RTX PRO 6000 Blackwell): ⭐ **now the recommendation.** Five target
+  models become fully resident (~10× hybrid), and the three that don't still
+  roughly double via `--n-cpu-moe`. **The 48-vs-96 GB choice matters more than
+  the Milan-vs-Genoa choice.**
+- **NVLink is absent on RTX PRO 6000 — and irrelevant here.** llama.cpp
+  `--split-mode layer` passes only the hidden state across the boundary (4096 ×
+  2 B = **8 KB per crossing**). Even tensor-parallel batch-1 decode all-reduces
+  only ~8 KB, so PCIe *latency* (~1–2 µs) dominates, not bandwidth: ~84–168 µs
+  per token across 42 layers, i.e. **1–2 % overhead at 100 t/s**. NVLink only
+  pays for high-batch TP serving and multi-GPU training. (Distinct from the
+  multi-*node* Ray TP aversion, which remains correct — that is a network, not a
+  PCIe link.)
 - Avoid AMD/Intel GPUs *here* — the fast engines are CUDA-only on this path
   (different from hekaton, where AVX1 made vendor moot).
 
@@ -210,7 +340,7 @@ Real hybrid data points (`ik_llama.cpp`, DeepSeek 671B): EPYC 9334-QS + RTX 3070
 | MiniMax M3 428B-A23B | 23B | ~240 GB | ⚠️ **not yet** — MSA + multimodal, no GGUF/arch support yet | n/a | wait for llama.cpp arch PR; lower active = faster once supported |
 | Nemotron-3 Ultra 550B-A55B | 55B | ~300 GB | ⚠️ Mamba-hybrid arch support uncertain | has MTP | **A55B = compute-heavy**, slower decode even on big BW |
 | **Kimi K2.7-Code** 1T-A32B | 32B | IQ4_XS ~495 / Q4_K_XL ~584 GB | ✅ GGUF day-1 (Unsloth) | — | native INT4 (QAT) → Q4 ≈ lossless, no gain above it. Near-lossless Q4 wants **768 GB**; **IQ4_XS (495 GB) fits 576**; Q2_K_XL ~339 GB, IQ1_M ~304 GB |
-| Inkling-Small 276B-A12B | 12B | ~175 GB | ⚠️ **none** — no llama.cpp arch (SGLang/vLLM/HF only) | — | Apache 2.0, unreleased as of 2026-07-28. **A12B → ~30–50 t/s on Genoa**; needs only **192 GB** (12×16) |
+| **Inkling-Small 276B-A12B** | 12B | **163 GB (measured)** | ⚠️ **unmerged PR** ggml-org/llama.cpp#25731 — builds and runs, not upstream | ships 8-layer MTP, but **GGUF excludes it** | ✅ **RELEASED 2026-07-30, Apache 2.0. BENCHED 2026-08-02 on hekaton: pp512 21.47 / tg128 2.96, coherence verified.** SWA (512-tok window on 35 of 42 layers) → **KV only 3.84 GiB at 128K**, 5.5× cheaper than a conventional cache. **80.2 SWE-bench Verified — beats its own 975B parent.** Genoa hybrid ~25–43 t/s; **Milan + 96 GB card ~31–55** |
 | **Kimi K3** 2.8T-A104B | **104B** | **1.56 TB** (native MXFP4, as released) | ❌ **none** — KDA + AttnRes + Stable LatentMoE all novel | — | ❌ **not a target — see below.** RAM bill alone is ~$46–70k |
 
 Takeaways: **DeepSeek-671B is the natural primary target** (mature support, MTP,
@@ -343,7 +473,14 @@ AMX's prefill edge by offloading attention to the GPU anyway. Go Intel only if
 huge-prompt prefill is your top priority (Granite Rapids-AP, loose budget) or you
 specifically want to run KTransformers.
 
-## The two builds (DeepSeek-671B target, 576 GB)
+## The two builds (DeepSeek-671B target, 576 GB) — **SUPERSEDED 2026-08-02**
+
+> ⚠️ **Both builds below are superseded by the REVISED SPEC at the top of this
+> doc.** They target DeepSeek-671B-A37B and Kimi K2.7-Code at 576 GB — an
+> ambition retired on 2026-08-02 because those models decode at 4–7 t/s on every
+> tier costed here, and slow models will not get used even for batch. Retained
+> because the bandwidth/channel-population reasoning is still correct and still
+> applies to the Milan build.
 
 Both are **single-socket SP5** (Genoa and Turin share the socket), all 12 DDR5
 channels filled with **12×48 GB = 576 GB**, NVIDIA GPU, `ik_llama.cpp`. They
