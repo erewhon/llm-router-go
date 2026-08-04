@@ -21,7 +21,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,15 +28,16 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/health"
 )
 
 //go:embed dashboard.html
 var dashboardHTMLTemplate string
 
-// nodeMetricsClient talks to the per-node agents. The 1.5s timeout matches the
-// Python dashboard: healthy probes return in <250ms, and a broken host (e.g.
-// mDNS resolving to an unroutable overlay IP) must not stall the whole page.
-var nodeMetricsClient = &http.Client{Timeout: 1500 * time.Millisecond}
+// Node probing lives in internal/health — the dashboard and the availability
+// tracker share one prober so they can never disagree about whether a node
+// answered. The dashboard still probes live rather than reading the tracker's
+// cache: it wants sub-second VRAM and tok/s, which a 15s poll can't give.
 
 // DashboardConfig holds the values substituted into the served HTML. Both are
 // display-only reference material in the "Connection" card — they don't affect
@@ -85,28 +85,6 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 // Node-agent fetch — port of the Python _fetch_node_metrics helper.
 // ---------------------------------------------------------------------------
 
-// agentHealth is the subset of the node agent's /health response the dashboard
-// consumes; agentModel the subset of its /models list.
-type agentHealth struct {
-	TotalVRAMGB *float64 `json:"total_vram_gb"`
-	FreeVRAMGB  *float64 `json:"free_vram_gb"`
-	GPUBusyPct  *int     `json:"gpu_busy_pct"`
-	RAMUsedGB   *float64 `json:"ram_used_gb"`
-	RAMTotalGB  *float64 `json:"ram_total_gb"`
-	DiskFreeGB  *float64 `json:"disk_free_gb"`
-	DiskTotalGB *float64 `json:"disk_total_gb"`
-	Services    []any    `json:"services"`
-}
-
-type agentModel struct {
-	ModelID         string   `json:"model_id"`
-	State           string   `json:"state"`
-	RequestsRunning int      `json:"requests_running"`
-	RequestsWaiting int      `json:"requests_waiting"`
-	AvgTokPerS      *float64 `json:"avg_tok_per_s"`
-	TotalRequests   int      `json:"total_requests"`
-}
-
 // nodeMetric is the per-node payload returned by /api/node-metrics and embedded
 // in /api/models. The vram_*/ram_* fields are emitted as null (not omitted) so
 // the frontend sees the same keys whether or not a node is reachable, matching
@@ -135,41 +113,19 @@ type nodeModelMetric struct {
 	TotalRequests   int      `json:"total_requests"`
 }
 
-var (
-	selfHostsOnce sync.Once
-	selfHosts     map[string]struct{}
-)
-
-// selfHostnames returns the set of hostnames that mean "this machine", so a
-// node whose configured host is the router's own host is probed over loopback
-// (dodging mDNS/overlay resolution games). Mirrors the Python _SELF_HOSTNAMES.
-func selfHostnames() map[string]struct{} {
-	selfHostsOnce.Do(func() {
-		selfHosts = map[string]struct{}{"localhost": {}}
-		if h, err := os.Hostname(); err == nil && h != "" {
-			selfHosts[h] = struct{}{}
-			selfHosts[h+".local"] = struct{}{}
-		}
-	})
-	return selfHosts
-}
-
 func unreachableNode() nodeMetric {
 	return nodeMetric{Reachable: false, Models: []nodeModelMetric{}}
 }
 
-// fetchNodeMetrics fetches GPU/RAM metrics and model states from one node agent.
+// fetchNodeMetrics probes one node agent via the shared prober and maps the
+// result into the JSON shape the dashboard frontend expects.
 func fetchNodeMetrics(ctx context.Context, host string, agentPort int) nodeMetric {
 	result := unreachableNode()
-	if _, self := selfHostnames()[host]; self {
-		host = "127.0.0.1"
-	}
-	base := "http://" + host + ":" + strconv.Itoa(agentPort)
-
-	healthResp := fetchJSON[agentHealth](ctx, base+"/health")
-	if healthResp == nil {
+	snap := health.ProbeNode(ctx, host, agentPort)
+	if !snap.Reachable {
 		return result
 	}
+	healthResp := snap.Health
 	result.Reachable = true
 	if healthResp.TotalVRAMGB != nil && healthResp.FreeVRAMGB != nil {
 		total := *healthResp.TotalVRAMGB
@@ -199,17 +155,15 @@ func fetchNodeMetrics(ctx context.Context, host string, agentPort int) nodeMetri
 	result.DiskFreeGB = healthResp.DiskFreeGB
 	result.DiskTotalGB = healthResp.DiskTotalGB
 
-	if models := fetchJSON[[]agentModel](ctx, base+"/models"); models != nil {
-		for _, m := range *models {
-			result.Models = append(result.Models, nodeModelMetric{
-				ModelID:         m.ModelID,
-				State:           m.State,
-				RequestsRunning: m.RequestsRunning,
-				RequestsWaiting: m.RequestsWaiting,
-				AvgTokPerS:      m.AvgTokPerS,
-				TotalRequests:   m.TotalRequests,
-			})
-		}
+	for _, m := range snap.Models {
+		result.Models = append(result.Models, nodeModelMetric{
+			ModelID:         m.ModelID,
+			State:           m.State,
+			RequestsRunning: m.RequestsRunning,
+			RequestsWaiting: m.RequestsWaiting,
+			AvgTokPerS:      m.AvgTokPerS,
+			TotalRequests:   m.TotalRequests,
+		})
 	}
 	return result
 }
@@ -377,6 +331,7 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nodes := map[string]any{}
+	now := time.Now()
 	for name, n := range rt.registry.Nodes {
 		nodes[name] = map[string]any{
 			"host":           n.Host,
@@ -384,6 +339,9 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 			"vram_gb":        n.VRAMGB,
 			"agent_port":     n.AgentPort,
 			"unified_memory": n.UnifiedMemory,
+			// expected_down lets the UI render planned downtime as planned.
+			// A node powered off inside its own schedule is not a fault.
+			"expected_down": health.ExpectedDown(n, now),
 		}
 	}
 
@@ -394,6 +352,10 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		"nodes":        nodes,
 		"node_metrics": nodeMetrics,
 		"models":       models,
+		// Roles ride along on this payload rather than needing their own poll:
+		// the Roles card wants to render in the same frame as the node states
+		// it explains.
+		"roles": rt.roleBindings(),
 	})
 }
 
@@ -552,28 +514,6 @@ func (w *sseErrorWriter) Flush() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// fetchJSON GETs url and decodes the body into T. Returns nil on any transport
-// error, non-200 status, or decode failure — callers treat nil as "unavailable".
-func fetchJSON[T any](ctx context.Context, url string) *T {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil
-	}
-	resp, err := nodeMetricsClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	var v T
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		return nil
-	}
-	return &v
-}
 
 func writeDashJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

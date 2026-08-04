@@ -85,25 +85,40 @@ var complexityKeywords = []string{
 	"complex", "large-scale", "entire codebase", "comprehensive",
 }
 
+// RoutableFunc reports whether a name (model id, alias, or role) can serve a
+// request right now. It is consulted at classification time, not at startup:
+// the fleet powers nodes down on a schedule, so a category that was fine when
+// the proxy booted may have nothing behind it an hour later.
+//
+// It must fail open — an unknown name, or a status feed that is itself down,
+// should return true. Routing and finding out beats refusing to route.
+type RoutableFunc func(name string) bool
+
 // AutoRouter classifies prompts to a model alias via embedding similarity.
 // Category embeddings are computed once (see RunInit) and published atomically;
 // until then Classify falls back to "coder".
 type AutoRouter struct {
-	embedURL      string
-	embedModel    string
-	client        *http.Client
-	logger        *slog.Logger
-	activeAliases map[string]bool // nil = every category active
+	embedURL   string
+	embedModel string
+	client     *http.Client
+	logger     *slog.Logger
+	// routable is the live availability predicate. nil means everything is
+	// routable (no availability feed configured).
+	routable RoutableFunc
 
 	embeddings atomic.Pointer[map[string][]float64]
 }
 
 // NewAutoRouter builds an AutoRouter. client should talk directly to the
 // embedding backend (NOT through the web tools' VPN SOCKS5 proxy — the
-// embedder is on the LAN). activeAliases, when non-nil, restricts which
-// categories are embedded so the router never picks an alias whose model is
-// disabled in the current config; nil means all categories.
-func NewAutoRouter(embedURL, embedModel string, client *http.Client, logger *slog.Logger, activeAliases map[string]bool) *AutoRouter {
+// embedder is on the LAN).
+//
+// routable, when non-nil, is consulted on every classification so the router
+// never picks a category whose target has nothing behind it. Passing nil
+// disables the check entirely. Note this is deliberately a live predicate
+// rather than the startup-time alias set it replaced: category embeddings are
+// computed once, but availability changes all day.
+func NewAutoRouter(embedURL, embedModel string, client *http.Client, logger *slog.Logger, routable RoutableFunc) *AutoRouter {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -114,12 +129,20 @@ func NewAutoRouter(embedURL, embedModel string, client *http.Client, logger *slo
 		embedModel = "qwen3-embedding-4b"
 	}
 	return &AutoRouter{
-		embedURL:      embedURL,
-		embedModel:    embedModel,
-		client:        client,
-		logger:        logger,
-		activeAliases: activeAliases,
+		embedURL:   embedURL,
+		embedModel: embedModel,
+		client:     client,
+		logger:     logger,
+		routable:   routable,
 	}
+}
+
+// canRoute reports whether a target is usable right now, failing open.
+func (ar *AutoRouter) canRoute(name string) bool {
+	if ar.routable == nil {
+		return true
+	}
+	return ar.routable(name)
 }
 
 // Ready reports whether category embeddings have been computed.
@@ -128,19 +151,19 @@ func (ar *AutoRouter) Ready() bool {
 	return e != nil && len(*e) > 0
 }
 
-// Initialize computes and publishes the category embeddings. Categories whose
-// alias isn't in activeAliases are skipped. Returns an error only if nothing
-// could be embedded (so RunInit knows to retry); a partial success is
-// published and returns nil, matching the Python proxy's keep-what-worked
-// behaviour.
+// Initialize computes and publishes the category embeddings for EVERY
+// category. Availability is deliberately not consulted here: embeddings are
+// computed once at startup, but nodes come and go all day, so filtering at
+// this point would freeze an accident of boot time into the routing table for
+// the life of the process. Classify does the filtering instead.
+//
+// Returns an error only if nothing could be embedded (so RunInit knows to
+// retry); a partial success is published and returns nil, matching the Python
+// proxy's keep-what-worked behaviour.
 func (ar *AutoRouter) Initialize(ctx context.Context) error {
 	embeddings := map[string][]float64{}
 	var firstErr error
 	for _, cat := range routeCategories {
-		if ar.activeAliases != nil && !ar.activeAliases[cat.alias] {
-			ar.logger.Info("auto-router: skipping disabled category", "alias", cat.alias)
-			continue
-		}
 		emb, err := ar.getEmbedding(ctx, cat.desc)
 		if err != nil {
 			ar.logger.Warn("auto-router: category embed failed", "alias", cat.alias, "err", err)
@@ -202,11 +225,17 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 
 	userMsg, hasImage := lastUserMessage(messages)
 	if hasImage {
-		ar.logger.InfoContext(ctx, "auto-route: image detected -> vision")
-		return "vision"
+		// An image is a hard requirement, not a preference: if nothing can see
+		// right now, say so by falling back rather than silently sending the
+		// image to a text-only model that will ignore it.
+		if ar.canRoute("vision") {
+			ar.logger.InfoContext(ctx, "auto-route: image detected -> vision")
+			return "vision"
+		}
+		ar.logger.WarnContext(ctx, "auto-route: image detected but vision is unavailable")
 	}
 	if userMsg == "" {
-		return "coder"
+		return ar.firstRoutable("coder")
 	}
 
 	// Only the intent matters for classification, not the full context.
@@ -214,11 +243,16 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 	promptEmb, err := ar.getEmbedding(ctx, classifyText)
 	if err != nil {
 		ar.logger.WarnContext(ctx, "auto-route embed failed; defaulting to coder", "err", err)
-		return "coder"
+		return ar.firstRoutable("coder")
 	}
 
-	bestAlias, bestScore := "coder", -1.0
+	// Score every category, then pick the best one that is actually
+	// answerable. Scoring all of them (rather than skipping unroutable ones)
+	// keeps the log honest about what the classifier thought, which matters
+	// when you are working out why an overnight request went somewhere odd.
 	scores := make(map[string]float64, len(embeddings))
+	bestAlias, bestScore := "", -1.0
+	bestRoutable, bestRoutableScore := "", -1.0
 	for _, cat := range routeCategories { // deterministic order / tie-break
 		catEmb, ok := embeddings[cat.alias]
 		if !ok {
@@ -229,23 +263,58 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 		if s > bestScore {
 			bestScore, bestAlias = s, cat.alias
 		}
+		if s > bestRoutableScore && ar.canRoute(cat.alias) {
+			bestRoutableScore, bestRoutable = s, cat.alias
+		}
+	}
+	if bestAlias == "" {
+		bestAlias = "coder"
+	}
+	if bestRoutable == "" {
+		// Nothing scored is answerable. firstRoutable does a last sweep in
+		// declared order before giving up and returning coder anyway — the
+		// router's own 503 is a better error than one invented here.
+		bestRoutable = ar.firstRoutable("coder")
+	}
+	if bestRoutable != bestAlias {
+		ar.logger.InfoContext(ctx, "auto-route: top category unavailable, degrading",
+			"wanted", bestAlias, "using", bestRoutable)
 	}
 
-	// Complexity upgrades apply to coding tasks only.
-	if bestAlias == "coder" && (tier == TierFree || tier == TierFull) {
+	// Complexity upgrades apply to coding tasks only, and only when the
+	// upgrade target is itself reachable — escalating to a model that is off
+	// would turn a working request into a failing one.
+	if bestRoutable == "coder" && (tier == TierFree || tier == TierFull) {
 		complexity := scoreComplexity(userMsg)
-		if tier == TierFull && complexity >= veryHardThreshold {
-			ar.logDecision(ctx, tier, classifyText, bestAlias, "claude-opus-4-6", scores, &complexity)
+		if tier == TierFull && complexity >= veryHardThreshold && ar.canRoute("claude-opus-4-6") {
+			ar.logDecision(ctx, tier, classifyText, bestRoutable, "claude-opus-4-6", scores, &complexity)
 			return "claude-opus-4-6"
 		}
-		if complexity >= hardThreshold {
-			ar.logDecision(ctx, tier, classifyText, bestAlias, "coder-hard", scores, &complexity)
+		if complexity >= hardThreshold && ar.canRoute("coder-hard") {
+			ar.logDecision(ctx, tier, classifyText, bestRoutable, "coder-hard", scores, &complexity)
 			return "coder-hard"
 		}
 	}
 
-	ar.logDecision(ctx, tier, classifyText, bestAlias, bestAlias, scores, nil)
-	return bestAlias
+	ar.logDecision(ctx, tier, classifyText, bestAlias, bestRoutable, scores, nil)
+	return bestRoutable
+}
+
+// firstRoutable returns preferred if it is routable, else the first routable
+// category in declared order, else preferred anyway. The final fallback is
+// intentional: when nothing is known to be up, forwarding and letting the
+// router answer with its own 503 (which names the role and its candidates)
+// beats inventing a vaguer error here.
+func (ar *AutoRouter) firstRoutable(preferred string) string {
+	if ar.canRoute(preferred) {
+		return preferred
+	}
+	for _, cat := range routeCategories {
+		if ar.canRoute(cat.alias) {
+			return cat.alias
+		}
+	}
+	return preferred
 }
 
 func (ar *AutoRouter) logDecision(ctx context.Context, tier AutoTier, prompt, base, final string, scores map[string]float64, complexity *float64) {

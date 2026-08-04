@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     cache_creation_input_tokens INTEGER,
     cache_read_input_tokens     INTEGER,
     prefix_hash_chain TEXT,
+    role              TEXT,
+    role_overflowed   INTEGER NOT NULL DEFAULT 0,
+    failover_from     TEXT,
     error             TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
@@ -55,6 +58,9 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"cache_creation_input_tokens", "ALTER TABLE router_requests ADD COLUMN cache_creation_input_tokens INTEGER"},
 	{"cache_read_input_tokens", "ALTER TABLE router_requests ADD COLUMN cache_read_input_tokens INTEGER"},
 	{"prefix_hash_chain", "ALTER TABLE router_requests ADD COLUMN prefix_hash_chain TEXT"},
+	{"role", "ALTER TABLE router_requests ADD COLUMN role TEXT"},
+	{"role_overflowed", "ALTER TABLE router_requests ADD COLUMN role_overflowed INTEGER NOT NULL DEFAULT 0"},
+	{"failover_from", "ALTER TABLE router_requests ADD COLUMN failover_from TEXT"},
 }
 
 const sqliteInsertSQL = `
@@ -62,8 +68,9 @@ INSERT INTO router_requests
   (request_id, ts, method, path, model, backend_model, backend_url, resolved_via,
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
-   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain, error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
+   role, role_overflowed, failover_from, error)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -181,7 +188,9 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		b2i(rec.ViaToolProxy), b2i(rec.Stream), rec.Status, rec.LatencyMS,
 		rec.PromptTokens, rec.CompletionTokens, rec.TotalTokens,
 		rec.CacheCreationInputTokens, rec.CacheReadInputTokens,
-		nullIfEmpty(rec.PrefixHashChain), nullIfEmpty(rec.Error),
+		nullIfEmpty(rec.PrefixHashChain),
+		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
+		nullIfEmpty(rec.Error),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

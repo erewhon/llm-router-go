@@ -40,7 +40,18 @@ type Record struct {
 	// content. Empty for non-anthropic requests. Consecutive requests in a
 	// session diff to pinpoint where the cached prefix diverged.
 	PrefixHashChain string
-	Error           string
+	// Role is the semantic role the caller asked for ("coder"), empty when
+	// they named a model or alias directly. With ResolvedVia it answers the
+	// question the schedule creates: what did "coder" actually mean at 03:00?
+	Role string
+	// RoleOverflowed marks a role that exhausted its in-contract candidates
+	// and fell through to its declared overflow list.
+	RoleOverflowed bool
+	// FailoverFrom is the model that failed mid-request, when this record's
+	// ResolvedVia is the candidate that took over. Empty when no failover
+	// happened.
+	FailoverFrom string
+	Error        string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

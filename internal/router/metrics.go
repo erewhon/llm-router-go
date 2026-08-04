@@ -19,11 +19,14 @@ import (
 // client-supplied alias/string — and by keeping the duration histogram
 // label-free except for path + api_class.
 type routerMetrics struct {
-	reg      *prometheus.Registry
-	requests *prometheus.CounterVec
-	duration *prometheus.HistogramVec
-	tokens   *prometheus.CounterVec
-	handler  http.Handler
+	reg            *prometheus.Registry
+	requests       *prometheus.CounterVec
+	duration       *prometheus.HistogramVec
+	tokens         *prometheus.CounterVec
+	modelAvailable *prometheus.GaugeVec
+	roleTarget     *prometheus.GaugeVec
+	failovers      *prometheus.CounterVec
+	handler        http.Handler
 }
 
 // newRouterMetrics builds a fresh Prometheus registry, registers Go + process
@@ -79,12 +82,67 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 	}, []string{"kind", "model", "api_class"})
 	reg.MustRegister(tokens)
 
+	// Availability + role bindings. These are what you graph to see the fleet
+	// powering down in the evening and the roles moving with it.
+	modelAvailable := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_model_available",
+		Help: "1 when a model is currently routable, 0 when the tracker says it is down.",
+	}, []string{"model"})
+	reg.MustRegister(modelAvailable)
+
+	roleTarget := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "router_role_target",
+		Help: "1 for the model a role is currently bound to (0 for its other candidates).",
+	}, []string{"role", "model"})
+	reg.MustRegister(roleTarget)
+
+	failovers := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_role_failover_total",
+		Help: "Mid-request failovers from one role candidate to the next.",
+	}, []string{"role", "from", "to"})
+	reg.MustRegister(failovers)
+
 	return &routerMetrics{
-		reg:      reg,
-		requests: requests,
-		duration: duration,
-		tokens:   tokens,
-		handler:  promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
+		reg:            reg,
+		requests:       requests,
+		duration:       duration,
+		tokens:         tokens,
+		modelAvailable: modelAvailable,
+		roleTarget:     roleTarget,
+		failovers:      failovers,
+		handler:        promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
+	}
+}
+
+// ObserveFailover records a mid-request move from one role candidate to the
+// next. A rising rate here means the poller is lagging real failures.
+func (m *routerMetrics) ObserveFailover(role, from, to string) {
+	if m == nil || role == "" {
+		return
+	}
+	m.failovers.WithLabelValues(role, from, to).Inc()
+}
+
+// SetAvailability republishes the availability and role-binding gauges. Called
+// after each tracker poll rather than on every request, so the gauges reflect
+// fleet state rather than traffic.
+func (m *routerMetrics) SetAvailability(models map[string]bool, roleTargets map[string]string) {
+	if m == nil {
+		return
+	}
+	for id, up := range models {
+		v := 0.0
+		if up {
+			v = 1
+		}
+		m.modelAvailable.WithLabelValues(id).Set(v)
+	}
+	// Reset first: a role that moved must not leave its old target reading 1.
+	m.roleTarget.Reset()
+	for role, target := range roleTargets {
+		if target != "" {
+			m.roleTarget.WithLabelValues(role, target).Set(1)
+		}
 	}
 }
 

@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     cache_creation_input_tokens INTEGER,
     cache_read_input_tokens     INTEGER,
     prefix_hash_chain TEXT,
+    role              TEXT,
+    role_overflowed   BOOLEAN NOT NULL DEFAULT FALSE,
+    failover_from     TEXT,
     error             TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
@@ -48,6 +51,12 @@ CREATE INDEX IF NOT EXISTS router_requests_model_idx ON router_requests (model);
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS prefix_hash_chain TEXT;
+
+-- Migrations for tables created before semantic roles (idempotent).
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS role_overflowed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS failover_from TEXT;
+CREATE INDEX IF NOT EXISTS router_requests_role_idx ON router_requests (role) WHERE role IS NOT NULL;
 `
 
 const insertSQL = `
@@ -55,9 +64,10 @@ INSERT INTO router_requests
   (request_id, ts, method, path, model, backend_model, backend_url, resolved_via,
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
-   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain, error)
+   cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
+   role, role_overflowed, failover_from, error)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -156,7 +166,9 @@ func (s *PostgresSink) insert(rec Record) {
 		rec.ViaToolProxy, rec.Stream, rec.Status, rec.LatencyMS,
 		rec.PromptTokens, rec.CompletionTokens, rec.TotalTokens,
 		rec.CacheCreationInputTokens, rec.CacheReadInputTokens,
-		nullIfEmpty(rec.PrefixHashChain), nullIfEmpty(rec.Error),
+		nullIfEmpty(rec.PrefixHashChain),
+		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
+		nullIfEmpty(rec.Error),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -111,6 +112,39 @@ type NodeDefinition struct {
 	// Silicon, GB10 Sparks, Strix Halo). The dashboard excludes these from the
 	// aggregate Fleet CPU-RAM card so their VRAM isn't double-counted as RAM.
 	UnifiedMemory bool `yaml:"unified_memory,omitempty"`
+	// Schedule declares when the node is *expected* to be powered on. Purely
+	// informational: routing always follows observed availability, never the
+	// calendar. It exists so planned downtime reads as planned rather than as
+	// a fault on the dashboard.
+	Schedule *NodeSchedule `yaml:"schedule,omitempty"`
+}
+
+// NodeSchedule declares a node's expected uptime windows.
+type NodeSchedule struct {
+	// ExpectedUp is a list of windows like "Mon-Fri 07:00-19:00". A bare
+	// string is accepted as a one-element list. Empty means always expected up.
+	ExpectedUp StringList `yaml:"expected_up,omitempty"`
+}
+
+// StringList decodes either a single YAML scalar or a sequence into []string,
+// so `expected_up: "Mon-Fri 07:00-19:00"` and the list form both work.
+type StringList []string
+
+func (s *StringList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		var one string
+		if err := node.Decode(&one); err != nil {
+			return err
+		}
+		*s = StringList{one}
+		return nil
+	}
+	var many []string
+	if err := node.Decode(&many); err != nil {
+		return err
+	}
+	*s = StringList(many)
+	return nil
 }
 
 // UnmarshalYAML default-initialises AgentPort to 8100 before decoding,
@@ -205,12 +239,106 @@ func (m ModelDefinition) ModeTag() string {
 }
 
 // ---------------------------------------------------------------------------
+// Roles — semantic routing handles
+// ---------------------------------------------------------------------------
+
+// Locality constrains where a role's candidates may live.
+type Locality string
+
+const (
+	// LocalityAny places no constraint (the default).
+	LocalityAny Locality = "any"
+	// LocalityLocal admits only models pinned to a node in this fleet —
+	// anything with a `node` or `multi_node`, regardless of `backend`. The
+	// node-pinned externals (flux-dev, orpheus-tts, qwen3-embedding) are
+	// local by this definition: they run on our hardware and die with it.
+	// A nodeless external (Zen, the Anthropic gateway) is not.
+	LocalityLocal Locality = "local"
+)
+
+// OnEmpty is what a role does when no candidate is available.
+type OnEmpty string
+
+const (
+	// OnEmptyError returns 503 rather than violate the role's contract.
+	OnEmptyError OnEmpty = "error"
+	// OnEmptyOverflow falls through to the role's explicit Overflow list,
+	// which is exempt from the Locality requirement.
+	OnEmptyOverflow OnEmpty = "overflow"
+)
+
+// RoleRequire is the semantic contract every candidate must satisfy. It is
+// enforced at load time (see validateRole), not at request time: a candidate
+// that cannot satisfy the contract is a config bug, and failing startup is
+// how "coder always means a local coding model" stays a guarantee rather
+// than a hope.
+type RoleRequire struct {
+	Locality     Locality          `yaml:"locality,omitempty"`
+	Capabilities []ModelCapability `yaml:"capabilities,omitempty"`
+	APIClass     APIClass          `yaml:"api_class,omitempty"`
+}
+
+// RoleDefinition is one semantic routing handle: an ordered candidate list
+// plus the contract binding them. Resolution walks Candidates in order and
+// takes the first that is both routable in the current mode and reported
+// available; see (*Router).resolveRole.
+type RoleDefinition struct {
+	Description string      `yaml:"description,omitempty"`
+	Require     RoleRequire `yaml:"require,omitempty"`
+	// Candidates are model ids in preference order. Order is the whole point:
+	// it is read top-to-bottom as "best first, last resort last".
+	Candidates []string `yaml:"candidates"`
+	// OnEmpty selects the behaviour when no candidate is available.
+	// Defaults to OnEmptyError.
+	OnEmpty OnEmpty `yaml:"on_empty,omitempty"`
+	// Overflow is the deliberate substitute list used only when
+	// OnEmpty == OnEmptyOverflow. Exempt from Require.Locality (crossing that
+	// boundary is the point of overflowing) but still bound by the rest of
+	// the contract.
+	Overflow []string `yaml:"overflow,omitempty"`
+}
+
+// UnmarshalYAML defaults OnEmpty to "error" and Locality to "any", so an
+// unannotated role is the strict one: it never silently substitutes.
+func (rd *RoleDefinition) UnmarshalYAML(node *yaml.Node) error {
+	type alias RoleDefinition
+	aux := alias{OnEmpty: OnEmptyError}
+	if err := node.Decode(&aux); err != nil {
+		return err
+	}
+	*rd = RoleDefinition(aux)
+	if rd.Require.Locality == "" {
+		rd.Require.Locality = LocalityAny
+	}
+	return nil
+}
+
+// IsLocal reports whether a model is pinned to fleet hardware.
+func (m ModelDefinition) IsLocal() bool {
+	return m.Node != "" || m.MultiNode != nil
+}
+
+// HasCapability reports whether a model declares the given capability.
+func (m ModelDefinition) HasCapability(c ModelCapability) bool {
+	for _, have := range m.Capabilities {
+		if have == c {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
 type ModelRegistry struct {
 	Nodes  map[string]NodeDefinition  `yaml:"nodes"`
 	Models map[string]ModelDefinition `yaml:"models"`
+	// Roles are semantic routing handles resolved dynamically against live
+	// availability. Absent from older configs, which is fine: no roles means
+	// resolution behaves exactly as it did before they existed.
+	Roles map[string]RoleDefinition `yaml:"roles,omitempty"`
 
 	// ToolProxyAddr is the address tool_proxy models are routed to. Not read
 	// from YAML — set programmatically (router --tool-proxy-url flag). Empty
@@ -248,7 +376,101 @@ func (r *ModelRegistry) Validate() error {
 			errs = append(errs, err)
 		}
 	}
+	// Roles are validated in name order so a config with several broken roles
+	// reports them deterministically (map iteration would shuffle them).
+	names := make([]string, 0, len(r.Roles))
+	for name := range r.Roles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		role := r.Roles[name]
+		if err := validateRole(name, &role, r); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// validateRole enforces the role contract at load time. Everything here is a
+// hard startup error: a role that can silently route outside its own semantics
+// is worse than a router that refuses to boot.
+func validateRole(name string, role *RoleDefinition, r *ModelRegistry) error {
+	var errs []error
+
+	// A role name must be unambiguous against every other routable name,
+	// otherwise resolution order — not config — decides what "coder" means.
+	if _, clash := r.Models[name]; clash {
+		errs = append(errs, fmt.Errorf("role %q: collides with a model id of the same name", name))
+	}
+	for id, m := range r.Models {
+		for _, a := range m.Aliases {
+			if a == name {
+				errs = append(errs, fmt.Errorf("role %q: collides with an alias on model %q; remove the alias", name, id))
+			}
+		}
+	}
+
+	switch role.OnEmpty {
+	case OnEmptyError:
+		if len(role.Overflow) > 0 {
+			errs = append(errs, fmt.Errorf("role %q: overflow list set but on_empty is %q; set on_empty: overflow or drop the list", name, OnEmptyError))
+		}
+	case OnEmptyOverflow:
+		if len(role.Overflow) == 0 {
+			errs = append(errs, fmt.Errorf("role %q: on_empty is %q but overflow list is empty", name, OnEmptyOverflow))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("role %q: unknown on_empty %q (want %q or %q)", name, role.OnEmpty, OnEmptyError, OnEmptyOverflow))
+	}
+
+	switch role.Require.Locality {
+	case LocalityAny, LocalityLocal:
+	default:
+		errs = append(errs, fmt.Errorf("role %q: unknown require.locality %q (want %q or %q)", name, role.Require.Locality, LocalityAny, LocalityLocal))
+	}
+	if role.Require.APIClass != "" {
+		if _, ok := validAPIClasses[role.Require.APIClass]; !ok {
+			errs = append(errs, fmt.Errorf("role %q: unknown require.api_class %q", name, role.Require.APIClass))
+		}
+	}
+
+	if len(role.Candidates) == 0 {
+		errs = append(errs, fmt.Errorf("role %q: needs at least one candidate", name))
+	}
+
+	// Candidates bear the full contract; overflow entries are exempt from
+	// locality only — crossing that boundary is precisely what they are for.
+	for _, id := range role.Candidates {
+		errs = append(errs, roleMemberErrs(name, "candidate", id, role, r, true)...)
+	}
+	for _, id := range role.Overflow {
+		errs = append(errs, roleMemberErrs(name, "overflow", id, role, r, false)...)
+	}
+
+	return errors.Join(errs...)
+}
+
+// roleMemberErrs checks one candidate/overflow entry against the role
+// contract. enforceLocality is false for overflow entries.
+func roleMemberErrs(role, kind, id string, rd *RoleDefinition, r *ModelRegistry, enforceLocality bool) []error {
+	m, ok := r.Models[id]
+	if !ok {
+		return []error{fmt.Errorf("role %q: %s %q is not a known model", role, kind, id)}
+	}
+	var errs []error
+	if enforceLocality && rd.Require.Locality == LocalityLocal && !m.IsLocal() {
+		errs = append(errs, fmt.Errorf("role %q: %s %q is not local (no node/multi_node) but require.locality is %q", role, kind, id, LocalityLocal))
+	}
+	for _, want := range rd.Require.Capabilities {
+		if !m.HasCapability(want) {
+			errs = append(errs, fmt.Errorf("role %q: %s %q lacks required capability %q", role, kind, id, want))
+		}
+	}
+	if rd.Require.APIClass != "" && m.APIClass != rd.Require.APIClass {
+		errs = append(errs, fmt.Errorf("role %q: %s %q has api_class %q, role requires %q", role, kind, id, m.APIClass, rd.Require.APIClass))
+	}
+	return errs
 }
 
 func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
@@ -411,6 +633,40 @@ func (r *ModelRegistry) ModelsForMode(mode string) map[string]ModelDefinition {
 		if mt == "" || mt == mode {
 			out[id] = m
 		}
+	}
+	return out
+}
+
+// RolesForMode returns the roles with their Candidates and Overflow lists
+// pre-filtered to the models routable in the given mode (same filter as
+// ModelsForMode). This is how mode tags keep working under roles: a candidate
+// carrying the wrong mode tag — or disabled entirely, as the rollback entries
+// are — simply drops out of the preference order instead of being selected and
+// then failing.
+//
+// Roles left with no candidates AND no overflow are dropped: they cannot
+// resolve to anything in this mode, so advertising them in /v1/models or the
+// well-known would be a lie.
+func (r *ModelRegistry) RolesForMode(mode string) map[string]RoleDefinition {
+	active := r.ModelsForMode(mode)
+	keep := func(ids []string) []string {
+		var out []string
+		for _, id := range ids {
+			if _, ok := active[id]; ok {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+
+	out := make(map[string]RoleDefinition, len(r.Roles))
+	for name, role := range r.Roles {
+		role.Candidates = keep(role.Candidates)
+		role.Overflow = keep(role.Overflow)
+		if len(role.Candidates) == 0 && len(role.Overflow) == 0 {
+			continue
+		}
+		out[name] = role
 	}
 	return out
 }

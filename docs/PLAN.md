@@ -552,6 +552,72 @@ ships the status UI with no second service and no Python.
       (`llm-dashboard.bcc.sh` → euclid Tailscale IP `:4011`, oauth2-proxy gated)
       is unchanged — same port, same all-interfaces bind, same access boundary.
 
+#### Phase 4 — semantic roles + availability-aware routing
+
+Motivated by the fleet becoming intermittent: nodes get powered down evenings
+and weekends. Aliases were static strings on one model, so `coder` meant
+"qwen3.6-hypatia" and 502'd when hypatia went away, even with archimedes idle.
+
+- [x] **`roles:` block in models.yaml** — a role names an intent, not a model:
+      an ordered `candidates` list plus a `require` contract (`locality`,
+      `capabilities`, `api_class`). `require` is validated at **config load**,
+      so a candidate that can't satisfy the contract fails startup — that is
+      what makes "coder is always a local coding model" a guarantee rather
+      than a hope. `on_empty: error` (default) refuses to substitute;
+      `on_empty: overflow` opts into an explicit `overflow` list that is
+      exempt from `locality` only.
+- [x] `RolesForMode` filters candidates through the active mode set, so the
+      existing `mode:big`/`mode:default` split keeps working unchanged and
+      disabled rollback entries stay listed without ever being selected.
+- [x] **`internal/health`** — shared availability tracker. Active poll of each
+      node agent (`/health` + `/models`) with hysteresis (2 failed polls down,
+      1 success up), plus a passive circuit breaker fed by real proxy failures
+      (3 strikes, 60s cooldown, half-open probe). A node-pinned model — even
+      `backend: external` like flux/orpheus/the OpenArc embedder — follows its
+      node; a nodeless external is assumed up. Availability starts `Unknown`
+      and reads as routable, so a fresh process never refuses traffic. The
+      dashboard's node prober was factored into this package so there is one
+      prober, not two that can disagree.
+- [x] **Resolution order** is now `model id → hf_repo → ROLE → alias`. Only
+      roles fail over; naming a model (or an identity alias like
+      `qwen3.6-local`) still means that model and fails honestly.
+- [x] **Failover retry** from `ReverseProxy.ErrorHandler`, which fires only
+      when the round trip failed — nothing flushed, the one safe window.
+      Guarded additionally on `recordingWriter.status == 0`, capped at 2 hops.
+      Responses carry `X-Router-Role` / `X-Router-Resolved` /
+      `X-Router-Overflow`; reqlog gained `role`, `role_overflowed`,
+      `failover_from`.
+- [x] **`GET /v1/availability`** — per-model state with reason and source
+      (poll/passive/assumed), node reachability, and each role's live target
+      and remaining preference order. An unavailable role returns **503**
+      (not 404) naming each candidate and why it is out.
+- [x] **Auto-router** now takes a live `RoutableFunc` instead of a startup
+      snapshot of `enabled:` flags. All categories are embedded at init
+      (availability changes all day; embeddings are computed once), and
+      `Classify` picks the highest-scoring *routable* category, guarding the
+      tiered `coder-hard` / `claude-opus-4-6` escalations too. The tool proxy
+      feeds it via `health.Mirror`, polling the router's `/v1/availability` —
+      one call instead of re-probing every agent, and it fails **open** when
+      the router is unreachable.
+- [x] **Node schedules** (`nodes.*.schedule.expected_up: "Mon-Fri 07:00-19:00"`)
+      — informational only, so planned downtime renders as "off (scheduled)"
+      instead of red. No routing effect: routing follows observed state.
+- [x] Dashboard **Roles card**: current target, the preference chain with
+      up/down/overflow badges, and the reasons when a role is unavailable.
+      Roles also appear in `/v1/models` (flagged `role: true`) and the
+      OpenCode well-known — they are the names worth binding, since they
+      survive a node going away.
+- [x] Deleted the dead `coder-resilient` stub from models.yaml (an external
+      entry pointing at the tool proxy that nothing ever implemented).
+
+**Rollout ordering matters.** Migrating `coder`/`thinker`/`research`/`vision`
+out of per-model `aliases:` means an *old* router binary reading the *new*
+models.yaml loses those names entirely (it ignores the unknown `roles:` key).
+Deploy the new binaries to **both** HA routers and the tool proxy first, then
+sync models.yaml. Same discipline as the `api_class` rollout. The Python side
+is safe either way: `ModelRegistry` is a plain `BaseModel`, so it silently
+ignored `roles:` before the schema mirror landed.
+
 ## Cross-cutting concerns
 
 ### Deploy

@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,8 +47,15 @@ import (
 
 // Router serves the OpenAI front-door endpoints over a model registry.
 type Router struct {
-	registry      *config.ModelRegistry
-	active        map[string]config.ModelDefinition // models routable in this mode
+	registry *config.ModelRegistry
+	active   map[string]config.ModelDefinition // models routable in this mode
+	// roles are the semantic handles routable in this mode, with their
+	// candidate lists already filtered to `active` (so mode tags and disabled
+	// rollback entries drop out of the preference order).
+	roles map[string]config.RoleDefinition
+	// avail decides whether a model can be routed to right now. Never nil:
+	// New installs alwaysRoutable when tracking is disabled.
+	avail         availability
 	mode          string
 	logger        *slog.Logger
 	transport     http.RoundTripper
@@ -122,6 +130,18 @@ func WithVersion(v string) Option {
 	}
 }
 
+// WithAvailability wires the health tracker that decides which of a role's
+// candidates can be routed to right now. Omitting it (or passing nil) leaves
+// every model routable, which is exactly the pre-roles behaviour: roles still
+// resolve, they just always pick their first candidate.
+func WithAvailability(a availability) Option {
+	return func(r *Router) {
+		if a != nil {
+			r.avail = a
+		}
+	}
+}
+
 // WithWellKnown configures the GET /.well-known/opencode endpoint. An empty
 // ProviderID leaves the handler returning 404 (the default), so the router
 // can be deployed before the OpenCode well-known URL is decided.
@@ -147,11 +167,13 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		started:       time.Now(),
 		nodeFetcher:   fetchNodeMetrics,
 		tokStats:      newTokTracker(),
+		avail:         alwaysRoutable{},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	r.active = registry.ModelsForMode(r.mode)
+	r.roles = registry.RolesForMode(r.mode)
 	r.metrics = newRouterMetrics(r.version, r.started, r.active)
 	return r
 }
@@ -182,6 +204,7 @@ func (rt *Router) Handler() http.Handler {
 	}
 
 	mux.HandleFunc("GET /v1/models", rt.handleModels)
+	mux.HandleFunc("GET /v1/availability", rt.handleAvailability)
 	mux.HandleFunc("GET /health", rt.handleHealth)
 	mux.Handle("GET /metrics", rt.metrics.Handler())
 	mux.HandleFunc("GET /.well-known/opencode", rt.handleWellKnown)
@@ -215,9 +238,14 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		cap := &responseCapture{}
 
 		var (
-			modelIn  string
+			modelIn string
+			// resolved tracks the CURRENT target: after a failover it names
+			// the candidate that actually served the request, so the reqlog
+			// row attributes tokens and latency to the right model.
 			resolved *resolveResult
-			errMsg   string
+			// failoverFrom names the model that failed, when one did.
+			failoverFrom string
+			errMsg       string
 		)
 
 		defer func() {
@@ -238,6 +266,9 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.ResolvedVia = resolved.ModelID
 				lr.APIClass = string(resolved.APIClass)
 				lr.ViaToolProxy = resolved.ViaToolProxy
+				lr.Role = resolved.Role
+				lr.RoleOverflowed = resolved.Overflowed
+				lr.FailoverFrom = failoverFrom
 			}
 			var tokPerSec *float64
 			switch {
@@ -278,6 +309,17 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		res, err := rt.resolveModel(model, forceDirect)
 		if err != nil {
 			errMsg = err.Error()
+			// A role that resolved to nothing is a fleet-state problem, not a
+			// client mistake: 503 with the per-candidate reasons, so callers
+			// can tell "that name doesn't exist" from "everything that serves
+			// this intent is powered off right now".
+			var roleErr *roleUnavailableError
+			if errors.As(err, &roleErr) {
+				rt.logger.WarnContext(r.Context(), "role unavailable",
+					"role", roleErr.Role, "reasons", roleErr.Reasons)
+				http.Error(rec, errMsg, http.StatusServiceUnavailable)
+				return
+			}
 			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
 			http.Error(rec, errMsg, http.StatusNotFound)
 			return
@@ -300,20 +342,81 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			r.Header.Set("X-Egress", res.Egress)
 		}
 
-		bodyMap["model"] = res.BackendModel
-		newBody, err := json.Marshal(bodyMap)
-		if err != nil {
-			errMsg = "re-encode body: " + err.Error()
-			http.Error(rec, errMsg, http.StatusInternalServerError)
-			return
-		}
+		// Forward, advancing along the role's preference order if an upstream
+		// fails to answer at all. Only role-resolved requests fail over:
+		// naming a model is a statement about that model.
+		for attempt := 0; ; attempt++ {
+			bodyMap["model"] = res.BackendModel
+			newBody, err := json.Marshal(bodyMap)
+			if err != nil {
+				errMsg = "re-encode body: " + err.Error()
+				http.Error(rec, errMsg, http.StatusInternalServerError)
+				return
+			}
 
-		rt.logger.InfoContext(r.Context(), "forwarding",
-			"path", r.URL.Path,
-			"model", model, "backend_model", res.BackendModel,
-			"backend_url", res.BackendURL, "resolved_via", res.ModelID,
-			"via_tool_proxy", res.ViaToolProxy)
-		rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap)
+			rt.setRoleHeaders(rec, res)
+			rt.logger.InfoContext(r.Context(), "forwarding",
+				"path", r.URL.Path,
+				"model", model, "backend_model", res.BackendModel,
+				"backend_url", res.BackendURL, "resolved_via", res.ModelID,
+				"role", res.Role, "overflowed", res.Overflowed,
+				"via_tool_proxy", res.ViaToolProxy)
+
+			upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap)
+			if upstreamErr == nil {
+				rt.avail.ReportSuccess(res.ModelID)
+				return
+			}
+
+			// The upstream never answered. Tell the tracker — this is stronger
+			// evidence than a poll, which only proves the agent is alive.
+			rt.avail.ReportFailure(res.ModelID, upstreamErr)
+
+			// rec.status == 0 means not a single byte has reached the client,
+			// which is the only window in which retrying is honest rather than
+			// a corrupted response.
+			next, ok := resolveResult{}, false
+			if res.Role != "" && attempt < maxFailoverAttempts && rec.status == 0 {
+				next, ok = rt.nextRoleCandidate(res, forceDirect)
+			}
+			if !ok {
+				errMsg = "upstream: " + upstreamErr.Error()
+				if rec.status == 0 {
+					http.Error(rec, errMsg, http.StatusBadGateway)
+				}
+				return
+			}
+
+			rt.logger.WarnContext(r.Context(), "failing over",
+				"role", res.Role, "from", res.ModelID, "to", next.ModelID, "err", upstreamErr)
+			rt.metrics.ObserveFailover(res.Role, res.ModelID, next.ModelID)
+			failoverFrom = res.ModelID
+			res = next
+			resolved = &res
+			// A retry starts a fresh response: drop whatever the failed attempt
+			// left in the capture so usage isn't attributed to the wrong model.
+			*cap = responseCapture{}
+		}
+	}
+}
+
+// maxFailoverAttempts caps how far down a role's preference order one request
+// will walk. Two retries covers "both Sparks are off" without turning a
+// fleet-wide outage into a slow serial scan of every candidate.
+const maxFailoverAttempts = 2
+
+// setRoleHeaders tells the caller which concrete model actually served a role
+// request, and whether it had to cross the locality boundary to do it. Set
+// before forwarding so they survive the ReverseProxy writing its own headers.
+func (rt *Router) setRoleHeaders(w http.ResponseWriter, res resolveResult) {
+	if res.Role == "" {
+		return
+	}
+	h := w.Header()
+	h.Set("X-Router-Role", res.Role)
+	h.Set("X-Router-Resolved", res.ModelID)
+	if res.Overflowed {
+		h.Set("X-Router-Overflow", "true")
 	}
 }
 
@@ -334,12 +437,19 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 // in handleProxy's defer; for SSE we wrap the response body with a rolling
 // 64KB tail buffer so the final `usage` chunk (if present) is captured
 // without holding the whole stream in memory.
-func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture) {
+// It returns the upstream transport error, if any, WITHOUT writing a 502 —
+// the caller decides whether to fail over to another candidate first. A nil
+// return means the response was proxied (whatever its status). When the error
+// arrives after bytes have already reached the client (a mid-stream copy
+// failure) the caller can see that via the recordingWriter's status and must
+// not retry.
+func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture) error {
 	target, err := url.Parse(backendRoot)
 	if err != nil {
 		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
-		return
+		return nil
 	}
+	var upstreamErr error
 	rp := &httputil.ReverseProxy{
 		Transport:     rt.transport,
 		FlushInterval: rt.flushInterval,
@@ -386,13 +496,17 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 			}
 			return nil
 		},
-		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+		ErrorHandler: func(_ http.ResponseWriter, req *http.Request, err error) {
 			rt.logger.ErrorContext(req.Context(), "upstream error",
 				"backend_url", backendRoot, "err", err)
-			http.Error(rw, "upstream: "+err.Error(), http.StatusBadGateway)
+			// Deliberately write nothing: handleProxy may still fail over to
+			// the role's next candidate, and it can only do that if the
+			// response is still untouched.
+			upstreamErr = err
 		},
 	}
 	rp.ServeHTTP(w, r)
+	return upstreamErr
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +519,10 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 		Object   string          `json:"object"`
 		OwnedBy  string          `json:"owned_by"`
 		APIClass config.APIClass `json:"api_class,omitempty"`
+		// Role marks an entry that is a semantic handle rather than a model.
+		// Clients can route to it exactly like a model name; the difference is
+		// that what answers may change as the fleet powers up and down.
+		Role bool `json:"role,omitempty"`
 	}
 	type response struct {
 		Object string  `json:"object"`
@@ -445,6 +563,31 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 			add(a, m)
 		}
 	}
+
+	// Roles are routable names too — for most clients they are the names to
+	// prefer, since they survive a node being powered down. Listed after the
+	// concrete models, flagged so a client can tell them apart. A role's
+	// api_class comes from its current target: every candidate shares one by
+	// config validation when the role declares require.api_class, and in
+	// practice they are all chat.
+	for _, name := range rt.RoleNames() {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		e := entry{ID: name, Object: "model", OwnedBy: "role", Role: true}
+		if res, err := rt.resolveRole(name, name, false); err == nil {
+			e.APIClass = res.APIClass
+		} else if len(rt.roles[name].Candidates) > 0 {
+			// Nothing available right now: still advertise the role (it will
+			// come back when the fleet does) using its first candidate's class.
+			if m, ok := rt.active[rt.roles[name].Candidates[0]]; ok {
+				e.APIClass = m.APIClass
+			}
+		}
+		seen[name] = struct{}{}
+		out.Data = append(out.Data, e)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

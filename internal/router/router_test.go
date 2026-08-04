@@ -464,6 +464,14 @@ func postTo(t *testing.T, rt *Router, path, jsonBody string) *httptest.ResponseR
 	return rec
 }
 
+func getFrom(t *testing.T, rt *Router, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rt.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
 func TestEmbeddings_RoutesWithHFRepo(t *testing.T) {
 	var path string
 	var body map[string]any

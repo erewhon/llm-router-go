@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/health"
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/router"
@@ -59,6 +60,15 @@ func run(args []string) int {
 		sqlitePath   = fs.String("sqlite-path", "", "path to the SQLite request-log DB; empty uses $XDG_STATE_HOME/llm-router/requests.db. Ignored when --postgres-dsn is set")
 		reqlogMode   = fs.String("reqlog", "auto", `request logging: "auto" (Postgres if --postgres-dsn, else a local SQLite file) or "off" to disable`)
 		toolProxyURL = fs.String("tool-proxy-url", "", `address tool_proxy models route to; empty falls back to $ROUTER_TOOL_PROXY_URL, then the built-in default`)
+
+		// Availability tracking — what lets a role follow the fleet as nodes
+		// are powered down for the night. Off means roles always pick their
+		// first candidate (the pre-roles behaviour).
+		healthTracking  = fs.Bool("health-tracking", true, "poll node agents so roles route to models that are actually up")
+		healthInterval  = fs.Duration("health-interval", health.DefaultInterval, "how often to poll each node agent")
+		healthDownAfter = fs.Int("health-down-after", health.DefaultDownAfter, "consecutive failed polls before a model is considered down (one success restores it)")
+		breakerTrip     = fs.Int("breaker-trip", health.DefaultBreakerTrip, "consecutive upstream failures before a model's circuit breaker opens")
+		breakerCooldown = fs.Duration("breaker-cooldown", health.DefaultBreakerCooldown, "how long an open circuit breaker waits before admitting a probe request")
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
@@ -176,7 +186,36 @@ func run(args []string) int {
 	}
 	routerOpts = append(routerOpts, router.WithSink(sink))
 
+	// Availability tracking: the poller that lets roles follow the fleet as
+	// nodes power down. Disabling it leaves roles resolving to their first
+	// candidate unconditionally, i.e. the pre-roles behaviour.
+	var tracker *health.Tracker
+	if *healthTracking {
+		if errs := health.ValidateSchedules(registry); len(errs) > 0 {
+			// A typo'd window is not fatal (schedules are cosmetic) but it
+			// silently disables the badge, so say so loudly.
+			for _, e := range errs {
+				logger.Warn("node schedule ignored", "err", e)
+			}
+		}
+		tracker = health.NewTracker(health.Config{
+			Registry:        registry,
+			Interval:        *healthInterval,
+			DownAfter:       *healthDownAfter,
+			BreakerTrip:     *breakerTrip,
+			BreakerCooldown: *breakerCooldown,
+			Logger:          logger.With("subsys", "availability"),
+		})
+		routerOpts = append(routerOpts, router.WithAvailability(tracker))
+	}
+
 	rt := router.New(registry, logger, routerOpts...)
+	if tracker != nil {
+		// Republish the availability gauges after each poll, so /metrics
+		// tracks fleet state rather than request traffic. Set after New
+		// because the callback closes over the router.
+		tracker.SetOnPoll(rt.PublishAvailabilityMetrics)
+	}
 
 	apiKeysSrc := *apiKeys
 	apiKeysFrom := "flag"
@@ -212,6 +251,15 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if tracker != nil {
+		go tracker.Run(ctx)
+		logger.Info("availability tracking started",
+			"interval", healthInterval.String(), "down_after", *healthDownAfter,
+			"breaker_trip", *breakerTrip, "breaker_cooldown", breakerCooldown.String())
+	} else {
+		logger.Warn("availability tracking disabled; roles will always pick their first candidate")
+	}
 
 	if *dashboard {
 		apiBase := *dashboardURL

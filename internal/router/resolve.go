@@ -36,13 +36,33 @@ type resolveResult struct {
 	// Egress is the VPN-exit spec derived from a "<model>-<egress>" alias
 	// (E2), forwarded to the tool proxy as X-Egress. Empty for plain models.
 	Egress string
+	// Role is the semantic role the caller asked for ("coder"), empty when
+	// they named a model or alias directly. Only role-resolved requests fail
+	// over: an explicit model name stays explicit.
+	Role string
+	// Overflowed marks a role that ran out of in-contract candidates and fell
+	// through to its declared overflow list — surfaced to the caller rather
+	// than hidden, since it crossed the locality boundary.
+	Overflowed bool
+	// Remaining is the untried tail of the role's preference order, consumed
+	// by the failover retry when the chosen upstream fails to answer.
+	Remaining []roleCandidate
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in
 // priority order:
 //   - exact registry key (deterministic, most specific)
 //   - hf_repo (bare or with "#suffix")
+//   - role (dynamic: binds to the first available candidate)
 //   - any alias
+//
+// Roles sit ahead of aliases so a role name always wins. Config validation
+// already forbids a role from colliding with a model id or alias, so the
+// ordering is belt-and-braces rather than load-bearing.
+//
+// The concrete matches (key, hf_repo, alias) never fail over: naming a model
+// is a statement about *that* model, and silently answering from a different
+// one would be worse than an honest error. Only roles reassign.
 //
 // Only models routable in the current mode are considered. A leading "openai/"
 // prefix (which some clients/LiteLLM add) is stripped before matching.
@@ -61,7 +81,13 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 
 	want := strings.TrimPrefix(model, "openai/")
 
-	if id, m, alias, ok := rt.lookup(want); ok {
+	if id, m, ok := rt.lookupConcrete(want); ok {
+		return rt.buildResult(id, m, "", model, forceDirect, "")
+	}
+	if _, isRole := rt.roles[want]; isRole {
+		return rt.resolveRole(want, model, forceDirect)
+	}
+	if id, m, alias, ok := rt.lookupAlias(want); ok {
 		return rt.buildResult(id, m, alias, model, forceDirect, "")
 	}
 	// E2 model-egress aliases: "<base>-<egress>" where <base> resolves to a
@@ -75,18 +101,25 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 	return resolveResult{}, fmt.Errorf("router: unknown model %q", model)
 }
 
-// lookup matches a model name against the active registry by exact key, hf_repo
-// (bare or with "#suffix"), then alias. Returns the matched id, definition, the
-// alias used (or ""), and whether anything matched.
-func (rt *Router) lookup(want string) (string, config.ModelDefinition, string, bool) {
+// lookupConcrete matches a name that identifies exactly one model: the registry
+// key, or its hf_repo (bare or with "#suffix").
+func (rt *Router) lookupConcrete(want string) (string, config.ModelDefinition, bool) {
 	if m, ok := rt.active[want]; ok {
-		return want, m, "", true
+		return want, m, true
 	}
 	for id, m := range rt.active {
 		hfBase := strings.SplitN(m.HFRepo, "#", 2)[0]
 		if hfBase == want || m.HFRepo == want {
-			return id, m, "", true
+			return id, m, true
 		}
+	}
+	return "", config.ModelDefinition{}, false
+}
+
+// lookupAlias matches a name against the aliases of active models. Returns the
+// matched id, definition, and the alias used (so per-alias overrides apply).
+func (rt *Router) lookupAlias(want string) (string, config.ModelDefinition, string, bool) {
+	for id, m := range rt.active {
 		for _, a := range m.Aliases {
 			if a == want {
 				return id, m, a, true
@@ -104,17 +137,34 @@ func (rt *Router) lookup(want string) (string, config.ModelDefinition, string, b
 func (rt *Router) resolveEgressAlias(want, original string) (resolveResult, bool) {
 	for i := strings.LastIndex(want, "-"); i > 0; i = strings.LastIndex(want[:i], "-") {
 		base, egress := want[:i], want[i+1:]
-		id, m, alias, ok := rt.lookup(base)
-		if !ok {
-			continue
-		}
-		res, err := rt.buildResult(id, m, alias, original, false, egress)
+		res, err := rt.resolveEgressBase(base, original, egress)
 		if err != nil || !res.ViaToolProxy {
 			continue // base isn't tool-proxy-routed; an egress suffix is meaningless
 		}
 		return res, true
 	}
 	return resolveResult{}, false
+}
+
+// resolveEgressBase resolves the base half of a "<base>-<egress>" name using
+// the same precedence as resolveModel, so "research-se" works whether
+// "research" is a model, an alias, or a role.
+func (rt *Router) resolveEgressBase(base, original, egress string) (resolveResult, error) {
+	if id, m, ok := rt.lookupConcrete(base); ok {
+		return rt.buildResult(id, m, "", original, false, egress)
+	}
+	if _, isRole := rt.roles[base]; isRole {
+		res, err := rt.resolveRole(base, original, false)
+		if err != nil {
+			return resolveResult{}, err
+		}
+		res.Egress = egress
+		return res, nil
+	}
+	if id, m, alias, ok := rt.lookupAlias(base); ok {
+		return rt.buildResult(id, m, alias, original, false, egress)
+	}
+	return resolveResult{}, fmt.Errorf("router: unknown egress base %q", base)
 }
 
 // buildResult assembles the forwarding decision for a matched model.

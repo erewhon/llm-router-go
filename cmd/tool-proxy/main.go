@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/health"
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/logx"
 	"github.com/erewhon/llm-router-go/internal/toolproxy"
@@ -48,6 +49,11 @@ func run(args []string) int {
 		embedTimeout   = fs.Duration("embed-timeout", 5*time.Second, "timeout for auto-router embedding requests")
 		litellmURL     = fs.String("litellm-url", "http://euclid.local:4010", "LiteLLM URL the auto-router redirects resolved aliases to")
 		litellmKey     = fs.String("litellm-key", "sk-litellm-master", "LiteLLM bearer key (falls back to LITELLM_KEY env)")
+
+		// Live availability, mirrored from the router's /v1/availability, so
+		// the auto-router never picks a category whose models are powered off.
+		availabilityURL      = fs.String("availability-url", "", "router base URL to mirror /v1/availability from (empty = --litellm-url)")
+		availabilityInterval = fs.Duration("availability-interval", 15*time.Second, "how often to refresh mirrored availability")
 
 		// Per-request VPN egress selection (X-Egress header). See
 		// docs/tool-proxy-egress.md. Inert unless a request sends the header.
@@ -117,25 +123,37 @@ func run(args []string) int {
 		"tavily_key_configured", tavily != "")
 
 	// Auto-router. Its embedding client talks DIRECTLY to the LAN embedder —
-	// it must not route through the web tools' SOCKS5 VPN proxy. activeAliases
-	// (enabled model ids + their aliases) restrict which categories the router
-	// may select, so it never picks an alias whose model is disabled.
-	activeAliases := map[string]bool{}
-	for id, m := range registry.Models {
-		if !m.Enabled {
-			continue
-		}
-		activeAliases[id] = true
-		for _, a := range m.Aliases {
-			activeAliases[a] = true
-		}
-	}
+	// it must not route through the web tools' SOCKS5 VPN proxy.
+	//
+	// Which categories are selectable now comes from mirroring the router's
+	// /v1/availability rather than from a startup snapshot of `enabled:`
+	// flags. Nodes power down on a schedule, so the old startup-time set went
+	// stale within hours; the router already tracks the live state, so one
+	// HTTP call to it beats re-probing every node agent from here. An
+	// unreachable mirror reports everything routable, degrading to the
+	// previous forward-and-find-out behaviour rather than refusing traffic.
 	litellmBearer := *litellmKey
 	if litellmBearer == "" {
 		litellmBearer = os.Getenv("LITELLM_KEY")
 	}
+
+	availURL := *availabilityURL
+	if availURL == "" {
+		availURL = *litellmURL
+	}
+	// /v1/availability is behind the router's bearer gate, so the mirror
+	// authenticates with the same key the auto-route redirect uses. Without it
+	// every poll 401s and the mirror degrades (fails open) to "everything
+	// routable" — safe, but the feature would be inert.
+	mirror := health.NewMirror(health.MirrorConfig{
+		URL:      availURL,
+		Bearer:   litellmBearer,
+		Interval: *availabilityInterval,
+		Logger:   logger.With("subsys", "availability"),
+	})
+	// Polling starts once the signal context exists, below.
 	embedClient := &http.Client{Timeout: *embedTimeout}
-	autoRouter := toolproxy.NewAutoRouter(*embedURL, *embedModel, embedClient, logger, activeAliases)
+	autoRouter := toolproxy.NewAutoRouter(*embedURL, *embedModel, embedClient, logger, mirror.Routable)
 
 	proxyOpts := []toolproxy.Option{
 		toolproxy.WithTools(reg),
@@ -196,8 +214,13 @@ func run(args []string) int {
 	// embedder answers. Exits when ctx is cancelled on shutdown.
 	go autoRouter.RunInit(ctx)
 
+	// Background: keep mirrored availability fresh so the auto-router follows
+	// the fleet as nodes power down and come back.
+	go mirror.Run(ctx)
+
 	logger.Info("starting", "addr", *addr, "version", version, "models_yaml", *modelsYAML,
-		"embed_url", *embedURL, "litellm_url", *litellmURL)
+		"embed_url", *embedURL, "litellm_url", *litellmURL,
+		"availability_url", availURL, "availability_interval", availabilityInterval.String())
 	if err := httpx.ServeContext(ctx, srv, *shutdownTo); err != nil {
 		logger.Error("server stopped with error", "err", err)
 		return 1

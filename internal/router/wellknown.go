@@ -149,6 +149,35 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 		}
 	}
 
+	// Roles are what an OpenCode user actually wants bound to a keybinding:
+	// "coder" keeps working when hypatia is powered down, where
+	// "qwen3.6-local" does not. Priced from the role's first candidate — the
+	// one it normally resolves to — so a local role still shows $0.00.
+	for name, rd := range rt.roles {
+		if _, dup := models[name]; dup {
+			continue
+		}
+		var cost *wellKnownCost
+		if len(rd.Candidates) > 0 {
+			if m, ok := rt.active[rd.Candidates[0]]; ok {
+				if m.APIClass != config.APIClassChat {
+					continue
+				}
+				if m.InputCostPerMillion != nil || m.OutputCostPerMillion != nil {
+					cost = &wellKnownCost{
+						Input:  derefFloat(m.InputCostPerMillion),
+						Output: derefFloat(m.OutputCostPerMillion),
+					}
+				}
+			}
+		}
+		models[name] = wellKnownModel{
+			Name:  name,
+			Limit: wellKnownLimit{Context: ctxLimit, Output: outLimit},
+			Cost:  cost,
+		}
+	}
+
 	authEnv := cfg.AuthEnv
 	if authEnv == "" {
 		authEnv = "LLM_ROUTER_API_KEY"

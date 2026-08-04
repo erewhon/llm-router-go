@@ -288,6 +288,29 @@
     font-size: 0.8rem; color: var(--text-dim);
   }
 
+  /* Roles — semantic handles and where they currently point */
+  .roles { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .role-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    min-width: 240px;
+    flex: 1 1 240px;
+    overflow-wrap: anywhere;
+  }
+  .role-card.role-down { border-color: rgba(248, 113, 113, 0.5); }
+  .role-card.role-overflow { border-color: rgba(251, 191, 36, 0.5); }
+  .role-name { font-weight: 600; font-size: 0.95rem; color: var(--accent); }
+  .role-target { font-size: 0.85rem; margin-top: 0.35rem; }
+  .role-desc { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.15rem; }
+  .role-chain { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.5rem; line-height: 1.7; }
+  .role-hop { padding: 0.05rem 0.35rem; border-radius: 4px; margin-right: 0.25rem; white-space: nowrap; }
+  .role-hop-active { background: rgba(74, 222, 128, 0.15); color: var(--green); font-weight: 600; }
+  .role-hop-up { background: rgba(139, 143, 163, 0.12); color: var(--text-dim); }
+  .role-hop-down { background: rgba(248, 113, 113, 0.12); color: var(--red); text-decoration: line-through; }
+  .role-hop-overflow { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+
   .loading { color: var(--text-dim); padding: 2rem; text-align: center; }
   .error { color: var(--red); padding: 1rem; }
 
@@ -731,14 +754,60 @@ function render(data) {
   }
   lowerHtml += `</div></details>`;
 
+  // Roles — the semantic handles and what each currently resolves to. This is
+  // the card that answers "the Sparks are off, so what does 'coder' mean right
+  // now?", so it sits above Nodes: the binding first, the reason below it.
+  const roles = data.roles || [];
+  if (roles.length) {
+    const modelById = {};
+    for (const m of models) modelById[m.id] = m;
+    html += `<div class="section-title">Roles</div><div class="roles">`;
+    for (const r of roles) {
+      const cls = !r.available ? ' role-down' : (r.overflowed ? ' role-overflow' : '');
+      const target = r.available
+        ? `<span style="color:var(--green)">&#9679;</span> ${r.target}`
+        : `<span style="color:var(--red)">&#9679;</span> <span style="color:var(--red)">no model available</span>`;
+      html += `<div class="role-card${cls}">
+        <div class="role-name">${r.role}${r.overflowed ? ' <span class="badge badge-tool">overflow</span>' : ''}</div>
+        <div class="role-target">${target}</div>`;
+      if (r.description) html += `<div class="role-desc">${r.description}</div>`;
+
+      // The preference order, so it's obvious what it would fall to next.
+      const hops = [];
+      for (const c of (r.candidates || [])) hops.push({ id: c, overflow: false });
+      for (const c of (r.overflow || [])) hops.push({ id: c, overflow: true });
+      if (hops.length) {
+        html += `<div class="role-chain">`;
+        for (const h of hops) {
+          const m = modelById[h.id];
+          const up = m && (m.agent_state === 'running' || m.agent_state == null || isRouterModel(m));
+          let hopCls = h.overflow ? 'role-hop-overflow' : (up ? 'role-hop-up' : 'role-hop-down');
+          if (h.id === r.target) hopCls = 'role-hop-active';
+          html += `<span class="role-hop ${hopCls}">${h.id}</span>`;
+        }
+        html += `</div>`;
+      }
+      if (!r.available && (r.reasons || []).length) {
+        html += `<div class="role-desc" style="color:var(--red)">${r.reasons.join('; ')}</div>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+
   // Nodes
   html += `<div class="section-title">Nodes</div><div class="nodes">`;
   for (const [name, n] of Object.entries(nodes)) {
     const m = nm[name] || {};
     const reachable = m.reachable === true;
     const isActive = selectedNode === name;
+    // A node powered down inside its declared window is planned, not broken.
+    const scheduledOff = !reachable && n.expected_down === true;
+    const nodeBadge = scheduledOff
+      ? ` <span class="badge badge-off">off (scheduled)</span>`
+      : (!reachable ? ` <span class="badge" style="background:rgba(248,113,113,0.15);color:var(--red)">unreachable</span>` : '');
     html += `<div class="node-card${isActive ? ' active' : ''}" onclick="selectNode('${name}')">
-        <div class="node-name">${name}</div>
+        <div class="node-name">${name}${nodeBadge}</div>
         <div class="node-detail">Host: <span>${n.host}</span></div>
         ${n.gpu === 'none'
           ? `<div class="node-detail">Compute: <span>CPU</span> &middot; <span>no GPU</span></div>`

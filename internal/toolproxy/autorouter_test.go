@@ -160,10 +160,16 @@ func newFakeEmbedServer(t *testing.T) *httptest.Server {
 	}))
 }
 
+// newTestAutoRouter builds an AutoRouter whose routable set is `active`.
+// A nil map means everything is routable (no availability feed).
 func newTestAutoRouter(t *testing.T, embedURL string, active map[string]bool) *AutoRouter {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ar := NewAutoRouter(embedURL, "test-embed", http.DefaultClient, logger, active)
+	var routable RoutableFunc
+	if active != nil {
+		routable = func(name string) bool { return active[name] }
+	}
+	ar := NewAutoRouter(embedURL, "test-embed", http.DefaultClient, logger, routable)
 	if err := ar.Initialize(context.Background()); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -250,19 +256,97 @@ func TestAutoRouter_NotInitializedDefaultsCoder(t *testing.T) {
 	}
 }
 
-func TestAutoRouter_DisabledCategorySkipped(t *testing.T) {
+func TestAutoRouter_UnavailableCategoryNotSelected(t *testing.T) {
 	srv := newFakeEmbedServer(t)
 	defer srv.Close()
-	// research excluded from the active set.
+	// research is unroutable — its models are powered down.
 	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "vision": true}
 	ar := newTestAutoRouter(t, srv.URL, active)
 
-	if _, ok := (*ar.embeddings.Load())["research"]; ok {
-		t.Error("research category was embedded despite being disabled")
+	// Every category is embedded regardless of availability: embeddings are
+	// computed once at startup but the fleet changes all day, so filtering
+	// here would freeze an accident of boot time into the routing table.
+	if _, ok := (*ar.embeddings.Load())["research"]; !ok {
+		t.Error("research should still be embedded; availability is a Classify-time concern")
 	}
-	// A research-y prompt can't match the missing category, so it falls back.
+	// ...but it must not be *selected* while it has nothing behind it.
 	if got := ar.Classify(context.Background(), userMessages("search the web for news"), TierAuto); got == "research" {
-		t.Error("router selected the disabled research alias")
+		t.Error("router selected the unavailable research category")
+	}
+}
+
+func TestAutoRouter_FollowsAvailabilityWithoutReinit(t *testing.T) {
+	srv := newFakeEmbedServer(t)
+	defer srv.Close()
+
+	// A live predicate, exactly as the health mirror provides.
+	researchUp := false
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ar := NewAutoRouter(srv.URL, "test-embed", http.DefaultClient, logger,
+		func(name string) bool {
+			if name == "research" {
+				return researchUp
+			}
+			return true
+		})
+	if err := ar.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	msg := userMessages("search the web for the latest news")
+	if got := ar.Classify(context.Background(), msg, TierAuto); got == "research" {
+		t.Fatalf("research selected while down")
+	}
+	// The node comes back. No re-embedding, no restart — the next request
+	// should already route there.
+	researchUp = true
+	if got := ar.Classify(context.Background(), msg, TierAuto); got != "research" {
+		t.Errorf("Classify -> %q, want research once it is back up", got)
+	}
+}
+
+func TestAutoRouter_NoRoutableFuncMeansEverythingRoutable(t *testing.T) {
+	srv := newFakeEmbedServer(t)
+	defer srv.Close()
+	ar := newTestAutoRouter(t, srv.URL, nil) // nil = no availability feed
+
+	if got := ar.Classify(context.Background(), userMessages("search the web for the latest news"), TierAuto); got != "research" {
+		t.Errorf("Classify -> %q, want research when availability is unknown", got)
+	}
+}
+
+func TestAutoRouter_ImageWithVisionDownDegrades(t *testing.T) {
+	srv := newFakeEmbedServer(t)
+	defer srv.Close()
+	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "research": true}
+	ar := newTestAutoRouter(t, srv.URL, active)
+
+	msgs := []any{map[string]any{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,x"}},
+		},
+	}}
+	// Nothing can see right now: fall back rather than send an image to a
+	// text-only model that will silently ignore it.
+	if got := ar.Classify(context.Background(), msgs, TierAuto); got == "vision" {
+		t.Error("router selected vision while it is unavailable")
+	}
+}
+
+func TestAutoRouter_TieredUpgradeSkippedWhenTargetDown(t *testing.T) {
+	srv := newFakeEmbedServer(t)
+	defer srv.Close()
+	// coder-hard is the free-tier escalation target and it is down.
+	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "vision": true, "research": true}
+	ar := newTestAutoRouter(t, srv.URL, active)
+
+	got := ar.Classify(context.Background(), userMessages(complexCoderPrompt), TierFree)
+	if got == "coder-hard" {
+		t.Error("escalated to coder-hard while it is unavailable")
+	}
+	if got != "coder" {
+		t.Errorf("Classify -> %q, want coder (the reachable base)", got)
 	}
 }
 
