@@ -295,7 +295,10 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.9rem 1.1rem;
-    min-width: 240px;
+    /* min-width:0 lets the card shrink below its content in the flex row;
+       without it a long candidate list pushes the card wider than its
+       track instead of wrapping inside it. */
+    min-width: 0;
     flex: 1 1 240px;
     overflow-wrap: anywhere;
   }
@@ -304,8 +307,15 @@
   .role-name { font-weight: 600; font-size: 0.95rem; color: var(--accent); }
   .role-target { font-size: 0.85rem; margin-top: 0.35rem; }
   .role-desc { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.15rem; }
-  .role-chain { font-size: 0.75rem; color: var(--text-dim); margin-top: 0.5rem; line-height: 1.7; }
-  .role-hop { padding: 0.05rem 0.35rem; border-radius: 4px; margin-right: 0.25rem; white-space: nowrap; }
+  /* Flex-wrap, not inline: the hops are emitted with no whitespace between
+     them and each is white-space:nowrap, so as inline spans they formed one
+     unbreakable run and overflowed the card once a role had more than two or
+     three candidates. */
+  .role-chain {
+    display: flex; flex-wrap: wrap; gap: 0.25rem;
+    font-size: 0.75rem; color: var(--text-dim); margin-top: 0.5rem;
+  }
+  .role-hop { padding: 0.05rem 0.35rem; border-radius: 4px; white-space: nowrap; }
   .role-hop-active { background: rgba(74, 222, 128, 0.15); color: var(--green); font-weight: 600; }
   .role-hop-up { background: rgba(139, 143, 163, 0.12); color: var(--text-dim); }
   .role-hop-down { background: rgba(248, 113, 113, 0.12); color: var(--red); text-decoration: line-through; }
@@ -464,11 +474,17 @@ function sparklineSvg(vals, color) {
 }
 
 let showHidden = false;
+let hideCloud = false;
 let selectedNode = null;
 let selectedCaps = new Set();
 
 function toggleHidden(checked) {
   showHidden = checked;
+  applyFilters();
+}
+
+function toggleCloud(checked) {
+  hideCloud = checked;
   applyFilters();
 }
 
@@ -495,9 +511,11 @@ function applyFilters() {
     const caps = (tr.dataset.caps || '').split(',');
     const tags = (tr.dataset.tags || '').split(',');
     const isDisabled = tr.classList.contains('disabled');
+    const isCloud = tr.dataset.cloud === '1';
 
     let visible = true;
     if (isDisabled && !showHidden) visible = false;
+    if (isCloud && hideCloud) visible = false;
     if (selectedNode && !node.split(',').includes(selectedNode))
       visible = false;
     if (selectedCaps.size > 0) {
@@ -596,6 +614,18 @@ function modelType(m) {
 
 function isRouterModel(m) {
   return ['auto','auto-free','auto-full','coder-resilient'].includes(m.id);
+}
+
+// A "cloud" model runs on somebody else's hardware: external backend AND no
+// node. Node-pinned externals (flux, orpheus, ui-tars, the OpenArc embedder)
+// are deliberately NOT cloud — they're external only in the sense that
+// something other than the agent starts them, and they die with their host.
+// The auto-* routers are excluded too: they're our own routing stubs, and
+// hiding them would hide the entry point that picks among everything else.
+function isCloudModel(m) {
+  return m.backend === 'external'
+    && (!m.nodes || m.nodes.length === 0)
+    && !isRouterModel(m);
 }
 
 function render(data) {
@@ -918,6 +948,7 @@ function render(data) {
 
   // Models table
   const hiddenCount = models.filter(m => m.enabled === false || m.agent_state === 'stopped').length;
+  const cloudCount = models.filter(isCloudModel).length;
   html += `<div class="section-title">Models</div>`;
 
   // Capability/tag filter chips
@@ -949,6 +980,12 @@ function render(data) {
     html += `<div class="toggle-row">
       <input type="checkbox" id="show-hidden" ${showHidden ? 'checked' : ''} onchange="toggleHidden(this.checked)">
       <label for="show-hidden">Show disabled/stopped models (${hiddenCount})</label>
+    </div>`;
+  }
+  if (cloudCount > 0) {
+    html += `<div class="toggle-row">
+      <input type="checkbox" id="hide-cloud" ${hideCloud ? 'checked' : ''} onchange="toggleCloud(this.checked)">
+      <label for="hide-cloud">Hide cloud-only models (${cloudCount}) &mdash; keeps node-pinned services and the auto-routers</label>
     </div>`;
   }
   html += `<table><thead><tr>
@@ -1013,13 +1050,15 @@ function render(data) {
     }
 
     const isHidden = m.enabled === false || m.agent_state === 'stopped';
+    const isCloud = isCloudModel(m);
     const nodeList = m.nodes.length > 0 ? m.nodes.join(',') : 'external';
     const capList = m.capabilities.join(',');
     const tagList = (m.tags || []).join(',');
 
-    // Visibility: check disabled, node filter, cap filter
+    // Visibility: check disabled, cloud, node filter, cap filter
     let visible = true;
     if (isHidden && !showHidden) visible = false;
+    if (isCloud && hideCloud) visible = false;
     if (selectedNode && !m.nodes.includes(selectedNode))
       visible = false;
     if (selectedCaps.size > 0) {
@@ -1028,7 +1067,7 @@ function render(data) {
     }
 
     const classes = [isHidden ? 'disabled' : ''].filter(Boolean).join(' ');
-    html += `<tr data-model="${m.id}" data-nodes="${nodeList}" data-caps="${capList}" data-tags="${tagList}"${classes ? ` class="${classes}"` : ''}${!visible ? ' style="display:none"' : ''}>
+    html += `<tr data-model="${m.id}" data-nodes="${nodeList}" data-caps="${capList}" data-tags="${tagList}"${isCloud ? ' data-cloud="1"' : ''}${classes ? ` class="${classes}"` : ''}${!visible ? ' style="display:none"' : ''}>
       <td><div class="model-id">${m.id}</div><div class="model-repo">${m.hf_repo.split('#')[0]}</div>
         ${m.gguf_file ? `<div class="model-repo">${m.gguf_file}</div>` : ''}</td>
       <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span>${quantBadge(m)}</td>
