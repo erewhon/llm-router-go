@@ -31,9 +31,17 @@ ZEN_SECRET_NAME="${ZEN_SECRET_NAME:-llm-router/opencode-zen-api-key}"
 # but only the password is a secret (in `ho`); host/port/db are connection
 # config and live here. Optional: if the password ref doesn't resolve, the
 # ROUTER_PG_DSN line is omitted and the router falls back to NopSink.
+#
+# Default host = the SHARED reqlog DB since 2026-08-22: the `reqlog-pg` Incus
+# container (hekaton, ovn0 10.115.0.64, PG 17), exposed on the hekaton host's
+# LAN IP via an Incus proxy device (192.168.42.20:5433 -> container :5432).
+# ALL routers log here — the per-host DBs (talos local, euclid legacy) are
+# retired; their history merges into this DB (homeops Forge task "LLM router
+# behind an OVN LB", phase 3). Future ovn0-resident routers should override
+# REQLOG_PG_HOST=10.115.0.64 REQLOG_PG_PORT=5432 (direct, no forward hairpin).
 REQLOG_PG_SECRET="${REQLOG_PG_SECRET:-llm-router/reqlog-pg-password}"
 REQLOG_PG_USER="${REQLOG_PG_USER:-router}"
-REQLOG_PG_HOST="${REQLOG_PG_HOST:-127.0.0.1}"
+REQLOG_PG_HOST="${REQLOG_PG_HOST:-192.168.42.20}"
 REQLOG_PG_PORT="${REQLOG_PG_PORT:-5433}"
 REQLOG_PG_DB="${REQLOG_PG_DB:-router}"
 HO="${HO:-/home/erewhon/.local/bin/ho}"
