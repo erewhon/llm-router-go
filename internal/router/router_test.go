@@ -108,6 +108,22 @@ models:
     backend: external
     api_base: http://euclid.local:5404/v1
     api_class: rerank
+
+  # image-gen model (sd-cpp server, no /v1 suffix on api_base)
+  flux-dev:
+    hf_repo: FLUX.1-dev
+    backend: external
+    api_base: http://delphi.local:5396
+    api_class: image_gen
+    aliases: [image, flux]
+
+  # image-edit model (multipart /v1/images/edits path)
+  qwen-image-edit:
+    hf_repo: Qwen/Qwen-Image-Edit
+    backend: external
+    api_base: http://delphi.local:5402
+    api_class: image_edit
+    aliases: [image-edit]
 `
 
 func testRegistry(t *testing.T) *config.ModelRegistry {

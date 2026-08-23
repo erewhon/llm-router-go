@@ -191,6 +191,10 @@ func (rt *Router) Handler() http.Handler {
 	// Embeddings + rerank bypass the tool proxy and require their own classes.
 	mux.HandleFunc("POST /v1/embeddings", rt.handleProxy(config.APIClassEmbeddings, true))
 	mux.HandleFunc("POST /v1/rerank", rt.handleProxy(config.APIClassRerank, true))
+	// Images passthrough (sd-cpp creative backends, OpenAI images shapes).
+	// Generations is JSON; edits is multipart/form-data — see images.go.
+	mux.HandleFunc("POST /v1/images/generations", rt.handleProxy(config.APIClassImageGen, true))
+	mux.HandleFunc("POST /v1/images/edits", rt.handleProxyMultipart(config.APIClassImageEdit))
 
 	// Anthropic Messages passthrough — registered only when an
 	// api_class:anthropic target is configured. Both paths bypass the
