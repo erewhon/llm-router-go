@@ -92,6 +92,16 @@ func run(args []string) int {
 		dashboardURL  = fs.String("dashboard-public-url", "", "public OpenAI-compatible base URL shown in the dashboard's Connection card (e.g. https://llm.bcc.sh); empty derives http://localhost:<port> from --addr")
 
 		showVer = fs.Bool("version", false, "print version and exit")
+
+		// --validate: check --models-yaml and exit without serving. See
+		// validate.go for the exit-code contract. Lets a deploy validate an
+		// edit BEFORE restarting anything, instead of discovering a bad
+		// config by watching production fail to come back.
+		validate       = fs.Bool("validate", false, "validate --models-yaml and exit; does not serve")
+		validateFormat = fs.String("validate-format", "text", "with --validate: output format, text or json")
+		validateModes  = fs.String("validate-mode", "default,big", "with --validate: comma-separated modes to lint")
+		validateStrict = fs.Bool("validate-strict", false, "with --validate: treat every lint warning as a failure")
+		validateBlock  = fs.String("validate-block", "", "with --validate: comma-separated lint codes promoted to failures (e.g. enabled-port-collision)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -99,6 +109,23 @@ func run(args []string) int {
 	if *showVer {
 		fmt.Println(version)
 		return 0
+	}
+	// Dispatch BEFORE logx.New: the logger writes JSON to stdout, which would
+	// interleave with and corrupt --validate-format=json.
+	if *validate {
+		if f := *validateFormat; f != "text" && f != "json" {
+			fmt.Fprintf(os.Stderr, "unknown --validate-format %q (want text or json)\n", f)
+			return 2
+		}
+		return runValidate(validateOpts{
+			path:   *modelsYAML,
+			format: *validateFormat,
+			modes:  parseModes(*validateModes),
+			strict: *validateStrict,
+			block:  parseBlockList(*validateBlock),
+			stdout: os.Stdout,
+			stderr: os.Stderr,
+		})
 	}
 
 	level, err := logx.ParseLevel(*logLevel)

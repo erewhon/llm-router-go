@@ -14,6 +14,31 @@ import (
 	"github.com/erewhon/llm-router-go/internal/config"
 )
 
+// TestRouteCategoriesMatchConfig binds this package's routeCategories to
+// config.ToolProxyRouteCategories.
+//
+// The list is duplicated because internal/toolproxy imports internal/config,
+// so config cannot import back, and pulling toolproxy (plus gval and
+// x/net/html) into the router binary for five strings is not worth it. This
+// test is what keeps the duplication honest: config's `--validate` lint checks
+// that every advertised category still resolves to something routable, and
+// that check is worthless if the two lists drift.
+//
+// If you add or rename a category here, update config.ToolProxyRouteCategories
+// in the same commit.
+func TestRouteCategoriesMatchConfig(t *testing.T) {
+	if len(routeCategories) != len(config.ToolProxyRouteCategories) {
+		t.Fatalf("category count drift: toolproxy has %d, config has %d",
+			len(routeCategories), len(config.ToolProxyRouteCategories))
+	}
+	for i, rc := range routeCategories {
+		if want := config.ToolProxyRouteCategories[i]; rc.alias != want {
+			t.Errorf("category %d: toolproxy has %q, config.ToolProxyRouteCategories has %q",
+				i, rc.alias, want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------

@@ -355,16 +355,31 @@ func Load(path string) (*ModelRegistry, error) {
 	return LoadBytes(data)
 }
 
-// LoadBytes parses and validates a registry from raw YAML bytes.
-func LoadBytes(data []byte) (*ModelRegistry, error) {
+// ParseBytes unmarshals a registry from raw YAML WITHOUT validating it.
+//
+// Almost nothing should call this: a registry that has not passed Validate may
+// violate the invariants the rest of the package assumes. It exists for the
+// `--validate` tooling, which needs to report every problem in a broken file —
+// including advisory Lint findings — rather than stopping at the first
+// Validate error. Serving code paths must use Load or LoadBytes.
+func ParseBytes(data []byte) (*ModelRegistry, error) {
 	var r ModelRegistry
 	if err := yaml.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("config: parse yaml: %w", err)
 	}
+	return &r, nil
+}
+
+// LoadBytes parses and validates a registry from raw YAML bytes.
+func LoadBytes(data []byte) (*ModelRegistry, error) {
+	r, err := ParseBytes(data)
+	if err != nil {
+		return nil, err
+	}
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	return &r, nil
+	return r, nil
 }
 
 // Validate enforces the cross-field invariants that the Pydantic
@@ -533,6 +548,12 @@ func (r *ModelRegistry) GetNode(modelID string) (*NodeDefinition, error) {
 // router host (HA) can point at a different tool proxy without a recompile.
 const DefaultToolProxyAddr = "http://192.168.42.240:5392/v1"
 
+// DefaultAPIPort is the port assumed for a single-node model that declares no
+// api_port. Named so the lint checks agree with APIBase on what "no port set"
+// actually resolves to — a collision check that guessed a different default
+// would report addresses the router never uses.
+const DefaultAPIPort = 5391
+
 // APIBase returns the upstream API base URL for a model.
 //
 // For multi-node models the head node is used.
@@ -581,7 +602,7 @@ func (r *ModelRegistry) APIBase(modelID string, toolProxyOverride *bool) (string
 
 	port := m.APIPort
 	if port == 0 {
-		port = 5391
+		port = DefaultAPIPort
 	}
 	return fmt.Sprintf("http://%s:%d/v1", host, port), nil
 }
