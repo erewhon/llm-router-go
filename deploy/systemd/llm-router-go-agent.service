@@ -82,8 +82,14 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 UMask=0077
 
-# --- Network isolation: localhost + LAN ---
-IPAddressAllow=127.0.0.0/8 ::1/128 192.168.42.0/24
+# --- Network isolation: localhost + LAN + OVN front door ---
+# 192.168.11.0/24 is the OVN gateway uplink subnet: the llm-router1/2
+# front-door replicas' dashboard node-metrics and availability polls arrive
+# SNATed from there. Without it the dashboard behind the VIP shows every
+# node unreachable (SYNs silently dropped). Fleet hosts also carry this as
+# a drop-in (llm-router-go-agent.service.d/ovn-frontdoor.conf, 2026-08-23);
+# Sparks additionally need the matching UFW allow on :8100.
+IPAddressAllow=127.0.0.0/8 ::1/128 192.168.42.0/24 192.168.11.0/24
 IPAddressDeny=any
 
 [Install]
