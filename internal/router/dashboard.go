@@ -90,18 +90,29 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 // the frontend sees the same keys whether or not a node is reachable, matching
 // the Python default dict.
 type nodeMetric struct {
-	Reachable   bool              `json:"reachable"`
-	VRAMUsedGB  *float64          `json:"vram_used_gb"`
-	VRAMTotalGB *float64          `json:"vram_total_gb"`
-	VRAMPct     *float64          `json:"vram_pct"`
-	GPUBusyPct  *int              `json:"gpu_busy_pct"`
-	RAMUsedGB   *float64          `json:"ram_used_gb"`
-	RAMTotalGB  *float64          `json:"ram_total_gb"`
-	RAMPct      *float64          `json:"ram_pct"`
-	Services    []any             `json:"services,omitempty"`
-	DiskFreeGB  *float64          `json:"disk_free_gb,omitempty"`
-	DiskTotalGB *float64          `json:"disk_total_gb,omitempty"`
-	Models      []nodeModelMetric `json:"models"`
+	Reachable   bool     `json:"reachable"`
+	VRAMUsedGB  *float64 `json:"vram_used_gb"`
+	VRAMTotalGB *float64 `json:"vram_total_gb"`
+	VRAMPct     *float64 `json:"vram_pct"`
+	GPUBusyPct  *int     `json:"gpu_busy_pct"`
+	RAMUsedGB   *float64 `json:"ram_used_gb"`
+	RAMTotalGB  *float64 `json:"ram_total_gb"`
+	RAMPct      *float64 `json:"ram_pct"`
+	Services    []any    `json:"services,omitempty"`
+	DiskFreeGB  *float64 `json:"disk_free_gb,omitempty"`
+	DiskTotalGB *float64 `json:"disk_total_gb,omitempty"`
+	// GPUs is present only for multi-GPU nodes (talos 2x B70); the
+	// aggregate vram_*/gpu_busy_pct fields above always exist alongside.
+	GPUs   []dashGPU         `json:"gpus,omitempty"`
+	Models []nodeModelMetric `json:"models"`
+}
+
+type dashGPU struct {
+	Index       int     `json:"index"`
+	VRAMUsedGB  float64 `json:"vram_used_gb"`
+	VRAMTotalGB float64 `json:"vram_total_gb"`
+	VRAMPct     float64 `json:"vram_pct"`
+	BusyPct     *int    `json:"busy_pct"`
 }
 
 type nodeModelMetric struct {
@@ -154,6 +165,23 @@ func fetchNodeMetrics(ctx context.Context, host string, agentPort int) nodeMetri
 	result.Services = healthResp.Services
 	result.DiskFreeGB = healthResp.DiskFreeGB
 	result.DiskTotalGB = healthResp.DiskTotalGB
+	// Per-card figures surface only when a node reports more than one GPU;
+	// a single card's numbers are already the aggregate row.
+	if len(healthResp.GPUs) > 1 {
+		for _, g := range healthResp.GPUs {
+			pct := 0.0
+			if g.VRAMTotalGB > 0 {
+				pct = round1(g.VRAMUsedGB / g.VRAMTotalGB * 100)
+			}
+			result.GPUs = append(result.GPUs, dashGPU{
+				Index:       g.Index,
+				VRAMUsedGB:  round1(g.VRAMUsedGB),
+				VRAMTotalGB: round1(g.VRAMTotalGB),
+				VRAMPct:     pct,
+				BusyPct:     g.BusyPct,
+			})
+		}
+	}
 
 	for _, m := range snap.Models {
 		result.Models = append(result.Models, nodeModelMetric{

@@ -22,6 +22,20 @@ type Info struct {
 	FreeVRAMGB  float64
 	Unified     bool
 	GPUBusyPct  *int // nil if not available
+	// Devices carries per-card figures on multi-GPU hosts (e.g. talos's
+	// 2x Arc Pro B70). Empty on single-GPU or unified-memory hosts, where
+	// the aggregate fields above are the whole story. When set, the
+	// aggregates are derived: VRAM summed, busy = busiest card.
+	Devices []Device
+}
+
+// Device is one physical card's slice of a multi-GPU host.
+type Device struct {
+	Index       int
+	PDev        string // PCI address, e.g. "0000:05:00.0"
+	UsedVRAMGB  float64
+	TotalVRAMGB float64
+	BusyPct     *int // nil if not available
 }
 
 // Reader extracts GPU info for a single host. Vendor-specific

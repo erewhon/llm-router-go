@@ -38,14 +38,24 @@ const StateRunning = "running"
 
 // AgentHealth is the subset of a node agent's /health response we consume.
 type AgentHealth struct {
-	TotalVRAMGB *float64 `json:"total_vram_gb"`
-	FreeVRAMGB  *float64 `json:"free_vram_gb"`
-	GPUBusyPct  *int     `json:"gpu_busy_pct"`
-	RAMUsedGB   *float64 `json:"ram_used_gb"`
-	RAMTotalGB  *float64 `json:"ram_total_gb"`
-	DiskFreeGB  *float64 `json:"disk_free_gb"`
-	DiskTotalGB *float64 `json:"disk_total_gb"`
-	Services    []any    `json:"services"`
+	TotalVRAMGB *float64   `json:"total_vram_gb"`
+	FreeVRAMGB  *float64   `json:"free_vram_gb"`
+	GPUBusyPct  *int       `json:"gpu_busy_pct"`
+	RAMUsedGB   *float64   `json:"ram_used_gb"`
+	RAMTotalGB  *float64   `json:"ram_total_gb"`
+	DiskFreeGB  *float64   `json:"disk_free_gb"`
+	DiskTotalGB *float64   `json:"disk_total_gb"`
+	GPUs        []AgentGPU `json:"gpus"`
+	Services    []any      `json:"services"`
+}
+
+// AgentGPU is one card of a multi-GPU node (absent on single-GPU nodes).
+type AgentGPU struct {
+	Index       int     `json:"index"`
+	PDev        string  `json:"pdev"`
+	VRAMUsedGB  float64 `json:"vram_used_gb"`
+	VRAMTotalGB float64 `json:"vram_total_gb"`
+	BusyPct     *int    `json:"busy_pct"`
 }
 
 // AgentModel is the subset of a node agent's /models list we consume.

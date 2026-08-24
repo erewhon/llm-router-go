@@ -860,6 +860,42 @@ function render(data) {
             / ${m.ram_total_gb} GB</span>
           ${sparklineSvg(hist.vram, 'var(--accent)')}
         </div>`;
+    } else if (reachable && m.gpus && m.gpus.length > 1) {
+      // Multi-GPU node (talos 2x B70): one MEM + busy pair per card,
+      // nvtop-style. Sparklines stay on the aggregate history.
+      const hist = nodeHistory[name] || {vram:[], gpu:[]};
+      for (const g of m.gpus) {
+        const color = vramBarColor(g.vram_pct);
+        html += `
+        <div class="metric-row">
+          <span class="metric-label">MEM${g.index}</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${color}"
+              style="width:${g.vram_pct}%"></div>
+          </div>
+          <span class="vram-text"><strong>${g.vram_used_gb}</strong>
+            / ${g.vram_total_gb} GB</span>
+        </div>`;
+        const gBusy = g.busy_pct;
+        if (gBusy !== null && gBusy !== undefined) {
+          const bColor = gBusy >= 90 ? 'red' : gBusy >= 50 ? 'yellow' : 'green';
+          html += `
+        <div class="metric-row">
+          <span class="metric-label">GPU${g.index}</span>
+          <div class="vram-bar-track">
+            <div class="vram-bar-fill ${bColor}"
+              style="width:${gBusy}%"></div>
+          </div>
+          <span class="vram-text"><strong>${gBusy}%</strong></span>
+        </div>`;
+        }
+      }
+      html += `
+        <div class="metric-row">
+          <span class="metric-label">ALL</span>
+          ${sparklineSvg(hist.vram, 'var(--accent)')}
+          ${sparklineSvg(hist.gpu, 'var(--green)')}
+        </div>`;
     } else if (reachable && m.vram_pct !== null) {
       const color = vramBarColor(m.vram_pct);
       const hist = nodeHistory[name] || {vram:[], gpu:[]};

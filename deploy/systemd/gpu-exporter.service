@@ -1,0 +1,32 @@
+# gpu-exporter — root fdinfo bridge for Intel xe-driver GPUs.
+# See cmd/gpu-exporter/main.go for the full why: xe has no global VRAM/busy
+# sysfs counters and fdinfo is owner-readable only, so a root loop publishes
+# per-card used KiB + busy %% to /run/gpu-vram/gpus.json for the node agent.
+#
+# Deploy to: talos (2x Arc Pro B70 — replaces the hand-rolled bash
+# gpu-vram-exporter, same unit name kept there) and euclid (Arc B50 Pro).
+#
+# Install: sudo install -m755 gpu-exporter /usr/local/bin/gpu-exporter
+#          sudo cp gpu-exporter.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now gpu-exporter
+
+[Unit]
+Description=Intel xe GPU per-card VRAM/busy exporter (llm-router)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gpu-exporter
+Restart=always
+RestartSec=5
+# Root is required to read other users' /proc/<pid>/fdinfo; confine the rest.
+ProtectSystem=strict
+ReadWritePaths=/run/gpu-vram
+RuntimeDirectory=gpu-vram
+RuntimeDirectoryPreserve=yes
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

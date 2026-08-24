@@ -21,18 +21,31 @@ const (
 )
 
 type HealthResponse struct {
-	Status        string          `json:"status"`
-	Node          string          `json:"node"`
-	GPUType       *string         `json:"gpu_type,omitempty"`
-	TotalVRAMGB   *float64        `json:"total_vram_gb,omitempty"`
-	FreeVRAMGB    *float64        `json:"free_vram_gb,omitempty"`
-	GPUBusyPct    *int            `json:"gpu_busy_pct,omitempty"`
-	RAMUsedGB     *float64        `json:"ram_used_gb,omitempty"`
-	RAMTotalGB    *float64        `json:"ram_total_gb,omitempty"`
-	DiskFreeGB    *float64        `json:"disk_free_gb,omitempty"`
-	DiskTotalGB   *float64        `json:"disk_total_gb,omitempty"`
+	Status      string   `json:"status"`
+	Node        string   `json:"node"`
+	GPUType     *string  `json:"gpu_type,omitempty"`
+	TotalVRAMGB *float64 `json:"total_vram_gb,omitempty"`
+	FreeVRAMGB  *float64 `json:"free_vram_gb,omitempty"`
+	GPUBusyPct  *int     `json:"gpu_busy_pct,omitempty"`
+	RAMUsedGB   *float64 `json:"ram_used_gb,omitempty"`
+	RAMTotalGB  *float64 `json:"ram_total_gb,omitempty"`
+	DiskFreeGB  *float64 `json:"disk_free_gb,omitempty"`
+	DiskTotalGB *float64 `json:"disk_total_gb,omitempty"`
+	// GPUs carries per-card figures on multi-GPU hosts (talos 2x B70).
+	// Absent on single-GPU / unified-memory nodes, where the aggregate
+	// vram/busy fields above are the whole story.
+	GPUs          []GPUDevice     `json:"gpus,omitempty"`
 	RunningModels []string        `json:"running_models"`
 	Services      []ServiceStatus `json:"services"`
+}
+
+// GPUDevice is one physical card's slice of a multi-GPU node.
+type GPUDevice struct {
+	Index       int     `json:"index"`
+	PDev        string  `json:"pdev,omitempty"`
+	VRAMUsedGB  float64 `json:"vram_used_gb"`
+	VRAMTotalGB float64 `json:"vram_total_gb"`
+	BusyPct     *int    `json:"busy_pct,omitempty"`
 }
 
 type ServiceStatus struct {

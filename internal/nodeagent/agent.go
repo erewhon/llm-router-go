@@ -23,10 +23,10 @@ import (
 
 // Agent serves the node-agent HTTP API for a single node in the registry.
 type Agent struct {
-	registry *config.ModelRegistry
-	node     string
-	logger   *slog.Logger
-	version  string
+	registry  *config.ModelRegistry
+	node      string
+	logger    *slog.Logger
+	version   string
 	started   time.Time
 	backends  map[config.BackendType]backends.Backend
 	gpuReader gpu.Reader
@@ -136,6 +136,15 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 			resp.TotalVRAMGB = &info.TotalVRAMGB
 			resp.FreeVRAMGB = &info.FreeVRAMGB
 			resp.GPUBusyPct = info.GPUBusyPct
+			for _, d := range info.Devices {
+				resp.GPUs = append(resp.GPUs, GPUDevice{
+					Index:       d.Index,
+					PDev:        d.PDev,
+					VRAMUsedGB:  d.UsedVRAMGB,
+					VRAMTotalGB: d.TotalVRAMGB,
+					BusyPct:     d.BusyPct,
+				})
+			}
 		}
 	}
 
