@@ -18,7 +18,7 @@
 #
 # Prereqs on euclid: the `llm-router` system user, models.yaml in sync (run
 # `just sync` from the Python repo), and the SOCKS5 VPN reachable at
-# 192.168.42.84:1080 (delphi svc-sys-research-vpn; see the unit file header).
+# 192.168.42.86:1080 (Incus VM vpn-egress, Mullvad WG + microsocks — moved off the delphi nspawn 2026-08-18; see the unit file header).
 
 set -euo pipefail
 
