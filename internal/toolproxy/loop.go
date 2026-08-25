@@ -237,12 +237,15 @@ func truncatedFinal(res loopResult) bool {
 // non-streaming twin of what runToolLoopStreaming already does when it
 // re-issues the final generation without tools; the conversation is unchanged
 // (tool results are all in messages), only the tool definitions are dropped.
-func (p *Proxy) regenerateFinal(ctx context.Context, backendURL string, bodyMap map[string]any, messages []any) (loopResult, error) {
+// The prior result supplies the conversation and the tool stats to carry
+// forward — the regenerated result replaces the loop's, so it must stay
+// diagnosable (see reportEmptyAnswer).
+func (p *Proxy) regenerateFinal(ctx context.Context, backendURL string, bodyMap map[string]any, prior loopResult) (loopResult, error) {
 	body := make(map[string]any, len(bodyMap))
 	for k, v := range bodyMap {
 		body[k] = v
 	}
-	body["messages"] = messages
+	body["messages"] = prior.messages
 	delete(body, "tools")
 	delete(body, "tool_choice")
 	body["stream"] = false
@@ -268,8 +271,16 @@ func (p *Proxy) regenerateFinal(ctx context.Context, backendURL string, bodyMap 
 	}
 	return loopResult{
 		outcome: outcomeFinal, content: cleanContent, reasoning: reasoning,
-		usage: cc.Usage, messages: messages,
+		usage: cc.Usage, messages: prior.messages,
 		finishReason: cc.Choices[0].FinishReason,
+		tools:        prior.tools,
+		lastRaw: rawMessageInfo{
+			finishReason:     cc.Choices[0].FinishReason,
+			completionTokens: usageCompletionTokens(cc.Usage),
+			hadToolCalls:     len(extractToolCalls(msg)) > 0,
+			hadReasoning:     reasoning != "",
+			contentLen:       len(cleanContent),
+		},
 	}, nil
 }
 
@@ -281,7 +292,20 @@ func (p *Proxy) regenerateFinal(ctx context.Context, backendURL string, bodyMap 
 // (empty content is expected), and outcomeMaxRounds already returns a
 // non-empty marker of its own — see maxRoundsContent.
 func emptyAnswer(res loopResult) bool {
-	return res.outcome == outcomeFinal && strings.TrimSpace(res.content) == ""
+	if res.outcome != outcomeFinal || strings.TrimSpace(res.content) != "" {
+		return false
+	}
+	// Empty content with finish_reason "length" and reasoning attached is an
+	// honest generation cap, not a swallowed answer: a reasoning model under a
+	// small max_tokens spends the whole budget thinking and never reaches the
+	// answer (Nemotron Lightning does this on any plain completion with
+	// max_tokens below its reasoning run). The backend itself returns HTTP 200
+	// for it, so the proxy must pass it through — the client's remedy is a
+	// larger max_tokens, and a 502 here made the whole route look down.
+	if res.finishReason == "length" && res.reasoning != "" {
+		return false
+	}
+	return true
 }
 
 // maxRoundsContent is the body for a run that exhausted its rounds. The bare
@@ -372,7 +396,7 @@ func (p *Proxy) runToolLoopJSON(w http.ResponseWriter, r *http.Request, res reso
 	if truncatedFinal(result) {
 		p.logger.WarnContext(ctx, "final answer truncated with tools attached; regenerating without tools",
 			"backend_url", res.BackendURL, "content_len", len(result.content))
-		regen, rErr := p.regenerateFinal(ctx, res.BackendURL, bodyMap, result.messages)
+		regen, rErr := p.regenerateFinal(ctx, res.BackendURL, bodyMap, result)
 		if rErr != nil {
 			// Keep the truncated answer rather than failing the request — it's
 			// degraded but not empty.

@@ -376,6 +376,93 @@ func TestToolLoop_TruncatedFinalKeptWhenRegenerationFails(t *testing.T) {
 	}
 }
 
+// reasoningOnlyLengthResp is what a reasoning model returns when the client's
+// max_tokens runs out while it is still thinking: reasoning_content only,
+// empty content, finish_reason "length" (observed from Nemotron Lightning on
+// llama.cpp — its reasoning run alone exceeds any small completion budget).
+func reasoningOnlyLengthResp(reasoning string, completionTokens int) string {
+	return fmt.Sprintf(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":%q},"finish_reason":"length"}],"usage":{"prompt_tokens":19,"completion_tokens":%d,"total_tokens":%d}}`, reasoning, completionTokens, completionTokens+19)
+}
+
+// An empty answer whose finish_reason is "length" with reasoning attached is
+// the client's own max_tokens cap, not a proxy failure — the backend itself
+// answers 200 for it. Returning 502 here made every small-max_tokens plain
+// completion on the lightning route look like an outage.
+func TestToolLoop_ReasoningOnlyLengthCapPassedThrough(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		reasoningOnlyLengthResp("thinking about how to answer…", 30),
+		reasoningOnlyLengthResp("thinking again, still over budget…", 30), // regeneration without tools
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","max_tokens":30,"messages":[{"role":"user","content":"Say ok."}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	cc := decodeCompletion(t, rec)
+	if cc.Choices[0].FinishReason != "length" {
+		t.Errorf("finish_reason = %q, want length so the client sees its cap", cc.Choices[0].FinishReason)
+	}
+	if got := cc.Choices[0].Message.Content; got != "" {
+		t.Errorf("content = %q, want empty passthrough", got)
+	}
+	if cc.Choices[0].Message.ReasoningContent == "" {
+		t.Error("reasoning_content missing — the truncated thinking must reach the client")
+	}
+	if up.callCount() != 2 {
+		t.Errorf("upstream calls = %d, want 2 (loop round + regeneration)", up.callCount())
+	}
+}
+
+// Streaming must pass the same cap through instead of failing before SSE.
+func TestToolLoop_ReasoningOnlyLengthCapStreamingNot502(t *testing.T) {
+	finalSSE := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking…\"},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	up := &scriptedUpstream{
+		queue: []string{reasoningOnlyLengthResp("thinking…", 30)},
+		sse:   finalSSE,
+	}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"max_tokens":30,"messages":[{"role":"user","content":"Say ok."}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "data:") {
+		t.Errorf("no SSE relayed; body = %s", rec.Body.String())
+	}
+}
+
+// When the regenerated final is genuinely empty (no reasoning, no "length"),
+// the 502 must describe the regenerated backend message — regenerateFinal used
+// to return a zero lastRaw, so the error claimed finish_reason="" / 0 tokens
+// no matter what the backend actually said.
+func TestToolLoop_EmptyRegenerationReports502WithRealDiagnostics(t *testing.T) {
+	up := &scriptedUpstream{queue: []string{
+		truncatedAnswerResp(""), // loop final: empty, capped → triggers regeneration
+		emptyAnswerResp(28),     // regeneration: empty again, finish_reason "stop"
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	msg := decodeErrorMessage(t, rec)
+	if !strings.Contains(msg, `finish_reason="stop"`) {
+		t.Errorf("error message = %q, want the regenerated finish_reason \"stop\"", msg)
+	}
+	if !strings.Contains(msg, "28 completion tokens") {
+		t.Errorf("error message = %q, want the regenerated token count", msg)
+	}
+}
+
 func TestToolLoop_ClientToolReturnedNotExecuted(t *testing.T) {
 	up := &scriptedUpstream{queue: []string{toolCallResp("get_weather", `{"city":"NYC"}`)}}
 	server := httptest.NewServer(up.handler())
