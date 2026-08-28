@@ -45,6 +45,10 @@ type responseCapture struct {
 	isSSE    bool
 	jsonBody []byte
 	sseTail  *streamTailCapture
+	// upstreamStatus is the HTTP status line the upstream answered with, set
+	// in ModifyResponse. 0 when the upstream never answered (transport error
+	// or the request was rejected before forwarding).
+	upstreamStatus int
 }
 
 // streamTailCapture is an io.ReadCloser that transparently forwards bytes

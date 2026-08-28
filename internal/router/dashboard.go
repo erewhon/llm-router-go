@@ -76,6 +76,7 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.HandleFunc("GET /api/models", rt.handleDashModels)
 	mux.HandleFunc("GET /api/node-metrics", rt.handleDashNodeMetrics)
 	mux.HandleFunc("GET /api/router-metrics", rt.handleDashRouterMetrics)
+	mux.HandleFunc("GET /api/upstream", rt.handleDashUpstream)
 	mux.HandleFunc("POST /api/chat", rt.handleDashChat)
 	rt.dashConfig = cfg
 	return mux
@@ -438,6 +439,18 @@ func (rt *Router) handleDashRouterMetrics(w http.ResponseWriter, r *http.Request
 		"tokens_completion": snap.TokensCompletion,
 		"avg_latency_ms":    avgLatency,
 	})
+}
+
+// handleDashUpstream serves the upstream failure panel: per-(model, endpoint)
+// attempt/failure counts over the router's rolling 1h/24h window, problem rows
+// first. In-memory (cleared by a restart); `just reqlog-failures` in the
+// llm-router repo is the durable equivalent against reqlog-pg.
+func (rt *Router) handleDashUpstream(w http.ResponseWriter, r *http.Request) {
+	rows := rt.upstreamStats.stats(time.Now())
+	if rows == nil {
+		rows = []upstreamRow{}
+	}
+	writeDashJSON(w, map[string]any{"upstream": rows})
 }
 
 // handleDashChat relays one quick-chat turn to a model. It expands the

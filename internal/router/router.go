@@ -73,6 +73,9 @@ type Router struct {
 	// tokStats holds the most recent measured tok/s per model, learned from
 	// response usage while proxying. Feeds the dashboard throughput tile.
 	tokStats *tokTracker
+	// upstreamStats is the rolling 24h window of upstream attempt outcomes per
+	// (model, endpoint). Feeds the dashboard's /api/upstream failure panel.
+	upstreamStats *upstreamTracker
 }
 
 // Option configures a Router at construction time.
@@ -167,6 +170,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		started:       time.Now(),
 		nodeFetcher:   fetchNodeMetrics,
 		tokStats:      newTokTracker(),
+		upstreamStats: newUpstreamTracker(),
 		avail:         alwaysRoutable{},
 	}
 	for _, opt := range opts {
@@ -250,6 +254,10 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			// failoverFrom names the model that failed, when one did.
 			failoverFrom string
 			errMsg       string
+			// upstreamClass is the transport-error class of the FINAL attempt
+			// ("timeout"/"connect"/"transport"), empty when the upstream
+			// answered with a status line (whatever it was) or was never tried.
+			upstreamClass string
 		)
 
 		defer func() {
@@ -273,6 +281,16 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.Role = resolved.Role
 				lr.RoleOverflowed = resolved.Overflowed
 				lr.FailoverFrom = failoverFrom
+				// Upstream outcome of the final attempt. Envelope detection is
+				// JSON-body-only by design: a 2xx JSON body carrying a
+				// top-level "error" is a failure wearing a success status.
+				envelope := cap.upstreamStatus >= 200 && cap.upstreamStatus < 300 &&
+					cap.jsonBody != nil && hasErrorEnvelope(cap.jsonBody)
+				lr.UpstreamStatus = cap.upstreamStatus
+				lr.ErrorClass = errorClassOf(upstreamClass, cap.upstreamStatus, envelope)
+				if cap.upstreamStatus > 0 || upstreamClass != "" {
+					rt.upstreamStats.record(resolved.ModelID, resolved.BackendURL, lr.ErrorClass, time.Now())
+				}
 			}
 			var tokPerSec *float64
 			switch {
@@ -384,6 +402,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				next, ok = rt.nextRoleCandidate(res, forceDirect)
 			}
 			if !ok {
+				upstreamClass = classifyTransportErr(upstreamErr)
 				errMsg = "upstream: " + upstreamErr.Error()
 				if rec.status == 0 {
 					http.Error(rec, errMsg, http.StatusBadGateway)
@@ -394,6 +413,11 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			rt.logger.WarnContext(r.Context(), "failing over",
 				"role", res.Role, "from", res.ModelID, "to", next.ModelID, "err", upstreamErr)
 			rt.metrics.ObserveFailover(res.Role, res.ModelID, next.ModelID)
+			// The failed attempt won't be the reqlog record's final attempt, so
+			// count it toward the failed candidate's upstream stats here.
+			class := classifyTransportErr(upstreamErr)
+			rt.metrics.ObserveUpstream(res.ModelID, res.BackendURL, class)
+			rt.upstreamStats.record(res.ModelID, res.BackendURL, class, time.Now())
 			failoverFrom = res.ModelID
 			res = next
 			resolved = &res
@@ -476,6 +500,7 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 			if cap == nil {
 				return nil
 			}
+			cap.upstreamStatus = resp.StatusCode
 			ct := resp.Header.Get("Content-Type")
 			switch {
 			case contentTypeIsSSE(ct):

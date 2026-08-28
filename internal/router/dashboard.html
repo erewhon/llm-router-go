@@ -399,6 +399,7 @@ async function load() {
     lastData = await r.json();
     updateHistory(lastData.node_metrics || {});
     await fetchRouterMetrics();
+    await fetchUpstream();
     el.innerHTML = render(lastData);
   } catch (e) {
     el.innerHTML = `<p class="error">Failed to load: ${e.message}</p>`;
@@ -422,6 +423,15 @@ async function fetchRouterMetrics() {
     }
     lastData.router = rd;
   } catch (_) { /* keep previous router data on a failed poll */ }
+}
+
+async function fetchUpstream() {
+  if (!lastData) return;
+  try {
+    const r = await fetch('/api/upstream');
+    const d = await r.json();
+    lastData.upstream = d.upstream || [];
+  } catch (_) { /* keep previous upstream data on a failed poll */ }
 }
 
 async function pollMetrics() {
@@ -718,6 +728,55 @@ function render(data) {
           <div class="node-detail" style="margin-top:0.4rem;line-height:1.7">${topModels}</div>
         </div>
       </div>`;
+  }
+
+  // Upstream failures — rendered only when something failed in the rolling
+  // 24h window, so the section doubles as the alarm. Grouped by endpoint:
+  // many models failing under one api_base = the endpoint is down; one model
+  // alone = that model's upstream is broken (the 2026-08-27 Zen triage).
+  const upRows = (data.upstream || []).filter(u => u.failed_24h > 0);
+  if (upRows.length) {
+    const fmtAgo = iso => {
+      const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+      if (s < 90) return `${Math.round(s)}s ago`;
+      if (s < 5400) return `${Math.round(s / 60)}m ago`;
+      return `${(s / 3600).toFixed(1)}h ago`;
+    };
+    const groups = {};
+    for (const u of upRows) (groups[u.api_base || '(local)'] ||= []).push(u);
+    let cards = '';
+    for (const [base, rows] of Object.entries(groups)) {
+      const host = base.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      const lines = rows.map(u => {
+        // Hard-down: every attempt in the last hour failed, on enough
+        // attempts (>=3) that it isn't one flaky request.
+        const hardDown = u.total_1h >= 3 && u.failed_1h === u.total_1h;
+        const pct1 = u.total_1h ? Math.round(100 * u.failed_1h / u.total_1h) : null;
+        const pct24 = Math.round(100 * u.failed_24h / u.total_24h);
+        const badge = hardDown
+          ? '<span class="badge" style="background:rgba(255,80,80,0.15);color:var(--red)">DOWN</span> '
+          : '';
+        const since = u.failing_since
+          ? ` · failing since ${fmtAgo(u.failing_since)}`
+          : (u.last_failure_at ? ` · last ${fmtAgo(u.last_failure_at)}` : '');
+        const oneH = pct1 === null
+          ? '<span style="color:var(--text-dim)">no traffic 1h</span>'
+          : `1h <strong>${u.failed_1h}/${u.total_1h}</strong> (${pct1}%)`;
+        return `<div class="metric-row"${hardDown ? ' style="color:var(--red)"' : ''}>
+          <span class="rstat-label">${badge}${u.model}</span>
+          <span class="vram-text">${oneH} · 24h ${u.failed_24h}/${u.total_24h} (${pct24}%)
+            <span style="color:var(--text-dim)">${u.last_error_class || ''}${since}</span></span>
+        </div>`;
+      }).join('');
+      cards += `
+        <div class="node-card" style="flex:1;min-width:20rem">
+          <div class="node-name">${host}</div>
+          ${lines}
+        </div>`;
+    }
+    html += `
+      <div class="section-title">Upstream failures <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(rolling 24h, since router restart — durable history: just reqlog-failures)</span></div>
+      <div class="nodes">${cards}</div>`;
   }
 
   // Connection / Apps / Aliases are reference material: build them into

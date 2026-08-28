@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     role              TEXT,
     role_overflowed   BOOLEAN NOT NULL DEFAULT FALSE,
     failover_from     TEXT,
-    error             TEXT
+    error             TEXT,
+    upstream_status   SMALLINT,
+    error_class       TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -57,6 +59,11 @@ ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS role TEXT;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS role_overflowed BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS failover_from TEXT;
 CREATE INDEX IF NOT EXISTS router_requests_role_idx ON router_requests (role) WHERE role IS NOT NULL;
+
+-- Migrations for tables created before upstream failure tracking (idempotent).
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_status SMALLINT;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS error_class TEXT;
+CREATE INDEX IF NOT EXISTS router_requests_error_class_idx ON router_requests (error_class) WHERE error_class IS NOT NULL;
 `
 
 const insertSQL = `
@@ -65,9 +72,9 @@ INSERT INTO router_requests
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
-   role, role_overflowed, failover_from, error)
+   role, role_overflowed, failover_from, error, upstream_status, error_class)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -169,6 +176,7 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfEmpty(rec.PrefixHashChain),
 		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
 		nullIfEmpty(rec.Error),
+		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)
@@ -180,6 +188,15 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullIfZero maps 0 to NULL: UpstreamStatus 0 means "the upstream never
+// answered", which is absence, not a status code.
+func nullIfZero(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
 
 // RedactDSN hides the password segment of a libpq URI for safe logging. It's

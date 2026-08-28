@@ -52,6 +52,19 @@ type Record struct {
 	// happened.
 	FailoverFrom string
 	Error        string
+	// UpstreamStatus is the HTTP status the upstream returned on the final
+	// attempt. 0 means the upstream never answered: either the request was
+	// rejected before any upstream call, or the transport failed (see
+	// ErrorClass). Distinct from Status, which is what the client saw — a
+	// transport failure records Status 502 (router-generated) with
+	// UpstreamStatus 0.
+	UpstreamStatus int
+	// ErrorClass classifies how the final upstream attempt failed:
+	// "server_error" (5xx), "client_error" (4xx), "error_envelope" (an error
+	// object inside an HTTP 2xx — the 2026-08-27 Zen incident shape),
+	// "timeout", "connect", or "transport" (other transport-level failures).
+	// Empty for successes and for requests rejected before any upstream call.
+	ErrorClass string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

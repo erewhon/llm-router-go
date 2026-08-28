@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     role              TEXT,
     role_overflowed   INTEGER NOT NULL DEFAULT 0,
     failover_from     TEXT,
-    error             TEXT
+    error             TEXT,
+    upstream_status   INTEGER,
+    error_class       TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -61,6 +63,8 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"role", "ALTER TABLE router_requests ADD COLUMN role TEXT"},
 	{"role_overflowed", "ALTER TABLE router_requests ADD COLUMN role_overflowed INTEGER NOT NULL DEFAULT 0"},
 	{"failover_from", "ALTER TABLE router_requests ADD COLUMN failover_from TEXT"},
+	{"upstream_status", "ALTER TABLE router_requests ADD COLUMN upstream_status INTEGER"},
+	{"error_class", "ALTER TABLE router_requests ADD COLUMN error_class TEXT"},
 }
 
 const sqliteInsertSQL = `
@@ -69,8 +73,8 @@ INSERT INTO router_requests
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
-   role, role_overflowed, failover_from, error)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   role, role_overflowed, failover_from, error, upstream_status, error_class)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -191,6 +195,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.PrefixHashChain),
 		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
 		nullIfEmpty(rec.Error),
+		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

@@ -26,6 +26,7 @@ type routerMetrics struct {
 	modelAvailable *prometheus.GaugeVec
 	roleTarget     *prometheus.GaugeVec
 	failovers      *prometheus.CounterVec
+	upstream       *prometheus.CounterVec
 	handler        http.Handler
 }
 
@@ -102,6 +103,17 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 	}, []string{"role", "from", "to"})
 	reg.MustRegister(failovers)
 
+	// Upstream attempt outcomes — the incident-triage counter. Grouping by
+	// api_base separates "one model is broken" from "the whole endpoint is
+	// down" (the 2026-08-27 Zen question). Outcomes: success, client_error,
+	// server_error, error_envelope, timeout, connect, transport. Failed
+	// failover attempts count once each, against the model that failed.
+	upstream := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_upstream_requests_total",
+		Help: "Upstream attempts by resolved model, endpoint root (api_base), and outcome.",
+	}, []string{"model", "api_base", "outcome"})
+	reg.MustRegister(upstream)
+
 	return &routerMetrics{
 		reg:            reg,
 		requests:       requests,
@@ -110,6 +122,7 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 		modelAvailable: modelAvailable,
 		roleTarget:     roleTarget,
 		failovers:      failovers,
+		upstream:       upstream,
 		handler:        promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
 	}
 }
@@ -121,6 +134,20 @@ func (m *routerMetrics) ObserveFailover(role, from, to string) {
 		return
 	}
 	m.failovers.WithLabelValues(role, from, to).Inc()
+}
+
+// ObserveUpstream records one upstream attempt outcome directly — used for
+// failed failover attempts, which never become the reqlog record's final
+// attempt (Observe counts that one). class "" means success.
+func (m *routerMetrics) ObserveUpstream(model, apiBase, class string) {
+	if m == nil || model == "" {
+		return
+	}
+	outcome := class
+	if outcome == "" {
+		outcome = "success"
+	}
+	m.upstream.WithLabelValues(model, apiBase, outcome).Inc()
 }
 
 // SetAvailability republishes the availability and role-binding gauges. Called
@@ -235,6 +262,13 @@ func (m *routerMetrics) Observe(rec reqlog.Record) {
 	}
 	m.requests.WithLabelValues(rec.Path, model, apiClass, strconv.Itoa(rec.Status)).Inc()
 	m.duration.WithLabelValues(rec.Path, apiClass).Observe(float64(rec.LatencyMS) / 1000.0)
+	// One upstream-outcome sample for the record's final attempt, but only
+	// when an upstream was actually tried: UpstreamStatus > 0 means it
+	// answered, a non-empty ErrorClass with status 0 means transport failure.
+	// Requests rejected before forwarding (400/404/503) contribute nothing.
+	if rec.BackendURL != "" && (rec.UpstreamStatus > 0 || rec.ErrorClass != "") {
+		m.ObserveUpstream(model, rec.BackendURL, rec.ErrorClass)
+	}
 	if rec.PromptTokens != nil {
 		m.tokens.WithLabelValues("prompt", model, apiClass).Add(float64(*rec.PromptTokens))
 	}
