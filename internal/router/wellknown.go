@@ -140,10 +140,12 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 				Cost:  cost,
 			}
 		}
-		if len(m.Aliases) == 0 {
-			emit(id)
-			continue
-		}
+		// Canonical id AND aliases: since the 2026-08-28 normalization the
+		// canonical name is load-bearing (bare chain names like kimi-k3,
+		// provider ids like or/kimi-k3), so hiding it behind aliases would
+		// leave the catalog unable to name what reqlog and the dashboard
+		// report. Matches /v1/models, which lists both.
+		emit(id)
 		for _, a := range m.Aliases {
 			emit(a)
 		}
