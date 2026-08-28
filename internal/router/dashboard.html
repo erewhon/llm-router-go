@@ -911,7 +911,10 @@ function render(data) {
           const m = modelById[h.id];
           const up = m && (m.agent_state === 'running' || m.agent_state == null || isRouterModel(m));
           let hopCls = h.overflow ? 'role-hop-overflow' : (up ? 'role-hop-up' : 'role-hop-down');
-          if (h.id === r.target) hopCls = 'role-hop-active';
+          // A chain candidate serves via a provider entry, so the target reads
+          // "go/kimi-k2.7-code" while the hop is the chain name — match the
+          // provider-key suffix too so the active hop still lights up.
+          if (h.id === r.target || (r.target || '').endsWith('/' + h.id)) hopCls = 'role-hop-active';
           html += `<span class="role-hop ${hopCls}">${h.id}</span>`;
         }
         html += `</div>`;
