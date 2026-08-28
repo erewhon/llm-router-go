@@ -52,6 +52,15 @@
 
   /* Nodes */
   .nodes { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  /* The fleet tiles specifically use a grid, not the flex row: auto-fill
+     makes every tile the same width regardless of how many land on each row
+     (flex gave 4 narrow + 2 double-wide for 6 nodes), and the 300px floor
+     keeps a bar + value + sparkline on one line inside each tile. */
+  .node-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1rem; margin-bottom: 1rem;
+  }
   .node-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -61,6 +70,7 @@
     flex: 1 1 230px;
     overflow-wrap: anywhere;
   }
+  .node-grid .node-card { min-width: 0; }
   .node-card { cursor: pointer; transition: border-color 0.2s; }
   .node-card:hover { border-color: var(--accent); }
   .node-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -201,6 +211,31 @@
 
   .model-id { font-weight: 600; }
   .model-repo { font-size: 0.75rem; color: var(--text-dim); }
+
+  /* Model info card — the full repo path / weight file / quant used to sit
+     as extra lines under every model id, which made the table noisy. They
+     now live in a card that appears on hover over the model cell. */
+  .model-cell { position: relative; }
+  .model-cell .model-id { cursor: help; }
+  .model-info {
+    display: none; position: absolute; z-index: 20;
+    left: 0.5rem; top: calc(100% - 0.5rem);
+    background: var(--bg); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 0.6rem 0.8rem;
+    min-width: 280px; max-width: 440px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+    font-size: 0.75rem; line-height: 1.5;
+    overflow-wrap: anywhere; white-space: normal;
+  }
+  .model-cell:hover .model-info { display: block; }
+  /* The last rows would clip against the table's overflow:hidden — open up. */
+  tr:nth-last-child(-n+2) .model-info { top: auto; bottom: calc(100% - 0.5rem); }
+  .mi-row { display: flex; gap: 0.6rem; }
+  .mi-label {
+    flex-shrink: 0; width: 3.2rem; color: var(--text-dim);
+    font-size: 0.65rem; font-weight: 600; text-transform: uppercase;
+    padding-top: 0.15rem;
+  }
 
   .badge {
     display: inline-block;
@@ -469,8 +504,13 @@ async function pollMetrics() {
 }
 
 function sparklineSvg(vals, color) {
-  if (!vals || vals.length < 2) return '';
   const w = 48, h = 16;
+  // Always emit a fixed-size box: an empty placeholder until two samples
+  // exist, so the row doesn't reflow (layout shift) when history arrives.
+  if (!vals || vals.length < 2) {
+    return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"` +
+      ` style="vertical-align:middle"></svg>`;
+  }
   const coords = vals.map((v, i) => {
     const x = (i / (vals.length - 1)) * w;
     const y = h - (v / 100) * h;
@@ -572,22 +612,22 @@ const QUANT_PATTERNS = [
   ['nvfp4', 'NVFP4'], ['mxfp4', 'MXFP4'],
   ['fp8', 'FP8'], ['bf16', 'BF16'], ['fp16', 'FP16'],
   ['q8_0', 'Q8'], ['-q8', 'Q8'],
-  ['q6_k', 'Q6'], ['-q6', 'Q6'],
-  ['q5_k', 'Q5'], ['-q5', 'Q5'],
+  ['q6_k_xl', 'Q6_K_XL'], ['q6_k', 'Q6'], ['-q6', 'Q6'],
+  ['q5_k_xl', 'Q5_K_XL'], ['q5_k_m', 'Q5_K_M'], ['q5_k', 'Q5'], ['-q5', 'Q5'],
   ['q4_k_xl', 'Q4_K_XL'], ['q4_k_m', 'Q4_K_M'], ['q4_k_s', 'Q4_K_S'],
   ['gptq-int4', 'GPTQ-INT4'], ['q4_0', 'Q4'], ['-q4', 'Q4'],
   ['q3_k', 'Q3'], ['-q3', 'Q3'],
   ['awq', 'AWQ'], ['gptq', 'GPTQ'],
 ];
-function quantBadge(m) {
+function quantLabel(m) {
   const gguf = (m.gguf_file || '').toLowerCase();
   const repo = (m.hf_repo || '').split('#')[0].toLowerCase();
   const hay = [(m.tags || []).join(' '), gguf, repo].join(' ').toLowerCase();
   for (const [needle, label] of QUANT_PATTERNS) {
-    if (hay.includes(needle)) return ` <span class="badge badge-tag">${label}</span>`;
+    if (hay.includes(needle)) return label;
   }
   // Known to be a GGUF build but the specific quant isn't discoverable.
-  if (gguf || repo.endsWith('-gguf')) return ' <span class="badge badge-tag">GGUF</span>';
+  if (gguf || repo.endsWith('-gguf')) return 'GGUF';
   return '';
 }
 
@@ -885,7 +925,7 @@ function render(data) {
   }
 
   // Nodes
-  html += `<div class="section-title">Nodes</div><div class="nodes">`;
+  html += `<div class="section-title">Nodes</div><div class="node-grid">`;
   for (const [name, n] of Object.entries(nodes)) {
     const m = nm[name] || {};
     const reachable = m.reachable === true;
@@ -1046,19 +1086,22 @@ function render(data) {
   const cloudCount = models.filter(isCloudModel).length;
   html += `<div class="section-title">Models</div>`;
 
-  // Capability/tag filter chips
-  const capCounts = {}, tagCounts = {};
-  const showTags = ['tts','stt','image_gen','image_edit','music_gen','fim','gui_agent','embedding','reranker','thinking','zen'];
+  // Capability/tag filter chips. One merged count per label: a name that is
+  // both a capability and a tag on some model (image_gen) must not produce
+  // two identical chips. Providers (openrouter/zen/go), chain and paid are
+  // tags in models.yaml, so they filter with the same machinery.
+  const chipCounts = {};
+  const showTags = ['tts','stt','image_gen','image_edit','music_gen','fim','gui_agent','embedding','reranker','thinking','chain','paid','openrouter','zen','go'];
   for (const m of models) {
     if (m.enabled === false) continue;
-    for (const c of m.capabilities) { capCounts[c] = (capCounts[c] || 0) + 1; }
-    for (const t of m.tags) { if (showTags.includes(t)) tagCounts[t] = (tagCounts[t] || 0) + 1; }
+    const seen = new Set();
+    for (const c of m.capabilities) seen.add(c);
+    for (const t of (m.tags || [])) { if (showTags.includes(t)) seen.add(t); }
+    for (const k of seen) chipCounts[k] = (chipCounts[k] || 0) + 1;
   }
   const hasFilters = selectedNode || selectedCaps.size > 0;
-  const allChips = [
-    ...Object.entries(capCounts).map(([k,v]) => [k,v]),
-    ...Object.entries(tagCounts).map(([k,v]) => [k,v]),
-  ].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const allChips = Object.entries(chipCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   html += `<div class="filter-bar">`;
   for (const [label, n] of allChips) {
     const active = selectedCaps.has(label) ? ' active' : '';
@@ -1162,10 +1205,21 @@ function render(data) {
     }
 
     const classes = [isHidden ? 'disabled' : ''].filter(Boolean).join(' ');
+    // Hover info card: the identity detail (full repo, weight file, quant)
+    // that used to render as extra lines under every model id.
+    const quant = quantLabel(m);
+    const infoRows = [
+      ['repo', m.hf_repo.split('#')[0]],
+      ['file', m.gguf_file || ''],
+      ['quant', quant],
+    ].filter(([, v]) => v)
+     .map(([k, v]) => `<div class="mi-row"><span class="mi-label">${k}</span><span>${v}</span></div>`)
+     .join('');
+
     html += `<tr data-model="${m.id}" data-nodes="${nodeList}" data-caps="${capList}" data-tags="${tagList}"${isCloud ? ' data-cloud="1"' : ''}${classes ? ` class="${classes}"` : ''}${!visible ? ' style="display:none"' : ''}>
-      <td><div class="model-id">${m.id}</div><div class="model-repo">${m.hf_repo.split('#')[0]}</div>
-        ${m.gguf_file ? `<div class="model-repo">${m.gguf_file}</div>` : ''}</td>
-      <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span>${quantBadge(m)}</td>
+      <td class="model-cell"><div class="model-id">${m.id}</div>
+        <div class="model-info">${infoRows}</div></td>
+      <td><span class="badge ${modelType(m).badge}">${modelType(m).label}</span></td>
       <td>${nodeStr}</td>
       <td>${m.vram_gb ? m.vram_gb + ' GB' : '<span style="color:var(--text-dim)">—</span>'}</td>
       <td>${aliases || '<span style="color:var(--text-dim)">—</span>'}</td>
