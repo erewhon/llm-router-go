@@ -201,12 +201,15 @@ func (e *chainUnavailableError) Error() string {
 // declared order. The untried tail lands in Remaining so the failover retry
 // can advance without re-resolving.
 func (rt *Router) resolveChain(id string, m config.ModelDefinition, original string, forceDirect bool) (resolveResult, error) {
+	// Chain is stamped per entry (not just on the result) so the failover
+	// walk in nextRoleCandidate labels each hop from the entry itself — the
+	// same shape role resolution produces when it expands a chain candidate.
 	order := make([]roleCandidate, 0, len(m.Fallbacks)+1)
 	if !m.IsVirtual() {
-		order = append(order, roleCandidate{ModelID: id})
+		order = append(order, roleCandidate{ModelID: id, Chain: id})
 	}
 	for _, fid := range m.Fallbacks {
-		order = append(order, roleCandidate{ModelID: fid})
+		order = append(order, roleCandidate{ModelID: fid, Chain: id})
 	}
 
 	reasons := make([]string, 0, len(order))
@@ -225,7 +228,7 @@ func (rt *Router) resolveChain(id string, m config.ModelDefinition, original str
 			reasons = append(reasons, fmt.Sprintf("%s: %v", cand.ModelID, err))
 			continue
 		}
-		res.Chain = id
+		res.Chain = cand.Chain
 		res.Remaining = order[i+1:]
 		return res, nil
 	}

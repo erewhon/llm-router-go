@@ -401,3 +401,152 @@ func TestWellKnownIncludesRoles(t *testing.T) {
 		t.Errorf("well-known dropped the identity alias qwen3.6-local")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Roles whose candidates are fallback-chain entries (the coder-hard shape:
+// candidates [kimi, m3] where each is a virtual chain over provider entries).
+// Before expandChains, resolving such a role failed with "model is
+// multi-node": the chain entry has no node and no api_base of its own.
+// ---------------------------------------------------------------------------
+
+const roleChainYAML = `
+models:
+  go/kimi:
+    hf_repo: kimi-code
+    backend: external
+    api_base: https://go.example/v1
+    api_key: sk-literal-go
+    capabilities: [text, tool_calling]
+
+  or/kimi:
+    hf_repo: moonshotai/kimi-code
+    backend: external
+    api_base: https://or.example/v1
+    api_key: sk-literal-or
+    capabilities: [text, tool_calling]
+
+  kimi:
+    hf_repo: kimi-virtual
+    backend: external
+    fallbacks: [go/kimi, or/kimi]
+    capabilities: [text, tool_calling]
+
+  or/m3:
+    hf_repo: minimax/m3
+    backend: external
+    api_base: https://or.example/v1
+    api_key: sk-literal-or
+    capabilities: [text, tool_calling]
+
+  m3:
+    hf_repo: m3-virtual
+    backend: external
+    fallbacks: [or/m3]
+    capabilities: [text, tool_calling]
+
+roles:
+  coder-hard:
+    description: escalation target for hard coding tasks
+    require:
+      capabilities: [text, tool_calling]
+    candidates: [kimi, m3]
+    on_empty: error
+`
+
+func newRoleChainRouter(t *testing.T, down map[string]bool) (*Router, *stubAvailability) {
+	t.Helper()
+	reg, err := config.LoadBytes([]byte(roleChainYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if down == nil {
+		down = map[string]bool{}
+	}
+	avail := &stubAvailability{down: down}
+	return New(reg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAvailability(avail), WithFlushInterval(0)), avail
+}
+
+func TestRoleWithChainCandidatesResolvesToProvider(t *testing.T) {
+	rt, _ := newRoleChainRouter(t, nil)
+
+	res, err := rt.resolveModel("coder-hard", false)
+	if err != nil {
+		t.Fatalf("resolve coder-hard: %v", err)
+	}
+	if res.ModelID != "go/kimi" {
+		t.Errorf("resolved to %q, want go/kimi (first provider of first chain)", res.ModelID)
+	}
+	if res.Role != "coder-hard" {
+		t.Errorf("Role = %q, want coder-hard", res.Role)
+	}
+	if res.Chain != "kimi" {
+		t.Errorf("Chain = %q, want kimi (the chain the provider expanded from)", res.Chain)
+	}
+	// The untried tail crosses from kimi's remaining provider into m3's.
+	want := []roleCandidate{
+		{ModelID: "or/kimi", Chain: "kimi"},
+		{ModelID: "or/m3", Chain: "m3"},
+	}
+	if len(res.Remaining) != len(want) {
+		t.Fatalf("Remaining = %+v, want %+v", res.Remaining, want)
+	}
+	for i, w := range want {
+		if res.Remaining[i] != w {
+			t.Errorf("Remaining[%d] = %+v, want %+v", i, res.Remaining[i], w)
+		}
+	}
+}
+
+func TestRoleWithChainCandidatesFailsOverAcrossChains(t *testing.T) {
+	rt, _ := newRoleChainRouter(t, map[string]bool{"go/kimi": true, "or/kimi": true})
+
+	res, err := rt.resolveModel("coder-hard", false)
+	if err != nil {
+		t.Fatalf("resolve coder-hard: %v", err)
+	}
+	if res.ModelID != "or/m3" {
+		t.Errorf("resolved to %q, want or/m3 (second chain's provider)", res.ModelID)
+	}
+	if res.Chain != "m3" {
+		t.Errorf("Chain = %q, want m3 — the label must follow the serving chain", res.Chain)
+	}
+}
+
+func TestNextRoleCandidateRelabelsChainAcrossHops(t *testing.T) {
+	rt, _ := newRoleChainRouter(t, nil)
+
+	res, err := rt.resolveModel("coder-hard", false)
+	if err != nil {
+		t.Fatalf("resolve coder-hard: %v", err)
+	}
+	next, ok := rt.nextRoleCandidate(res, false)
+	if !ok || next.ModelID != "or/kimi" || next.Chain != "kimi" {
+		t.Fatalf("first hop = %+v ok=%v, want or/kimi under chain kimi", next, ok)
+	}
+	next2, ok := rt.nextRoleCandidate(next, false)
+	if !ok || next2.ModelID != "or/m3" || next2.Chain != "m3" {
+		t.Fatalf("second hop = %+v ok=%v, want or/m3 under chain m3", next2, ok)
+	}
+	if _, ok := rt.nextRoleCandidate(next2, false); ok {
+		t.Errorf("third hop should exhaust the tail")
+	}
+}
+
+func TestRoleBindingsReportChainBackedRoleAvailable(t *testing.T) {
+	rt, _ := newRoleChainRouter(t, nil)
+
+	for _, b := range rt.roleBindings() {
+		if b.Role != "coder-hard" {
+			continue
+		}
+		if !b.Available {
+			t.Fatalf("coder-hard unavailable, reasons: %v", b.Reasons)
+		}
+		if b.Target != "go/kimi" {
+			t.Errorf("target = %q, want go/kimi", b.Target)
+		}
+		return
+	}
+	t.Fatalf("coder-hard binding missing")
+}

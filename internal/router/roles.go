@@ -44,6 +44,12 @@ type roleCandidate struct {
 	// candidate list — it crossed the locality boundary deliberately, and
 	// callers surface that fact (header, log, reqlog) rather than hide it.
 	Overflow bool
+	// Chain names the fallback-chain entry this candidate belongs to: the
+	// chain's own key when the walk is a chain resolution, or the chain a
+	// role candidate expanded from. Empty for a plain model candidate. It
+	// rides into resolveResult.Chain so chain requests keep their 5xx-retry
+	// semantics even when the chain was reached through a role.
+	Chain string
 }
 
 // roleUnavailableError is returned when a role has nothing to route to. It
@@ -77,6 +83,31 @@ func roleOrder(rd config.RoleDefinition) []roleCandidate {
 	return out
 }
 
+// expandChains rewrites a preference order so that any candidate which is
+// itself a fallback-chain entry contributes its concrete providers in place.
+// A chain entry has no upstream of its own (virtual ones especially), so a
+// role that listed one — coder-hard's kimi-k2.7-code, say — must walk the
+// chain's providers rather than try to forward to the chain key itself.
+// Provider entries inherit the candidate's Overflow flag and carry the chain's
+// key so the served request is still labelled with the chain name.
+func (rt *Router) expandChains(order []roleCandidate) []roleCandidate {
+	out := make([]roleCandidate, 0, len(order))
+	for _, cand := range order {
+		m, known := rt.active[cand.ModelID]
+		if !known || len(m.Fallbacks) == 0 {
+			out = append(out, cand)
+			continue
+		}
+		if !m.IsVirtual() {
+			out = append(out, roleCandidate{ModelID: cand.ModelID, Overflow: cand.Overflow, Chain: cand.ModelID})
+		}
+		for _, fid := range m.Fallbacks {
+			out = append(out, roleCandidate{ModelID: fid, Overflow: cand.Overflow, Chain: cand.ModelID})
+		}
+	}
+	return out
+}
+
 // resolveRole binds a role name to a concrete model. It walks the preference
 // order and takes the first entry the tracker reports routable, recording the
 // untried tail so a mid-flight upstream failure can advance to the next one
@@ -87,7 +118,7 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveR
 		return resolveResult{}, fmt.Errorf("router: unknown role %q", name)
 	}
 
-	order := roleOrder(rd)
+	order := rt.expandChains(roleOrder(rd))
 	reasons := make([]string, 0, len(order))
 
 	for i, cand := range order {
@@ -107,6 +138,7 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveR
 			continue
 		}
 		res.Role = name
+		res.Chain = cand.Chain
 		res.Overflowed = cand.Overflow
 		res.Remaining = order[i+1:]
 		return res, nil
@@ -134,7 +166,10 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 			continue
 		}
 		next.Role = res.Role
-		next.Chain = res.Chain
+		// The candidate's own chain membership, not the failed target's: a
+		// role's tail can cross from one chain's providers into a plain
+		// candidate (or another chain), and the label must follow the entry.
+		next.Chain = cand.Chain
 		next.Overflowed = cand.Overflow
 		next.Remaining = res.Remaining[i+1:]
 		return next, true
