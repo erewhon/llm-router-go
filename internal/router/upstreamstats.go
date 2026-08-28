@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"sync"
@@ -44,6 +45,37 @@ func classifyTransportErr(err error) string {
 		return "connect"
 	}
 	return "transport"
+}
+
+// errUpstreamStatus marks a retryable upstream 5xx whose response the chain
+// failover path suppressed so the next provider could take the request. It
+// flows out of ModifyResponse through ReverseProxy's ErrorHandler into the
+// handleProxy retry loop.
+type errUpstreamStatus struct{ Status int }
+
+func (e *errUpstreamStatus) Error() string {
+	return fmt.Sprintf("upstream status %d", e.Status)
+}
+
+// errUpstreamEnvelope marks a suppressed error-envelope-in-2xx response —
+// the failure shape that looks like success until the body is read.
+var errUpstreamEnvelope = errors.New("upstream error envelope in 2xx")
+
+// classifyUpstreamErr extends classifyTransportErr with the chain-failover
+// sentinels, so a suppressed 5xx / envelope classifies the same way a
+// passed-through one would have.
+func classifyUpstreamErr(err error) string {
+	var es *errUpstreamStatus
+	if errors.As(err, &es) {
+		if es.Status >= 500 {
+			return "server_error"
+		}
+		return "client_error"
+	}
+	if errors.Is(err, errUpstreamEnvelope) {
+		return "error_envelope"
+	}
+	return classifyTransportErr(err)
 }
 
 // hasErrorEnvelope reports whether a JSON body carries a top-level non-null

@@ -40,6 +40,12 @@ type resolveResult struct {
 	// they named a model or alias directly. Only role-resolved requests fail
 	// over: an explicit model name stays explicit.
 	Role string
+	// Chain is the registry key of the fallback-chain entry the caller named
+	// (directly or via alias), empty otherwise. Chain requests fail over like
+	// roles, and additionally retry on upstream 5xx / error-envelope-in-2xx —
+	// a chain names one model across providers, so answering from the next
+	// provider keeps the caller's statement true.
+	Chain string
 	// Overflowed marks a role that ran out of in-contract candidates and fell
 	// through to its declared overflow list — surfaced to the caller rather
 	// than hidden, since it crossed the locality boundary.
@@ -82,12 +88,20 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 	want := strings.TrimPrefix(model, "openai/")
 
 	if id, m, ok := rt.lookupConcrete(want); ok {
+		if len(m.Fallbacks) > 0 {
+			return rt.resolveChain(id, m, model, forceDirect)
+		}
 		return rt.buildResult(id, m, "", model, forceDirect, "")
 	}
 	if _, isRole := rt.roles[want]; isRole {
 		return rt.resolveRole(want, model, forceDirect)
 	}
 	if id, m, alias, ok := rt.lookupAlias(want); ok {
+		if len(m.Fallbacks) > 0 {
+			// Alias of a chain entry resolves the chain. Per-alias overrides
+			// don't apply — chain members carry their own routing config.
+			return rt.resolveChain(id, m, model, forceDirect)
+		}
 		return rt.buildResult(id, m, alias, model, forceDirect, "")
 	}
 	// E2 model-egress aliases: "<base>-<egress>" where <base> resolves to a
@@ -165,6 +179,57 @@ func (rt *Router) resolveEgressBase(base, original, egress string) (resolveResul
 		return rt.buildResult(id, m, alias, original, false, egress)
 	}
 	return resolveResult{}, fmt.Errorf("router: unknown egress base %q", base)
+}
+
+// chainUnavailableError is returned when every provider in a fallback chain
+// is unroutable. Mirrors roleUnavailableError: 503 with per-provider reasons,
+// so "the name is wrong" stays distinguishable from "every provider is down".
+type chainUnavailableError struct {
+	Chain   string
+	Reasons []string
+}
+
+func (e *chainUnavailableError) Error() string {
+	if len(e.Reasons) == 0 {
+		return fmt.Sprintf("model %q has no providers routable in this mode", e.Chain)
+	}
+	return fmt.Sprintf("model %q has no available provider: %s", e.Chain, strings.Join(e.Reasons, "; "))
+}
+
+// resolveChain binds a fallback-chain entry to its first routable provider.
+// A non-virtual entry is its own first candidate; the fallbacks follow in
+// declared order. The untried tail lands in Remaining so the failover retry
+// can advance without re-resolving.
+func (rt *Router) resolveChain(id string, m config.ModelDefinition, original string, forceDirect bool) (resolveResult, error) {
+	order := make([]roleCandidate, 0, len(m.Fallbacks)+1)
+	if !m.IsVirtual() {
+		order = append(order, roleCandidate{ModelID: id})
+	}
+	for _, fid := range m.Fallbacks {
+		order = append(order, roleCandidate{ModelID: fid})
+	}
+
+	reasons := make([]string, 0, len(order))
+	for i, cand := range order {
+		cm, known := rt.active[cand.ModelID]
+		if !known {
+			reasons = append(reasons, fmt.Sprintf("%s: not routable in this mode", cand.ModelID))
+			continue
+		}
+		if !rt.avail.Routable(cand.ModelID) {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", cand.ModelID, rt.avail.Reason(cand.ModelID)))
+			continue
+		}
+		res, err := rt.buildResult(cand.ModelID, cm, "", original, forceDirect, "")
+		if err != nil {
+			reasons = append(reasons, fmt.Sprintf("%s: %v", cand.ModelID, err))
+			continue
+		}
+		res.Chain = id
+		res.Remaining = order[i+1:]
+		return res, nil
+	}
+	return resolveResult{}, &chainUnavailableError{Chain: id, Reasons: reasons}
 }
 
 // buildResult assembles the forwarding decision for a matched model.

@@ -134,6 +134,7 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 			continue
 		}
 		next.Role = res.Role
+		next.Chain = res.Chain
 		next.Overflowed = cand.Overflow
 		next.Remaining = res.Remaining[i+1:]
 		return next, true

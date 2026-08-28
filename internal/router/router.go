@@ -342,6 +342,15 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				http.Error(rec, errMsg, http.StatusServiceUnavailable)
 				return
 			}
+			// Same for a fallback chain whose every provider is down: the name
+			// exists, the fleet state is the problem.
+			var chainErr *chainUnavailableError
+			if errors.As(err, &chainErr) {
+				rt.logger.WarnContext(r.Context(), "chain unavailable",
+					"chain", chainErr.Chain, "reasons", chainErr.Reasons)
+				http.Error(rec, errMsg, http.StatusServiceUnavailable)
+				return
+			}
 			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
 			http.Error(rec, errMsg, http.StatusNotFound)
 			return
@@ -381,28 +390,39 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				"path", r.URL.Path,
 				"model", model, "backend_model", res.BackendModel,
 				"backend_url", res.BackendURL, "resolved_via", res.ModelID,
-				"role", res.Role, "overflowed", res.Overflowed,
+				"role", res.Role, "chain", res.Chain, "overflowed", res.Overflowed,
 				"via_tool_proxy", res.ViaToolProxy)
 
-			upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap)
+			// Chains also retry on upstream 5xx / error-envelope-in-2xx — but
+			// only while another provider could actually take the request. On
+			// the last viable candidate the response passes through untouched,
+			// so the client sees the provider's own error, not a synthetic 502.
+			suppressRetryable := false
+			if res.Chain != "" && rec.status == 0 && attempt < maxFailoverAttempts {
+				_, suppressRetryable = rt.nextRoleCandidate(res, forceDirect)
+			}
+
+			upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap, suppressRetryable)
 			if upstreamErr == nil {
 				rt.avail.ReportSuccess(res.ModelID)
 				return
 			}
 
-			// The upstream never answered. Tell the tracker — this is stronger
-			// evidence than a poll, which only proves the agent is alive.
+			// The upstream failed (never answered, or answered with a
+			// suppressed retryable failure). Tell the tracker — this is
+			// stronger evidence than a poll, which only proves the agent is
+			// alive.
 			rt.avail.ReportFailure(res.ModelID, upstreamErr)
 
 			// rec.status == 0 means not a single byte has reached the client,
 			// which is the only window in which retrying is honest rather than
 			// a corrupted response.
 			next, ok := resolveResult{}, false
-			if res.Role != "" && attempt < maxFailoverAttempts && rec.status == 0 {
+			if (res.Role != "" || res.Chain != "") && attempt < maxFailoverAttempts && rec.status == 0 {
 				next, ok = rt.nextRoleCandidate(res, forceDirect)
 			}
 			if !ok {
-				upstreamClass = classifyTransportErr(upstreamErr)
+				upstreamClass = classifyUpstreamErr(upstreamErr)
 				errMsg = "upstream: " + upstreamErr.Error()
 				if rec.status == 0 {
 					http.Error(rec, errMsg, http.StatusBadGateway)
@@ -411,11 +431,11 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			}
 
 			rt.logger.WarnContext(r.Context(), "failing over",
-				"role", res.Role, "from", res.ModelID, "to", next.ModelID, "err", upstreamErr)
-			rt.metrics.ObserveFailover(res.Role, res.ModelID, next.ModelID)
+				"role", res.Role, "chain", res.Chain, "from", res.ModelID, "to", next.ModelID, "err", upstreamErr)
+			rt.metrics.ObserveFailover(coalesce(res.Role, res.Chain), res.ModelID, next.ModelID)
 			// The failed attempt won't be the reqlog record's final attempt, so
 			// count it toward the failed candidate's upstream stats here.
-			class := classifyTransportErr(upstreamErr)
+			class := classifyUpstreamErr(upstreamErr)
 			rt.metrics.ObserveUpstream(res.ModelID, res.BackendURL, class)
 			rt.upstreamStats.record(res.ModelID, res.BackendURL, class, time.Now())
 			failoverFrom = res.ModelID
@@ -437,15 +457,28 @@ const maxFailoverAttempts = 2
 // request, and whether it had to cross the locality boundary to do it. Set
 // before forwarding so they survive the ReverseProxy writing its own headers.
 func (rt *Router) setRoleHeaders(w http.ResponseWriter, res resolveResult) {
-	if res.Role == "" {
+	if res.Role == "" && res.Chain == "" {
 		return
 	}
 	h := w.Header()
-	h.Set("X-Router-Role", res.Role)
+	if res.Role != "" {
+		h.Set("X-Router-Role", res.Role)
+	}
+	if res.Chain != "" {
+		h.Set("X-Router-Chain", res.Chain)
+	}
 	h.Set("X-Router-Resolved", res.ModelID)
 	if res.Overflowed {
 		h.Set("X-Router-Overflow", "true")
 	}
+}
+
+// coalesce returns the first non-empty string.
+func coalesce(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // reverseProxyTo forwards the request to backendRoot (a base URL with the
@@ -471,7 +504,14 @@ func (rt *Router) setRoleHeaders(w http.ResponseWriter, res resolveResult) {
 // arrives after bytes have already reached the client (a mid-stream copy
 // failure) the caller can see that via the recordingWriter's status and must
 // not retry.
-func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture) error {
+//
+// suppressRetryable, set by the chain-failover path when another provider
+// could still take the request, additionally converts a retryable upstream
+// failure — a 5xx status, or an error envelope inside a 2xx JSON body — into
+// an error return WITHOUT writing anything to the client, so the caller can
+// retry the next provider. Off (the default) preserves passthrough: whatever
+// the upstream said streams to the client.
+func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture, suppressRetryable bool) error {
 	target, err := url.Parse(backendRoot)
 	if err != nil {
 		http.Error(w, "bad backend URL: "+err.Error(), http.StatusInternalServerError)
@@ -501,6 +541,15 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 				return nil
 			}
 			cap.upstreamStatus = resp.StatusCode
+			if suppressRetryable && resp.StatusCode >= 500 {
+				// The next provider gets the request instead. Drain (bounded)
+				// so the connection can be reused, then surface the status as
+				// an error: ReverseProxy routes it to ErrorHandler, which
+				// writes nothing.
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+				_ = resp.Body.Close()
+				return &errUpstreamStatus{Status: resp.StatusCode}
+			}
 			ct := resp.Header.Get("Content-Type")
 			switch {
 			case contentTypeIsSSE(ct):
@@ -517,6 +566,12 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 				}
 				if err := resp.Body.Close(); err != nil {
 					return err
+				}
+				// An error envelope inside a 2xx is a failure wearing a
+				// success status (the 2026-08-27 Zen shape) — retry it like a
+				// 5xx while a next provider exists.
+				if suppressRetryable && resp.StatusCode < 300 && hasErrorEnvelope(buf) {
+					return errUpstreamEnvelope
 				}
 				cap.jsonBody = buf
 				resp.Body = io.NopCloser(bytes.NewReader(buf))

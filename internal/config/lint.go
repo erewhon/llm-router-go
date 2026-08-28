@@ -228,12 +228,24 @@ func (r *ModelRegistry) lintNameCollisions() []Diagnostic {
 	}
 	for repo, owners := range repoOwners {
 		enabled := 0
+		keyMatchesRepo := false
 		for _, o := range owners {
 			if o.enabled {
 				enabled++
 			}
+			if o.id == repo {
+				keyMatchesRepo = true
+			}
 		}
 		if enabled < 2 {
+			continue
+		}
+		// When one owner's registry KEY equals the shared repo string, exact
+		// key lookup wins before any hf_repo scan, so requests naming this
+		// string resolve deterministically. This is the normalized-external
+		// pattern: the bare chain entry (key kimi-k3, hf_repo kimi-k3) shares
+		// its hf_repo with zen/kimi-k3, by design.
+		if keyMatchesRepo {
 			continue
 		}
 		sort.Slice(owners, func(i, j int) bool { return owners[i].id < owners[j].id })

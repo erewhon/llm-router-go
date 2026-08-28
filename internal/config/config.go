@@ -208,6 +208,24 @@ type ModelDefinition struct {
 	APIClass             APIClass `yaml:"api_class,omitempty"`
 	InputCostPerMillion  *float64 `yaml:"input_cost_per_million,omitempty"`
 	OutputCostPerMillion *float64 `yaml:"output_cost_per_million,omitempty"`
+	// Fallbacks is an ordered chain of other registry models tried at request
+	// time when this model's upstream fails (5xx, timeout, connect error, or
+	// an error envelope inside a 2xx). An entry with its own backend serves
+	// itself first, then walks the chain; a "virtual" entry — fallbacks with
+	// no api_base/node/multi_node of its own — is purely a routing name for
+	// its chain. That is the bare-name provider-failover pattern:
+	//   kimi-k3: {fallbacks: [or/kimi-k3, zen/kimi-k3]}
+	// Chain members must be concrete models (no nested fallbacks) sharing the
+	// entry's api_class. Unlike roles, retry also triggers on an upstream 5xx
+	// or error-envelope-in-2xx, because provider chains exist precisely for
+	// the endpoint-serving-500s incident shape.
+	Fallbacks []string `yaml:"fallbacks,omitempty"`
+}
+
+// IsVirtual reports whether the entry is a pure routing name: a fallback
+// chain with no backend placement of its own.
+func (m ModelDefinition) IsVirtual() bool {
+	return len(m.Fallbacks) > 0 && m.APIBase == "" && m.Node == "" && m.MultiNode == nil
 }
 
 // UnmarshalYAML default-initialises Backend, Enabled, Capabilities, and
@@ -492,6 +510,14 @@ func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
 	if _, ok := validAPIClasses[m.APIClass]; !ok {
 		return fmt.Errorf("model %q: unknown api_class %q", id, m.APIClass)
 	}
+	if err := validateFallbacks(id, m, r); err != nil {
+		return err
+	}
+	// A virtual entry is exempt from placement rules: its chain members carry
+	// the real backends.
+	if m.IsVirtual() {
+		return nil
+	}
 	if m.Backend == BackendExternal {
 		if m.APIBase == "" {
 			return fmt.Errorf("model %q: external backend requires api_base", id)
@@ -522,6 +548,32 @@ func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
 		}
 	}
 	return nil
+}
+
+// validateFallbacks enforces the chain contract: members exist, are concrete
+// (no nested chains — which also rules out cycles), aren't the entry itself,
+// and share the entry's api_class so a chain can never answer with the wrong
+// endpoint family.
+func validateFallbacks(id string, m *ModelDefinition, r *ModelRegistry) error {
+	var errs []error
+	for _, fid := range m.Fallbacks {
+		if fid == id {
+			errs = append(errs, fmt.Errorf("model %q: fallback names itself", id))
+			continue
+		}
+		fm, ok := r.Models[fid]
+		if !ok {
+			errs = append(errs, fmt.Errorf("model %q: fallback %q is not a known model", id, fid))
+			continue
+		}
+		if len(fm.Fallbacks) > 0 {
+			errs = append(errs, fmt.Errorf("model %q: fallback %q has fallbacks of its own; chains must be flat", id, fid))
+		}
+		if fm.APIClass != m.APIClass {
+			errs = append(errs, fmt.Errorf("model %q: fallback %q has api_class %q, chain requires %q", id, fid, fm.APIClass, m.APIClass))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // GetNode returns the node definition for a single-node model.

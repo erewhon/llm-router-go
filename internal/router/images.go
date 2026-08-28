@@ -118,7 +118,7 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 			"model", model, "backend_model", res.BackendModel,
 			"backend_url", res.BackendURL, "resolved_via", res.ModelID)
 
-		upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, body, res.AuthBearer, res.AuthHeader, cap)
+		upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, body, res.AuthBearer, res.AuthHeader, cap, false)
 		if upstreamErr == nil {
 			rt.avail.ReportSuccess(res.ModelID)
 			return
