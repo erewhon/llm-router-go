@@ -124,6 +124,14 @@ models:
     api_base: http://delphi.local:5402
     api_class: image_edit
     aliases: [image-edit]
+
+  # tts model (Orpheus, OpenAI /v1/audio/speech shape)
+  orpheus-tts:
+    hf_repo: orpheus-3b-0.1-ft
+    backend: external
+    api_base: http://pythia.local:5397/v1
+    api_class: tts
+    aliases: [tts, speak]
 `
 
 func testRegistry(t *testing.T) *config.ModelRegistry {

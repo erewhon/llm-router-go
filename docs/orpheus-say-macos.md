@@ -9,10 +9,11 @@ download hits Hugging Face).
 > **Apple Silicon only** — mlx-audio uses Apple's MLX framework; Intel Macs
 > won't work.
 >
-> `orpheus-say` talks to this server **directly**, not through the llm-router:
-> the router proxies chat/embeddings/rerank only, not `/v1/audio/speech`. On a
-> laptop the router (chat: Bedrock / LM Studio) and this Orpheus server run side
-> by side on different ports.
+> `orpheus-say` talks to this server **directly**, not through the llm-router.
+> (The router does proxy `/v1/audio/speech` to whatever `api_class: tts` entry
+> is in its `models.yaml`, but a laptop router typically has none.) On a laptop
+> the router (chat: Bedrock / LM Studio) and this Orpheus server run side by
+> side on different ports.
 
 ## 1. Install
 

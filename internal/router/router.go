@@ -200,6 +200,10 @@ func (rt *Router) Handler() http.Handler {
 	// Generations is JSON; edits is multipart/form-data — see images.go.
 	mux.HandleFunc("POST /v1/images/generations", rt.handleProxy(config.APIClassImageGen, true))
 	mux.HandleFunc("POST /v1/images/edits", rt.handleProxyMultipart(config.APIClassImageEdit))
+	// TTS passthrough (Orpheus, OpenAI /v1/audio/speech shape). The response
+	// is raw audio (audio/wav); ModifyResponse leaves non-JSON, non-SSE
+	// bodies untouched, so it streams through with no usage capture.
+	mux.HandleFunc("POST /v1/audio/speech", rt.handleProxy(config.APIClassTTS, true))
 
 	// Anthropic Messages passthrough — registered only when an
 	// api_class:anthropic target is configured. Both paths bypass the
