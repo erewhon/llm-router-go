@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -47,5 +50,50 @@ func TestSplitSentences(t *testing.T) {
 
 	if g := splitSentences("   "); g != nil {
 		t.Errorf("blank input should yield nil, got %v", g)
+	}
+}
+
+func TestSynthSendsBearerWhenKeySet(t *testing.T) {
+	var gotAuth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+		w.Header().Set("Content-Type", "audio/wav")
+		_, _ = w.Write([]byte("RIFF"))
+	}))
+	defer srv.Close()
+
+	c := &client{base: srv.URL, voice: "tara", model: "orpheus", apiKey: "sk-test", http: srv.Client()}
+	wav, err := c.synth(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("synth: %v", err)
+	}
+	if string(wav) != "RIFF" {
+		t.Errorf("wav = %q", wav)
+	}
+	if gotPath != "/v1/audio/speech" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q, want Bearer sk-test", gotAuth)
+	}
+
+	c.apiKey = ""
+	if _, err := c.synth(context.Background(), "hi"); err != nil {
+		t.Fatalf("synth without key: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("Authorization sent with empty key: %q", gotAuth)
+	}
+}
+
+func TestSynthUnauthorizedHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c := &client{base: srv.URL, http: srv.Client()}
+	_, err := c.synth(context.Background(), "hi")
+	if err == nil || !strings.Contains(err.Error(), "LLM_ROUTER_API_KEY") {
+		t.Errorf("want hint naming LLM_ROUTER_API_KEY, got %v", err)
 	}
 }

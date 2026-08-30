@@ -1,8 +1,9 @@
 // Command orpheus-say is a tiny command-line text-to-speech client for Orpheus.
 //
-// It sends text to an OpenAI-compatible /v1/audio/speech endpoint — the fleet's
-// orpheus-fastapi, or a local mlx-audio server on a Mac — and plays the returned
-// WAV on the system's default audio output. Works on macOS (afplay) and Linux
+// It sends text to an OpenAI-compatible /v1/audio/speech endpoint — by default
+// the fleet's llm-router front door (which proxies to Orpheus), or a local
+// mlx-audio server on a Mac — and plays the returned WAV on the system's
+// default audio output. Works on macOS (afplay) and Linux
 // (paplay/ffplay/play/aplay).
 //
 //	orpheus-say "Hello there"
@@ -35,9 +36,13 @@ import (
 var version = "dev"
 
 const (
-	// defaultURL is the fleet orpheus-fastapi (hypatia). Override with --url or
-	// $ORPHEUS_URL — e.g. a local `mlx_audio.server` on a Mac (:8000).
-	defaultURL   = "http://192.168.42.52:5397"
+	// defaultURL is the llm-router front door: the OVN LB VIP in front of the
+	// llm-router1/2 replicas, which proxies /v1/audio/speech to the fleet's
+	// Orpheus. It requires a bearer token (--api-key / $ORPHEUS_API_KEY /
+	// $LLM_ROUTER_API_KEY). Override with --url or $ORPHEUS_URL — e.g. Orpheus
+	// directly (pythia :5397, no auth) or a local `mlx_audio.server` on a Mac
+	// (:8000).
+	defaultURL   = "http://192.168.11.24:4010"
 	defaultVoice = "tara"
 	defaultModel = "orpheus"
 	// maxChunkBytes bounds a single synth request; longer sentences are split.
@@ -52,6 +57,7 @@ func run(args []string) int {
 		url     = fs.String("url", envOr("ORPHEUS_URL", defaultURL), "Orpheus base URL serving /v1/audio/speech ($ORPHEUS_URL)")
 		voice   = fs.String("voice", envOr("ORPHEUS_VOICE", defaultVoice), "voice ($ORPHEUS_VOICE)")
 		model   = fs.String("model", envOr("ORPHEUS_MODEL", defaultModel), "model name ($ORPHEUS_MODEL)")
+		apiKey  = fs.String("api-key", envOr("ORPHEUS_API_KEY", os.Getenv("LLM_ROUTER_API_KEY")), "bearer token for the router ($ORPHEUS_API_KEY, then $LLM_ROUTER_API_KEY)")
 		out     = fs.String("out", "", "write WAV to this file instead of playing")
 		player  = fs.String("player", os.Getenv("ORPHEUS_PLAYER"), "audio player command; the file path is appended ($ORPHEUS_PLAYER)")
 		noChunk = fs.Bool("no-chunk", false, "send all text in one request instead of splitting into sentences")
@@ -69,6 +75,10 @@ Examples:
   echo "the sky is blue" | orpheus-say
   orpheus-say --voice leo --out /tmp/a.wav "save, don't play"
   ORPHEUS_URL=http://localhost:8000 orpheus-say "use a local mlx server"
+
+The default URL is the llm-router front door, which needs a bearer token:
+set $LLM_ROUTER_API_KEY (or $ORPHEUS_API_KEY / --api-key). Servers reached
+directly (orpheus-fastapi, mlx-audio) ignore the token.
 
 Flags:
 `)
@@ -96,10 +106,11 @@ Flags:
 	defer stop()
 
 	c := &client{
-		base:  normalizeBase(*url),
-		voice: *voice,
-		model: *model,
-		http:  &http.Client{Timeout: *timeout},
+		base:   normalizeBase(*url),
+		voice:  *voice,
+		model:  *model,
+		apiKey: *apiKey,
+		http:   &http.Client{Timeout: *timeout},
 	}
 
 	// --out: synth the whole text once and write it, no playback.
@@ -189,10 +200,11 @@ Flags:
 
 // client speaks the OpenAI /v1/audio/speech protocol.
 type client struct {
-	base  string // base URL with any /v1 suffix stripped
-	voice string
-	model string
-	http  *http.Client
+	base   string // base URL with any /v1 suffix stripped
+	voice  string
+	model  string
+	apiKey string // sent as a bearer when non-empty
+	http   *http.Client
 }
 
 func (c *client) synth(ctx context.Context, text string) ([]byte, error) {
@@ -209,6 +221,9 @@ func (c *client) synth(ctx context.Context, text string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request to %s: %w", c.base, err)
@@ -222,6 +237,9 @@ func (c *client) synth(ctx context.Context, text string) ([]byte, error) {
 		snippet := strings.TrimSpace(string(data))
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "…"
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("orpheus %s returned %s: %s (set --api-key, $ORPHEUS_API_KEY or $LLM_ROUTER_API_KEY)", c.base, resp.Status, snippet)
 		}
 		return nil, fmt.Errorf("orpheus %s returned %s: %s", c.base, resp.Status, snippet)
 	}
