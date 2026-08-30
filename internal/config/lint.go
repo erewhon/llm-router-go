@@ -74,7 +74,6 @@ const (
 // fails the build if the two lists drift.
 var ToolProxyRouteCategories = []string{
 	"coder",
-	"coder-fim",
 	"thinker",
 	"research",
 	"vision",

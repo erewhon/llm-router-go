@@ -270,9 +270,13 @@ func TestLintRoleEmptyInMode(t *testing.T) {
 	if d.Subject != "coder-fim" {
 		t.Errorf("subject = %q, want coder-fim", d.Subject)
 	}
-	// The auto-router still advertises the category, so it must also fire.
-	if hasCode(diags, LintRouteCategoryUnresolved) == nil {
-		t.Error("a dead role that is also a route category must trip route-category-unresolvable")
+	// coder-fim is no longer an auto-router category (dropped 2026-08-30), so
+	// a dead coder-fim role is a config smell but NOT a routing hole: nothing
+	// classifies into it any more, so route-category-unresolvable must stay
+	// quiet. (It still fires for a dead role that IS a category — see
+	// TestLintRouteCategoriesAllResolveOnCleanFixture's inverse cases.)
+	if d := hasCode(diags, LintRouteCategoryUnresolved); d != nil {
+		t.Errorf("route-category-unresolvable fired for %q, which is not a route category", d.Subject)
 	}
 }
 

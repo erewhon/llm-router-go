@@ -47,7 +47,7 @@ ExecStart=/usr/local/bin/llm-router-go-tool-proxy \
     --max-tool-rounds=12 \
     --embed-url=http://192.168.42.240:5404 \
     --embed-model=qwen3-embedding-4b \
-    --litellm-url=http://127.0.0.1:4010
+    --litellm-url=http://192.168.11.24:4010
 
 # LITELLM_KEY (a valid ROUTER_API_KEY) lets the auto-router's redirect
 # authenticate to the Go router on :4010. TAVILY_API_KEY is unset (no key

@@ -47,7 +47,7 @@ func run(args []string) int {
 		embedURL       = fs.String("embed-url", "http://192.168.42.240:5404", "embedding backend URL for the auto-router")
 		embedModel     = fs.String("embed-model", "qwen3-embedding-4b", "embedding model served by --embed-url")
 		embedTimeout   = fs.Duration("embed-timeout", 5*time.Second, "timeout for auto-router embedding requests")
-		litellmURL     = fs.String("litellm-url", "http://euclid.local:4010", "LiteLLM URL the auto-router redirects resolved aliases to")
+		litellmURL     = fs.String("litellm-url", "http://192.168.11.24:4010", "router URL the auto-router redirects resolved aliases to (default: the ovn0 LB VIP; euclid.local:4010 has been dead since the router moved off euclid)")
 		litellmKey     = fs.String("litellm-key", "sk-litellm-master", "LiteLLM bearer key (falls back to LITELLM_KEY env)")
 
 		// Live availability, mirrored from the router's /v1/availability, so

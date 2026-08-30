@@ -150,7 +150,7 @@ func isValidUTF8(s string) bool {
 // ---------------------------------------------------------------------------
 // Classify with a fake embedding backend
 //
-// embedVec maps text → a 5-dim basis vector by substring rules; the category
+// embedVec maps text → a 4-dim basis vector by substring rules; the category
 // descriptions and the test prompts both run through it, so similarity is
 // deterministic. Rule order matters: more specific categories are checked
 // before "code" (the coder description also contains "code").
@@ -160,15 +160,13 @@ func embedVec(text string) []float64 {
 	l := strings.ToLower(text)
 	switch {
 	case strings.Contains(l, "image") || strings.Contains(l, "screenshot") || strings.Contains(l, "photo"):
-		return []float64{0, 0, 0, 0, 1} // vision
-	case strings.Contains(l, "fill in the middle") || strings.Contains(l, "completion") || strings.Contains(l, "autocomplete"):
-		return []float64{0, 1, 0, 0, 0} // coder-fim
+		return []float64{0, 0, 0, 1} // vision
 	case strings.Contains(l, "explain") || strings.Contains(l, "analyze") || strings.Contains(l, "tradeoffs"):
-		return []float64{0, 0, 1, 0, 0} // thinker
+		return []float64{0, 1, 0, 0} // thinker
 	case strings.Contains(l, "search") || strings.Contains(l, "news") || strings.Contains(l, "current information"):
-		return []float64{0, 0, 0, 1, 0} // research
+		return []float64{0, 0, 1, 0} // research
 	default:
-		return []float64{1, 0, 0, 0, 0} // coder (default)
+		return []float64{1, 0, 0, 0} // coder (default)
 	}
 }
 
@@ -223,7 +221,6 @@ func TestAutoRouter_ClassifyBaseCategories(t *testing.T) {
 		"please write some code to sort a list": "coder",
 		"explain the tradeoffs between A and B": "thinker",
 		"search the web for the latest news":    "research",
-		"autocomplete this for me":              "coder-fim",
 	}
 	for prompt, want := range cases {
 		if got := ar.Classify(context.Background(), userMessages(prompt), TierAuto); got != want {
@@ -285,7 +282,7 @@ func TestAutoRouter_UnavailableCategoryNotSelected(t *testing.T) {
 	srv := newFakeEmbedServer(t)
 	defer srv.Close()
 	// research is unroutable — its models are powered down.
-	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "vision": true}
+	active := map[string]bool{"coder": true, "thinker": true, "vision": true}
 	ar := newTestAutoRouter(t, srv.URL, active)
 
 	// Every category is embedded regardless of availability: embeddings are
@@ -343,7 +340,7 @@ func TestAutoRouter_NoRoutableFuncMeansEverythingRoutable(t *testing.T) {
 func TestAutoRouter_ImageWithVisionDownDegrades(t *testing.T) {
 	srv := newFakeEmbedServer(t)
 	defer srv.Close()
-	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "research": true}
+	active := map[string]bool{"coder": true, "thinker": true, "research": true}
 	ar := newTestAutoRouter(t, srv.URL, active)
 
 	msgs := []any{map[string]any{
@@ -363,7 +360,7 @@ func TestAutoRouter_TieredUpgradeSkippedWhenTargetDown(t *testing.T) {
 	srv := newFakeEmbedServer(t)
 	defer srv.Close()
 	// coder-hard is the free-tier escalation target and it is down.
-	active := map[string]bool{"coder": true, "coder-fim": true, "thinker": true, "vision": true, "research": true}
+	active := map[string]bool{"coder": true, "thinker": true, "vision": true, "research": true}
 	ar := newTestAutoRouter(t, srv.URL, active)
 
 	got := ar.Classify(context.Background(), userMessages(complexCoderPrompt), TierFree)

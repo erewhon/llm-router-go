@@ -8,7 +8,7 @@ package toolproxy
 //
 // Port of src/llm_router/tool_proxy/auto_router.py. Three coding-focused
 // complexity tiers:
-//   - auto:      coder (default) / coder-fim / thinker / research / vision
+//   - auto:      coder (default) / thinker / research / vision
 //   - auto-free: + coder-hard upgrade for hard coding tasks
 //   - auto-full: + claude-opus-4-6 for very hard coding tasks
 
@@ -55,15 +55,18 @@ type routeCategory struct {
 	desc  string
 }
 
-// routeCategories and their descriptions are copied verbatim from the Python
-// ROUTE_CATEGORIES so the embeddings — and thus routing decisions — match the
-// production classifier.
+// routeCategories and their descriptions were copied verbatim from the Python
+// ROUTE_CATEGORIES so the embeddings — and thus routing decisions — matched
+// the production classifier. This is now the only classifier: the Python
+// tool proxy was retired 2026-08-30.
+//
+// coder-fim was dropped 2026-08-30: no FIM model has been seated in default
+// mode for months (the validator flagged the role as empty and the category
+// as unresolvable), so a prompt classified there 404'd instead of getting
+// the coder it would otherwise have received.
 var routeCategories = []routeCategory{
 	{"coder", "Write code, debug, fix bugs, refactor, implement features, " +
 		"programming, software development, functions, classes, algorithms"},
-	{"coder-fim", "Fill in the middle, code completion, complete this function, " +
-		"autocomplete, insert code here, fill the gap, tab completion, " +
-		"inline completion, suggestion, predict next tokens"},
 	{"thinker", "Explain in depth, analyze, reason about, compare tradeoffs, " +
 		"plan architecture, think through, complex analysis, strategy"},
 	{"research", "Search the web, find current information, latest news, " +
