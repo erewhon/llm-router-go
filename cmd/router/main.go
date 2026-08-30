@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/erewhon/llm-router-go/internal/auth"
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/health"
 	"github.com/erewhon/llm-router-go/internal/httpx"
@@ -91,6 +92,19 @@ func run(args []string) int {
 		dashboardAddr = fs.String("dashboard-addr", "127.0.0.1:4011", "listen address for the dashboard; carries NO bearer auth, so keep it on loopback unless fronted by your own auth")
 		dashboardURL  = fs.String("dashboard-public-url", "", "public OpenAI-compatible base URL shown in the dashboard's Connection card (e.g. https://llm.bcc.sh); empty derives http://localhost:<port> from --addr")
 
+		// Personal access tokens. --pat-db points at the SQLite token store;
+		// empty means PATs are off and only --api-keys shared keys are
+		// accepted. Unlike --reqlog (which soft-fails to a NopSink), a
+		// configured store that cannot be opened is FATAL: a router told to
+		// check tokens must never quietly serve without checking them.
+		patDB      = fs.String("pat-db", "", "path to the personal-access-token SQLite store; empty disables PATs (shared --api-keys only)")
+		patMint    = fs.Bool("pat-mint", false, "mint a PAT into --pat-db and exit; requires --pat-user")
+		patList    = fs.Bool("pat-list", false, "list PATs in --pat-db and exit")
+		patRevoke  = fs.String("pat-revoke", "", "revoke the PAT with this id in --pat-db and exit")
+		patUser    = fs.String("pat-user", "", "with --pat-mint: the principal the token belongs to; with --pat-list: filter to one principal")
+		patLabel   = fs.String("pat-label", "", "with --pat-mint: a human label for the token (e.g. 'laptop', 'background-agent')")
+		patExpires = fs.Duration("pat-expires", 0, "with --pat-mint: lifetime (e.g. 720h); zero means no expiry")
+
 		showVer = fs.Bool("version", false, "print version and exit")
 
 		// --validate: check --models-yaml and exit without serving. See
@@ -125,6 +139,21 @@ func run(args []string) int {
 			block:  parseBlockList(*validateBlock),
 			stdout: os.Stdout,
 			stderr: os.Stderr,
+		})
+	}
+	// PAT admin modes, dispatched here for the same reason as --validate:
+	// they print to stdout and exit without serving.
+	if *patMint || *patList || *patRevoke != "" {
+		return runPATAdmin(patAdminOpts{
+			dbPath:  *patDB,
+			mint:    *patMint,
+			list:    *patList,
+			revoke:  *patRevoke,
+			user:    *patUser,
+			label:   *patLabel,
+			expires: *patExpires,
+			stdout:  os.Stdout,
+			stderr:  os.Stderr,
 		})
 	}
 
@@ -253,10 +282,30 @@ func run(args []string) int {
 		}
 	}
 	authKeys := splitCSV(apiKeysSrc)
-	if len(authKeys) == 0 {
-		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys or $ROUTER_API_KEYS to enable")
-	} else {
-		logger.Info("API key auth enabled", "keys", len(authKeys), "source", apiKeysFrom)
+
+	// Token store. FATAL on failure, unlike every other optional subsystem
+	// here: --pat-db is an explicit instruction to authenticate callers, and
+	// falling back to "serve anyway" would silently drop the control the
+	// operator asked for. reqlog soft-fails because losing accounting is not
+	// dangerous; losing authentication is.
+	var patStore *auth.Store
+	if *patDB != "" {
+		st, err := auth.OpenStore(*patDB)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fatal: --pat-db %s: %v\n", *patDB, err)
+			return 1
+		}
+		defer st.Close()
+		patStore = st
+		logger.Info("PAT auth enabled", "store", st.Path())
+	}
+
+	switch {
+	case patStore == nil && len(authKeys) == 0:
+		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys, $ROUTER_API_KEYS or --pat-db to enable")
+	case len(authKeys) > 0:
+		logger.Info("shared-key auth enabled", "keys", len(authKeys), "source", apiKeysFrom,
+			"note", "legacy shared keys are attributed as legacy:<fingerprint> in reqlog")
 	}
 	// /health, /metrics, /.well-known/opencode are always exempt; the Anthropic
 	// passthrough is too — it carries the caller's own credentials, which the
@@ -268,7 +317,7 @@ func run(args []string) int {
 		httpx.RequestID,
 		httpx.AccessLog(logger),
 		httpx.Recover(logger),
-		router.RequireBearer(authKeys, authExempt),
+		router.NewAuthenticator(patStore, authKeys, authExempt, logger).Middleware(),
 	)
 	srv := &http.Server{
 		Addr:              *addr,

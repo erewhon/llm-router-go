@@ -64,6 +64,11 @@ CREATE INDEX IF NOT EXISTS router_requests_role_idx ON router_requests (role) WH
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_status SMALLINT;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS error_class TEXT;
 CREATE INDEX IF NOT EXISTS router_requests_error_class_idx ON router_requests (error_class) WHERE error_class IS NOT NULL;
+
+-- Migrations for tables created before per-user attribution (idempotent).
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS principal TEXT;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS token_id TEXT;
+CREATE INDEX IF NOT EXISTS router_requests_principal_idx ON router_requests (principal) WHERE principal IS NOT NULL;
 `
 
 const insertSQL = `
@@ -72,9 +77,10 @@ INSERT INTO router_requests
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
-   role, role_overflowed, failover_from, error, upstream_status, error_class)
+   role, role_overflowed, failover_from, error, upstream_status, error_class,
+   principal, token_id)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -177,6 +183,7 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
 		nullIfEmpty(rec.Error),
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
+		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

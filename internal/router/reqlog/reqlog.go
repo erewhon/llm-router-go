@@ -65,6 +65,16 @@ type Record struct {
 	// "timeout", "connect", or "transport" (other transport-level failures).
 	// Empty for successes and for requests rejected before any upstream call.
 	ErrorClass string
+	// Principal is the authenticated caller this request is billed to: a PAT
+	// principal ("steven"), or "legacy:<fingerprint>" for a pre-PAT shared
+	// key. Empty means the request carried no identity — an auth-exempt path
+	// (/health, the Anthropic passthrough) or a router running with auth
+	// disabled. Empty is "unattributed", never "trusted".
+	Principal string
+	// TokenID is the public id half of the credential that authenticated the
+	// request. It is what you revoke, and it is safe to store: the secret
+	// half never reaches this struct. Empty whenever Principal is.
+	TokenID string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

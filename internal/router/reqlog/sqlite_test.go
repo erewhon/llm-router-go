@@ -169,3 +169,94 @@ CREATE TABLE router_requests (
 		t.Errorf("migrated columns wrong: cc=%v cr=%v chain=%v", cc2, cr2, chain)
 	}
 }
+
+// Attribution columns must land on a table created by an older binary, not
+// just on a fresh one. CREATE TABLE IF NOT EXISTS is a no-op against an
+// existing table, so without the migration entries the insert would fail in
+// production while passing every fresh-DB test.
+func TestSQLiteSink_MigratesAttributionColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preexisting.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A table with every column up to (but not including) attribution.
+	const preAttribution = `
+CREATE TABLE router_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, ts TEXT NOT NULL,
+    method TEXT NOT NULL, path TEXT NOT NULL, model TEXT NOT NULL,
+    backend_model TEXT, backend_url TEXT, resolved_via TEXT, api_class TEXT,
+    via_tool_proxy INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+    cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER,
+    prefix_hash_chain TEXT, role TEXT, role_overflowed INTEGER NOT NULL DEFAULT 0,
+    failover_from TEXT, error TEXT, upstream_status INTEGER, error_class TEXT);`
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(preAttribution); err != nil {
+		t.Fatalf("create pre-attribution schema: %v", err)
+	}
+	seed.Close()
+
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite (migrate): %v", err)
+	}
+	sink.Log(Record{
+		Method: "POST", Path: "/v1/chat/completions", Model: "qwen3.6-hypatia",
+		Status: 200, LatencyMS: 12,
+		Principal: "steven", TokenID: "676c01e81d96",
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+
+	var principal, tokenID *string
+	if err := db.QueryRow(
+		`SELECT principal, token_id FROM router_requests WHERE model = ?`, "qwen3.6-hypatia",
+	).Scan(&principal, &tokenID); err != nil {
+		t.Fatalf("query migrated row: %v", err)
+	}
+	if principal == nil || *principal != "steven" {
+		t.Errorf("principal = %v, want steven", principal)
+	}
+	if tokenID == nil || *tokenID != "676c01e81d96" {
+		t.Errorf("token_id = %v, want 676c01e81d96", tokenID)
+	}
+}
+
+// An unattributed request (auth-exempt path, or auth disabled) must store SQL
+// NULL rather than "", so usage queries can tell "nobody" from "someone with
+// an empty name" without a special case.
+func TestSQLiteSink_UnattributedStoresNull(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "null.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite: %v", err)
+	}
+	sink.Log(Record{Method: "GET", Path: "/health", Model: "none", Status: 200, LatencyMS: 1})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM router_requests WHERE principal IS NULL AND token_id IS NULL`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rows with NULL attribution = %d, want 1", n)
+	}
+}

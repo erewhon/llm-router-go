@@ -2,52 +2,134 @@ package router
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/erewhon/llm-router-go/internal/auth"
 )
 
-// RequireBearer returns a middleware that gates requests behind an
-// `Authorization: Bearer <key>` header. Paths in exempt bypass auth
-// entirely (typically /health, /metrics, /.well-known/opencode — they're
-// either probes that must always work, or the discovery endpoint that
-// clients use to learn the key in the first place).
+// Authenticator gates /v1/* behind a bearer credential and resolves it to an
+// identity, so a request can be attributed to a person rather than merely
+// admitted.
 //
-// If keys is empty (or contains only blanks), the middleware is a
-// no-op. This keeps local development ergonomic; the operator opts in
-// to auth by passing --api-keys.
-func RequireBearer(keys []string, exempt []string) func(http.Handler) http.Handler {
-	keySet := make(map[string]struct{}, len(keys))
+// Two credential kinds are accepted concurrently, and that overlap is the
+// whole migration plan:
+//
+//   - Personal access tokens ("pat_..."), looked up in the token store.
+//   - Legacy shared keys from --api-keys / $ROUTER_API_KEYS, which resolve to
+//     a synthetic "legacy:<fingerprint>" principal.
+//
+// Legacy keys stay first-class until their traffic reaches zero in reqlog.
+// Attributing them (rather than leaving them anonymous) is what makes that
+// moment observable instead of a guess.
+type Authenticator struct {
+	store  *auth.Store
+	keys   map[string]struct{}
+	exempt map[string]struct{}
+	logger *slog.Logger
+}
+
+// NewAuthenticator builds the middleware. store may be nil (no PATs
+// configured); keys may be empty (no legacy shared keys).
+func NewAuthenticator(store *auth.Store, keys, exempt []string, logger *slog.Logger) *Authenticator {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	a := &Authenticator{
+		store:  store,
+		keys:   make(map[string]struct{}, len(keys)),
+		exempt: make(map[string]struct{}, len(exempt)),
+		logger: logger,
+	}
 	for _, k := range keys {
 		if k = strings.TrimSpace(k); k != "" {
-			keySet[k] = struct{}{}
+			a.keys[k] = struct{}{}
 		}
 	}
-	exemptSet := make(map[string]struct{}, len(exempt))
 	for _, p := range exempt {
-		exemptSet[p] = struct{}{}
+		a.exempt[p] = struct{}{}
 	}
+	return a
+}
+
+// Enabled reports whether any credential source is configured. When nothing
+// is, the middleware is a no-op — local development stays frictionless and
+// the operator opts in, exactly as the pre-PAT behaviour did.
+func (a *Authenticator) Enabled() bool { return a.store != nil || len(a.keys) > 0 }
+
+// Middleware returns the http middleware.
+func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		if len(keySet) == 0 {
+		if !a.Enabled() {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, ok := exemptSet[r.URL.Path]; ok {
+			if _, ok := a.exempt[r.URL.Path]; ok {
 				next.ServeHTTP(w, r)
 				return
 			}
 			const prefix = "Bearer "
-			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, prefix) {
+			hdr := r.Header.Get("Authorization")
+			if !strings.HasPrefix(hdr, prefix) {
 				writeAuthError(w, "missing bearer token")
 				return
 			}
-			if _, ok := keySet[auth[len(prefix):]]; !ok {
+			bearer := hdr[len(prefix):]
+
+			id, err := a.resolve(bearer)
+			if err != nil {
+				// One opaque message to the caller regardless of cause; the
+				// specific reason goes to the log, where the operator can see
+				// it and the caller cannot use it as an oracle.
+				a.logger.Info("auth rejected",
+					"path", r.URL.Path, "reason", err.Error(), "token_id", safeTokenID(bearer))
 				writeAuthError(w, "invalid api key")
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
 		})
 	}
+}
+
+// resolve turns a bearer value into an identity. PAT-shaped credentials are
+// only ever checked against the store, and shared keys only against the key
+// set: a mistyped PAT must not fall through to "invalid api key" via the
+// legacy path, or the operator debugging it gets a misleading answer.
+func (a *Authenticator) resolve(bearer string) (auth.Identity, error) {
+	if auth.LooksLikePAT(bearer) {
+		if a.store == nil {
+			return auth.Identity{}, errors.New("pat presented but no token store configured")
+		}
+		return a.store.Verify(bearer)
+	}
+	if _, ok := a.keys[bearer]; ok {
+		return auth.LegacyIdentity(bearer), nil
+	}
+	return auth.Identity{}, auth.ErrUnknown
+}
+
+// safeTokenID extracts the public id half of a PAT for logging. It returns ""
+// for anything else — a shared key has no loggable half, and logging a
+// fingerprint of a rejected credential would be a slow way to leak a
+// dictionary of near-misses.
+func safeTokenID(bearer string) string {
+	if !auth.LooksLikePAT(bearer) {
+		return ""
+	}
+	id, _, err := auth.Split(bearer)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+// RequireBearer is the pre-PAT constructor: shared keys only, no identity
+// store. Retained so callers and tests that predate personal access tokens
+// keep working unchanged.
+func RequireBearer(keys []string, exempt []string) func(http.Handler) http.Handler {
+	return NewAuthenticator(nil, keys, exempt, slog.New(slog.DiscardHandler)).Middleware()
 }
 
 func writeAuthError(w http.ResponseWriter, msg string) {

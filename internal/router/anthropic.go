@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erewhon/llm-router-go/internal/auth"
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/router/reqlog"
@@ -77,6 +78,11 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 				PrefixHashChain: chain,
 				Error:           errMsg,
 			}
+			// Nearly always empty: the Anthropic passthrough is auth-exempt
+			// (it forwards the caller's own upstream credentials), so these
+			// requests are unattributed by design. Populated anyway so the
+			// exemption is the only reason they ever lack a principal.
+			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
 			u := cap.usage
 			lr.PromptTokens = u.input
 			lr.CompletionTokens = u.output

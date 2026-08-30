@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erewhon/llm-router-go/internal/auth"
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/router/reqlog"
@@ -58,6 +59,7 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 				Stream:    cap.isSSE,
 				Error:     errMsg,
 			}
+			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
 			if resolved != nil {
 				lr.BackendModel = resolved.BackendModel
 				lr.BackendURL = resolved.BackendURL

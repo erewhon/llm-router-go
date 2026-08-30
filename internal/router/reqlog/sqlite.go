@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     failover_from     TEXT,
     error             TEXT,
     upstream_status   INTEGER,
-    error_class       TEXT
+    error_class       TEXT,
+    principal         TEXT,
+    token_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -65,7 +67,19 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"failover_from", "ALTER TABLE router_requests ADD COLUMN failover_from TEXT"},
 	{"upstream_status", "ALTER TABLE router_requests ADD COLUMN upstream_status INTEGER"},
 	{"error_class", "ALTER TABLE router_requests ADD COLUMN error_class TEXT"},
+	{"principal", "ALTER TABLE router_requests ADD COLUMN principal TEXT"},
+	{"token_id", "ALTER TABLE router_requests ADD COLUMN token_id TEXT"},
 }
+
+// sqlitePostMigrateSQL runs AFTER migrateSQLite, never inside
+// SQLiteSchemaSQL. An index over a migrated column cannot be created on the
+// boot path: against a table made by an older binary the column does not
+// exist yet, and SQLite fails the whole bootstrap rather than skipping the
+// statement — which takes the sink down on exactly the upgrade path the
+// migration exists to support.
+const sqlitePostMigrateSQL = `
+CREATE INDEX IF NOT EXISTS router_requests_principal_idx ON router_requests (principal);
+`
 
 const sqliteInsertSQL = `
 INSERT INTO router_requests
@@ -73,8 +87,9 @@ INSERT INTO router_requests
    api_class, via_tool_proxy, stream, status, latency_ms,
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
-   role, role_overflowed, failover_from, error, upstream_status, error_class)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   role, role_overflowed, failover_from, error, upstream_status, error_class,
+   principal, token_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -125,6 +140,10 @@ func NewSQLite(path string, logger *slog.Logger) (*SQLiteSink, error) {
 	if err := migrateSQLite(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("reqlog: migrate schema: %w", err)
+	}
+	if _, err := db.Exec(sqlitePostMigrateSQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("reqlog: post-migrate indexes: %w", err)
 	}
 	stmt, err := db.Prepare(sqliteInsertSQL)
 	if err != nil {
@@ -196,6 +215,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.Role), rec.RoleOverflowed, nullIfEmpty(rec.FailoverFrom),
 		nullIfEmpty(rec.Error),
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
+		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

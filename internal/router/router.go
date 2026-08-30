@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/erewhon/llm-router-go/internal/auth"
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/httpx"
 	"github.com/erewhon/llm-router-go/internal/router/reqlog"
@@ -272,6 +273,9 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				Stream:    cap.isSSE,
 				Error:     errMsg,
 			}
+			// Attribution. Empty on auth-exempt paths and on a router running
+			// without auth; empty means unattributed, not trusted.
+			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
 			if resolved != nil {
 				lr.BackendModel = resolved.BackendModel
 				lr.BackendURL = resolved.BackendURL
