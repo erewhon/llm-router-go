@@ -220,6 +220,21 @@ type ModelDefinition struct {
 	// or error-envelope-in-2xx, because provider chains exist precisely for
 	// the endpoint-serving-500s incident shape.
 	Fallbacks []string `yaml:"fallbacks,omitempty"`
+	// ContextLength is the usable context window in tokens AS SERVED — the
+	// engine's configured limit (llama-server --ctx-size per slot, vLLM
+	// --max-model-len, Atlas --max-seq-len, a cloud provider's published
+	// window), not the checkpoint's native maximum. Surfaced to clients via
+	// /.well-known/opencode as limit.context. When unset the well-known
+	// falls back to vllm_args.max_model_len, then a chain entry's first
+	// provider, then the endpoint default.
+	ContextLength int `yaml:"context_length,omitempty"`
+	// MaxOutputTokens is the largest single completion the model is meant
+	// to produce (the vendor's published output cap, or for local engines
+	// the vendor-recommended generation length — the engine itself only
+	// bounds output by remaining context). Surfaced as limit.output in
+	// /.well-known/opencode; unset falls back to a chain's first provider,
+	// then the endpoint default (32768).
+	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
 }
 
 // IsVirtual reports whether the entry is a pure routing name: a fallback

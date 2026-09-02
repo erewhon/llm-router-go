@@ -133,10 +133,12 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 				Output: derefFloat(m.OutputCostPerMillion),
 			}
 		}
+		mctx := rt.wellKnownContext(m, ctxLimit)
+		mout := rt.wellKnownOutput(m, outLimit)
 		emit := func(name string) {
 			models[name] = wellKnownModel{
 				Name:  name,
-				Limit: wellKnownLimit{Context: ctxLimit, Output: outLimit},
+				Limit: wellKnownLimit{Context: mctx, Output: mout},
 				Cost:  cost,
 			}
 		}
@@ -160,6 +162,7 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 			continue
 		}
 		var cost *wellKnownCost
+		rctx, rout := ctxLimit, outLimit
 		if len(rd.Candidates) > 0 {
 			if m, ok := rt.active[rd.Candidates[0]]; ok {
 				if m.APIClass != config.APIClassChat {
@@ -171,11 +174,13 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 						Output: derefFloat(m.OutputCostPerMillion),
 					}
 				}
+				rctx = rt.wellKnownContext(m, ctxLimit)
+				rout = rt.wellKnownOutput(m, outLimit)
 			}
 		}
 		models[name] = wellKnownModel{
 			Name:  name,
-			Limit: wellKnownLimit{Context: ctxLimit, Output: outLimit},
+			Limit: wellKnownLimit{Context: rctx, Output: rout},
 			Cost:  cost,
 		}
 	}
@@ -227,6 +232,49 @@ func (rt *Router) handleWellKnown(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(rt.buildWellKnown()); err != nil {
 		rt.logger.ErrorContext(r.Context(), "well-known encode failed", "err", err)
 	}
+}
+
+// wellKnownContext resolves the context window advertised for a model:
+// an explicit context_length wins, then vllm_args.max_model_len (the
+// engine flag the node agent actually passes), then — for a virtual chain
+// entry — the first provider in its chain, and finally the endpoint
+// default. Chains are one level deep by config validation, so the
+// recursion terminates at the provider entry.
+func (rt *Router) wellKnownContext(m config.ModelDefinition, def int) int {
+	if m.ContextLength > 0 {
+		return m.ContextLength
+	}
+	if m.VllmArgs.MaxModelLen > 0 {
+		return m.VllmArgs.MaxModelLen
+	}
+	if m.IsVirtual() {
+		if first, ok := rt.active[m.Fallbacks[0]]; ok {
+			if first.ContextLength > 0 {
+				return first.ContextLength
+			}
+			if first.VllmArgs.MaxModelLen > 0 {
+				return first.VllmArgs.MaxModelLen
+			}
+		}
+	}
+	return def
+}
+
+// wellKnownOutput resolves the advertised output cap: an explicit
+// max_output_tokens, then — for a virtual chain entry — the first provider's,
+// then the endpoint default. Note OpenCode itself clamps the max_tokens it
+// sends to min(limit.output, 32000); larger values still drive its thinking
+// budget and cost display, so publish the real cap.
+func (rt *Router) wellKnownOutput(m config.ModelDefinition, def int) int {
+	if m.MaxOutputTokens > 0 {
+		return m.MaxOutputTokens
+	}
+	if m.IsVirtual() {
+		if first, ok := rt.active[m.Fallbacks[0]]; ok && first.MaxOutputTokens > 0 {
+			return first.MaxOutputTokens
+		}
+	}
+	return def
 }
 
 func derefFloat(p *float64) float64 {

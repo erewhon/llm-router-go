@@ -282,3 +282,65 @@ func keysOf[M ~map[string]V, V any](m M) []string {
 	}
 	return out
 }
+
+func TestWellKnown_ContextPerModel(t *testing.T) {
+	const yaml = `
+nodes:
+  n1: {host: n1.local, gpu: nvidia, vram_gb: 80}
+models:
+  explicit:
+    hf_repo: x/explicit
+    backend: external
+    api_base: https://api.example/v1
+    context_length: 1048576
+    max_output_tokens: 128000
+    aliases: [big]
+  vllm-len:
+    hf_repo: x/vllm
+    backend: vllm
+    node: n1
+    vllm_args: {max_model_len: 262144}
+  chain:
+    fallbacks: [explicit, vllm-len]
+  plain:
+    hf_repo: x/plain
+    backend: external
+    api_base: https://api.example/v1
+roles:
+  coder:
+    candidates: [vllm-len, plain]
+`
+	reg, err := config.LoadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	rt := New(reg, nil, WithWellKnown(WellKnownConfig{
+		ProviderID: "llm", ProviderName: "LLM Router", BaseURL: "https://llm/v1",
+	}))
+	var resp wellKnownResp
+	if err := json.Unmarshal(getWellKnown(t, rt).Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	models := resp.Provider()["llm"].Models
+	want := map[string][2]int{ // {context, output}
+		"explicit": {1048576, 128000}, // explicit context_length / max_output_tokens
+		"big":      {1048576, 128000}, // alias shares both
+		"vllm-len": {262144, 32768},   // ctx from vllm_args.max_model_len; output default
+		"chain":    {1048576, 128000}, // virtual chain -> first provider for both
+		"plain":    {131072, 32768},   // nothing set -> endpoint defaults
+		"coder":    {262144, 32768},   // role -> first candidate
+	}
+	for name, w := range want {
+		m, ok := models[name]
+		if !ok {
+			t.Errorf("%s missing from well-known", name)
+			continue
+		}
+		if m.Limit.Context != w[0] {
+			t.Errorf("%s context = %d, want %d", name, m.Limit.Context, w[0])
+		}
+		if m.Limit.Output != w[1] {
+			t.Errorf("%s output = %d, want %d", name, m.Limit.Output, w[1])
+		}
+	}
+}
