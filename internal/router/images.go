@@ -97,7 +97,9 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 		}
 		modelIn = model
 
-		res, err := rt.resolveModel(model, true)
+		// 0 disables the context gate: image models declare no envelope, and
+		// the multipart body's size is dominated by pixels, not prompt.
+		res, err := rt.resolveModel(model, true, 0)
 		if err != nil {
 			errMsg = err.Error()
 			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)

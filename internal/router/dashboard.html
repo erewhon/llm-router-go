@@ -601,6 +601,12 @@ function fmtUptime(s) {
 }
 
 // Quantization badge. Evidence order: explicit tags (author-supplied, most
+// fmtCtx renders a token window the way it is spoken: 131072 -> "131k".
+function fmtCtx(n) {
+  if (!n) return '';
+  return n >= 1000 ? `${Math.round(n / 1024)}k` : String(n);
+}
+
 // reliable) -> gguf_file name -> hf_repo string. Returns '' when nothing
 // matches: an unknown quant must render as nothing, never as a guess. The old
 // logic fell back to FP16 for every backend=="vllm" model, which mislabelled
@@ -1211,10 +1217,18 @@ function render(data) {
     // Hover info card: the identity detail (full repo, weight file, quant)
     // that used to render as extra lines under every model id.
     const quant = quantLabel(m);
+    // context: "131k" alone, or "131k (good to 32k)" when the seat declares a
+    // narrower envelope — the pair is the whole point, so never show one half.
+    const ctxLabel = (() => {
+      if (!m.context_length) return '';
+      const win = fmtCtx(m.context_length);
+      return m.effective_context ? `${win} (good to ${fmtCtx(m.effective_context)})` : win;
+    })();
     const infoRows = [
       ['repo', m.hf_repo.split('#')[0]],
       ['file', m.gguf_file || ''],
       ['quant', quant],
+      ['context', ctxLabel],
     ].filter(([, v]) => v)
      .map(([k, v]) => `<div class="mi-row"><span class="mi-label">${k}</span><span>${v}</span></div>`)
      .join('');

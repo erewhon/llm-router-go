@@ -165,7 +165,7 @@ models:
 func TestChainResolvesToFirstProvider(t *testing.T) {
 	rt := newChainRouter(t, nil)
 	for _, name := range []string{"k3", "k3-alias"} {
-		res, err := rt.resolveModel(name, false)
+		res, err := rt.resolveModel(name, false, 0)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -183,7 +183,7 @@ func TestChainResolvesToFirstProvider(t *testing.T) {
 
 func TestChainSelfFirstEntryIsOwnPrimary(t *testing.T) {
 	rt := newChainRouter(t, nil)
-	res, err := rt.resolveModel("self-first", false)
+	res, err := rt.resolveModel("self-first", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func (downAvail) ReportSuccess(string)        {}
 
 func TestChainSkipsUnroutableProvider(t *testing.T) {
 	rt := newChainRouter(t, nil, WithAvailability(downAvail{down: map[string]bool{"or/k3": true}}))
-	res, err := rt.resolveModel("k3", false)
+	res, err := rt.resolveModel("k3", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

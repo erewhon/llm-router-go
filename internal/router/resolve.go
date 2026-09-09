@@ -53,6 +53,18 @@ type resolveResult struct {
 	// Remaining is the untried tail of the role's preference order, consumed
 	// by the failover retry when the chosen upstream fails to answer.
 	Remaining []roleCandidate
+	// PromptTokens is the estimated size of the request that produced this
+	// result, carried so the failover walk gates its candidates the same way
+	// the first pass did. Zero on every path that must not gate: a directly
+	// named model or chain (naming a model bypasses roles) and the
+	// introspection endpoints, which resolve with no request in hand.
+	PromptTokens int
+	// Downshift names the candidate the context envelope passed over, when
+	// the role landed somewhere other than its first choice because of size.
+	// Empty otherwise. Surfaced as X-Router-Downshift: because the soft gate
+	// BINDS, this header and the availability reason are the only way a
+	// caller learns their preferred seat was skipped.
+	Downshift string
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in
@@ -77,7 +89,13 @@ type resolveResult struct {
 // tool proxy doesn't implement (/v1/completions, /v1/embeddings, /v1/rerank)
 // so the request goes straight to the node backend regardless of the model's
 // tool_proxy flag or per-alias override. /v1/chat/completions passes false.
-func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, error) {
+//
+// promptTokens is the estimated size of the request, used to skip role
+// candidates the request is too large for (see envelope.go). Pass 0 to
+// disable that gate — which every caller without a request body in hand
+// should do, and which is also the right value for endpoints where roles
+// carry no size-dependent quality difference.
+func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int) (resolveResult, error) {
 	if rt.registry == nil {
 		return resolveResult{}, fmt.Errorf("router: nil registry")
 	}
@@ -94,7 +112,7 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 		return rt.buildResult(id, m, "", model, forceDirect, "")
 	}
 	if _, isRole := rt.roles[want]; isRole {
-		return rt.resolveRole(want, model, forceDirect)
+		return rt.resolveRole(want, model, forceDirect, promptTokens)
 	}
 	if id, m, alias, ok := rt.lookupAlias(want); ok {
 		if len(m.Fallbacks) > 0 {
@@ -108,7 +126,7 @@ func (rt *Router) resolveModel(model string, forceDirect bool) (resolveResult, e
 	// tool-proxy model — forward <base> and pass the suffix to the tool proxy
 	// as X-Egress. Only for chat (tool-proxy) requests, never forceDirect ones.
 	if !forceDirect {
-		if res, ok := rt.resolveEgressAlias(want, model); ok {
+		if res, ok := rt.resolveEgressAlias(want, model, promptTokens); ok {
 			return res, nil
 		}
 	}
@@ -148,10 +166,10 @@ func (rt *Router) lookupAlias(want string) (string, config.ModelDefinition, stri
 // "nemotron-3-super-se", wins over a shorter accidental match), accepting the
 // first base that routes through the tool proxy; the remainder is the egress
 // spec. Returns ok=false if no resolvable tool-proxy base is found.
-func (rt *Router) resolveEgressAlias(want, original string) (resolveResult, bool) {
+func (rt *Router) resolveEgressAlias(want, original string, promptTokens int) (resolveResult, bool) {
 	for i := strings.LastIndex(want, "-"); i > 0; i = strings.LastIndex(want[:i], "-") {
 		base, egress := want[:i], want[i+1:]
-		res, err := rt.resolveEgressBase(base, original, egress)
+		res, err := rt.resolveEgressBase(base, original, egress, promptTokens)
 		if err != nil || !res.ViaToolProxy {
 			continue // base isn't tool-proxy-routed; an egress suffix is meaningless
 		}
@@ -163,12 +181,12 @@ func (rt *Router) resolveEgressAlias(want, original string) (resolveResult, bool
 // resolveEgressBase resolves the base half of a "<base>-<egress>" name using
 // the same precedence as resolveModel, so "research-se" works whether
 // "research" is a model, an alias, or a role.
-func (rt *Router) resolveEgressBase(base, original, egress string) (resolveResult, error) {
+func (rt *Router) resolveEgressBase(base, original, egress string, promptTokens int) (resolveResult, error) {
 	if id, m, ok := rt.lookupConcrete(base); ok {
 		return rt.buildResult(id, m, "", original, false, egress)
 	}
 	if _, isRole := rt.roles[base]; isRole {
-		res, err := rt.resolveRole(base, original, false)
+		res, err := rt.resolveRole(base, original, false, promptTokens)
 		if err != nil {
 			return resolveResult{}, err
 		}

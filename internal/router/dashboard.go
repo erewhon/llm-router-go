@@ -260,6 +260,11 @@ type dashModel struct {
 	AvgTokPerS      *float64 `json:"avg_tok_per_s"`
 	TotalRequests   int      `json:"total_requests"`
 	GGUFFile        string   `json:"gguf_file"`
+	// ContextLength is the window as served; EffectiveContext is the window
+	// within which the seat is actually worth routing to. They travel together
+	// because either one alone invites the wrong reading. Zero means unset.
+	ContextLength    int `json:"context_length"`
+	EffectiveContext int `json:"effective_context"`
 }
 
 func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +361,10 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 			AvgTokPerS:      avgTok,
 			TotalRequests:   reqs.TotalRequests,
 			GGUFFile:        m.GGUFFile,
+			// The advertised window, resolved the same way the well-known
+			// resolves it, so the dashboard and /.well-known never disagree.
+			ContextLength:    rt.wellKnownContext(m, 0),
+			EffectiveContext: m.EffectiveContext,
 		})
 	}
 

@@ -235,6 +235,20 @@ type ModelDefinition struct {
 	// /.well-known/opencode; unset falls back to a chain's first provider,
 	// then the endpoint default (32768).
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
+	// EffectiveContext is the window within which this placement is actually
+	// worth routing to, as opposed to ContextLength, which is the window it
+	// will accept. The two differ whenever a seat degrades long before it
+	// refuses: Lightning serves a 256K slot but decodes at ~6 t/s past 64K,
+	// and gemma4-26b errors on every probe past its 32K working range.
+	//
+	// Consumed by role resolution as a SOFT gate — a candidate whose envelope
+	// the request exceeds is skipped exactly like an unavailable one, and the
+	// role's on_empty decides what happens if that empties the list. It never
+	// applies to a directly named model or chain: naming a model is a
+	// statement about that model (see the top of models.yaml).
+	//
+	// Unset means no envelope, i.e. the behaviour that predates the field.
+	EffectiveContext int `yaml:"effective_context,omitempty"`
 }
 
 // IsVirtual reports whether the entry is a pure routing name: a fallback
@@ -527,6 +541,13 @@ func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
 	}
 	if err := validateFallbacks(id, m, r); err != nil {
 		return err
+	}
+	// An envelope wider than the window it sits inside is always a typo: the
+	// soft gate could never fire before the hard one did, so the field would
+	// silently do nothing. Fail at load rather than at 2am.
+	if m.EffectiveContext > 0 && m.ContextLength > 0 && m.EffectiveContext > m.ContextLength {
+		return fmt.Errorf("model %q: effective_context %d exceeds context_length %d",
+			id, m.EffectiveContext, m.ContextLength)
 	}
 	// A virtual entry is exempt from placement rules: its chain members carry
 	// the real backends.

@@ -19,7 +19,7 @@ func TestResolveModel_EgressAlias(t *testing.T) {
 		{"research-any", "nemotron-3-super", "any"},        // random
 	}
 	for _, c := range cases {
-		res, err := rt.resolveModel(c.model, false)
+		res, err := rt.resolveModel(c.model, false, 0)
 		if err != nil {
 			t.Errorf("resolveModel(%q): %v", c.model, err)
 			continue
@@ -31,19 +31,19 @@ func TestResolveModel_EgressAlias(t *testing.T) {
 	}
 
 	// A non-tool-proxy base must NOT become an egress alias (coder routes direct).
-	if _, err := rt.resolveModel("coder-se", false); err == nil {
+	if _, err := rt.resolveModel("coder-se", false, 0); err == nil {
 		t.Error("coder-se: expected unknown-model error (coder isn't tool_proxy)")
 	}
 	// forceDirect endpoints (/v1/embeddings etc.) must not do egress-alias resolution.
-	if _, err := rt.resolveModel("research-se", true); err == nil {
+	if _, err := rt.resolveModel("research-se", true, 0); err == nil {
 		t.Error("research-se with forceDirect: expected unknown-model error")
 	}
 	// A plain bogus model still errors.
-	if _, err := rt.resolveModel("totally-bogus", false); err == nil {
+	if _, err := rt.resolveModel("totally-bogus", false, 0); err == nil {
 		t.Error("totally-bogus: expected unknown-model error")
 	}
 	// A plain known model is unaffected (no egress).
-	if res, err := rt.resolveModel("research", false); err != nil || res.Egress != "" {
+	if res, err := rt.resolveModel("research", false, 0); err != nil || res.Egress != "" {
 		t.Errorf("research: egress=%q err=%v; want empty egress, no error", res.Egress, err)
 	}
 }

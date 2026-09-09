@@ -336,7 +336,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		}
 		modelIn = model
 
-		res, err := rt.resolveModel(model, forceDirect)
+		// Size the request before resolving: role candidates whose context
+		// envelope this exceeds get skipped in the walk (see envelope.go).
+		// The whole body is the input, tool definitions and transcript
+		// included — an agent loop's last message says nothing about its size.
+		promptTokens := estimatePromptTokens(body)
+
+		res, err := rt.resolveModel(model, forceDirect, promptTokens)
 		if err != nil {
 			errMsg = err.Error()
 			// A role that resolved to nothing is a fleet-state problem, not a
@@ -346,7 +352,8 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			var roleErr *roleUnavailableError
 			if errors.As(err, &roleErr) {
 				rt.logger.WarnContext(r.Context(), "role unavailable",
-					"role", roleErr.Role, "reasons", roleErr.Reasons)
+					"role", roleErr.Role, "reasons", roleErr.Reasons,
+					"prompt_tokens_est", promptTokens)
 				http.Error(rec, errMsg, http.StatusServiceUnavailable)
 				return
 			}
@@ -399,7 +406,8 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				"model", model, "backend_model", res.BackendModel,
 				"backend_url", res.BackendURL, "resolved_via", res.ModelID,
 				"role", res.Role, "chain", res.Chain, "overflowed", res.Overflowed,
-				"via_tool_proxy", res.ViaToolProxy)
+				"via_tool_proxy", res.ViaToolProxy,
+				"prompt_tokens_est", res.PromptTokens, "downshift_from", res.Downshift)
 
 			// Chains also retry on upstream 5xx / error-envelope-in-2xx — but
 			// only while another provider could actually take the request. On
@@ -478,6 +486,12 @@ func (rt *Router) setRoleHeaders(w http.ResponseWriter, res resolveResult) {
 	h.Set("X-Router-Resolved", res.ModelID)
 	if res.Overflowed {
 		h.Set("X-Router-Overflow", "true")
+	}
+	// The soft gate binds, so a caller who asked for a role and got something
+	// other than its first choice has no other way to find out. Never silent —
+	// same principle as X-Router-Overflow.
+	if res.Downshift != "" {
+		h.Set("X-Router-Downshift", fmt.Sprintf("%s -> %s (context)", res.Downshift, res.ModelID))
 	}
 }
 
@@ -667,7 +681,7 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		e := entry{ID: name, Object: "model", OwnedBy: "role", Role: true}
-		if res, err := rt.resolveRole(name, name, false); err == nil {
+		if res, err := rt.resolveRole(name, name, false, 0); err == nil {
 			e.APIClass = res.APIClass
 		} else if len(rt.roles[name].Candidates) > 0 {
 			// Nothing available right now: still advertise the role (it will

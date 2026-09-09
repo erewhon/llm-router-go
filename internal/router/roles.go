@@ -112,7 +112,7 @@ func (rt *Router) expandChains(order []roleCandidate) []roleCandidate {
 // order and takes the first entry the tracker reports routable, recording the
 // untried tail so a mid-flight upstream failure can advance to the next one
 // without re-resolving from scratch.
-func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveResult, error) {
+func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTokens int) (resolveResult, error) {
 	rd, ok := rt.roles[name]
 	if !ok {
 		return resolveResult{}, fmt.Errorf("router: unknown role %q", name)
@@ -120,6 +120,9 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveR
 
 	order := rt.expandChains(roleOrder(rd))
 	reasons := make([]string, 0, len(order))
+	// gatedOut remembers the first candidate the envelope skipped, so a
+	// result that lands further down the order can name what it passed over.
+	gatedOut := ""
 
 	for i, cand := range order {
 		m, known := rt.active[cand.ModelID]
@@ -132,6 +135,17 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveR
 			reasons = append(reasons, fmt.Sprintf("%s: %s", cand.ModelID, rt.avail.Reason(cand.ModelID)))
 			continue
 		}
+		// The envelope check sits after availability on purpose: "it is down"
+		// is the more useful thing to report about a candidate that is both
+		// down and too small, and it keeps the reason list stable as prompt
+		// sizes vary.
+		if why := rt.contextGate(m, promptTokens); why != "" {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", cand.ModelID, why))
+			if gatedOut == "" {
+				gatedOut = cand.ModelID
+			}
+			continue
+		}
 		res, err := rt.buildResult(cand.ModelID, m, "", original, forceDirect, "")
 		if err != nil {
 			reasons = append(reasons, fmt.Sprintf("%s: %v", cand.ModelID, err))
@@ -141,6 +155,8 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool) (resolveR
 		res.Chain = cand.Chain
 		res.Overflowed = cand.Overflow
 		res.Remaining = order[i+1:]
+		res.PromptTokens = promptTokens
+		res.Downshift = gatedOut
 		return res, nil
 	}
 
@@ -161,6 +177,12 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 		if !known || !rt.avail.Routable(cand.ModelID) {
 			continue
 		}
+		// Gate the failover walk with the same estimate the first pass used.
+		// res.PromptTokens is zero for a directly named chain, so this is inert
+		// there and binding only where the caller asked for a role.
+		if rt.contextGate(m, res.PromptTokens) != "" {
+			continue
+		}
 		next, err := rt.buildResult(cand.ModelID, m, "", res.ResolvedFrom, forceDirect, res.Egress)
 		if err != nil {
 			continue
@@ -172,6 +194,8 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 		next.Chain = cand.Chain
 		next.Overflowed = cand.Overflow
 		next.Remaining = res.Remaining[i+1:]
+		next.PromptTokens = res.PromptTokens
+		next.Downshift = res.Downshift
 		return next, true
 	}
 	return resolveResult{}, false

@@ -227,6 +227,7 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 	embeddings := *embPtr
 
 	userMsg, hasImage := lastUserMessage(messages)
+	size := transcriptChars(messages)
 	if hasImage {
 		// An image is a hard requirement, not a preference: if nothing can see
 		// right now, say so by falling back rather than silently sending the
@@ -288,18 +289,18 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 	// upgrade target is itself reachable — escalating to a model that is off
 	// would turn a working request into a failing one.
 	if bestRoutable == "coder" && (tier == TierFree || tier == TierFull) {
-		complexity := scoreComplexity(userMsg)
+		complexity := scoreComplexity(userMsg, size)
 		if tier == TierFull && complexity >= veryHardThreshold && ar.canRoute("claude-opus-4-6") {
-			ar.logDecision(ctx, tier, classifyText, bestRoutable, "claude-opus-4-6", scores, &complexity)
+			ar.logDecision(ctx, tier, classifyText, bestRoutable, "claude-opus-4-6", scores, &complexity, size)
 			return "claude-opus-4-6"
 		}
 		if complexity >= hardThreshold && ar.canRoute("coder-hard") {
-			ar.logDecision(ctx, tier, classifyText, bestRoutable, "coder-hard", scores, &complexity)
+			ar.logDecision(ctx, tier, classifyText, bestRoutable, "coder-hard", scores, &complexity, size)
 			return "coder-hard"
 		}
 	}
 
-	ar.logDecision(ctx, tier, classifyText, bestAlias, bestRoutable, scores, nil)
+	ar.logDecision(ctx, tier, classifyText, bestAlias, bestRoutable, scores, nil, size)
 	return bestRoutable
 }
 
@@ -320,13 +321,16 @@ func (ar *AutoRouter) firstRoutable(preferred string) string {
 	return preferred
 }
 
-func (ar *AutoRouter) logDecision(ctx context.Context, tier AutoTier, prompt, base, final string, scores map[string]float64, complexity *float64) {
+func (ar *AutoRouter) logDecision(ctx context.Context, tier AutoTier, prompt, base, final string, scores map[string]float64, complexity *float64, sizeChars int) {
 	attrs := []any{
 		"tier", string(tier),
 		"base", base,
 		"final", final,
 		"prompt", truncateRunes(prompt, 200),
 		"scores", scores,
+		// The transcript size behind the decision. Without it a log line
+		// showing a short prompt on an expensive seat looks like a bug.
+		"transcript_chars", sizeChars,
 	}
 	if complexity != nil {
 		attrs = append(attrs, "complexity", math.Round(*complexity*1000)/1000)
@@ -420,6 +424,36 @@ func lastUserMessage(messages []any) (text string, hasImage bool) {
 	return "", false
 }
 
+// transcriptChars sums the text across every message in the conversation —
+// all roles, not just the user's — as the cheap proxy for "how big is this
+// request". Multimodal parts contribute their text only: an image's real cost
+// is not in its JSON length, and it has already routed to vision by the time
+// this matters.
+func transcriptChars(messages []any) int {
+	n := 0
+	for _, msg := range messages {
+		m, ok := msg.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch c := m["content"].(type) {
+		case string:
+			n += len(c)
+		case []any:
+			for _, part := range c {
+				p, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if t, ok := p["text"].(string); ok {
+					n += len(t)
+				}
+			}
+		}
+	}
+	return n
+}
+
 // cosineSimilarity matches the Python helper: the dot product runs over the
 // shorter length (zip strict=False) while each norm uses its full vector.
 func cosineSimilarity(a, b []float64) float64 {
@@ -444,16 +478,34 @@ func cosineSimilarity(a, b []float64) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-// scoreComplexity scores a prompt 0..1 on length, complexity keywords, code
-// blocks, and multiple source-file references. Port of _score_complexity.
-func scoreComplexity(text string) float64 {
+// scoreComplexity scores a prompt 0..1 on size, complexity keywords, code
+// blocks, and multiple source-file references. Port of _score_complexity, with
+// one deliberate divergence.
+//
+// sizeChars is the size of the WHOLE conversation, not of text. The Python
+// original scored length on the last user message alone, which is structurally
+// blind to the shape that matters most: in an agent loop the last message is a
+// short tool result ("ok, 3 files changed") sitting on top of a transcript tens
+// of thousands of characters deep. Scoring that as a trivial request is how a
+// genuinely hard, genuinely huge task ends up on the cheap seat.
+//
+// text still supplies the intent signals — keywords, code fences, file
+// references — because those describe what is being asked, and the last user
+// message is where the ask lives. Only size comes from the transcript.
+func scoreComplexity(text string, sizeChars int) float64 {
 	score := 0.0
 	lower := strings.ToLower(text)
 
+	// Three tiers rather than the original two. With the whole transcript on
+	// the scale, any live agent loop clears 500 chars immediately, which would
+	// peg the old top bucket and turn size back into a constant. The 20k tier
+	// restores the discrimination the extra input was added for.
 	switch {
-	case len(text) > 500:
+	case sizeChars > 20000:
+		score += 0.45
+	case sizeChars > 500:
 		score += 0.3
-	case len(text) > 200:
+	case sizeChars > 200:
 		score += 0.15
 	}
 

@@ -75,17 +75,74 @@ func TestCosineSimilarity(t *testing.T) {
 }
 
 func TestScoreComplexity(t *testing.T) {
-	if s := scoreComplexity("hi"); s != 0 {
+	// A single-message request scores its own length, as before.
+	if s := scoreComplexity("hi", len("hi")); s != 0 {
 		t.Errorf("trivial prompt scored %v, want 0", s)
 	}
 	complex := "Please refactor and optimize this code. " +
 		strings.Repeat("It spans multiple modules and needs careful work. ", 12) +
 		"See main.go and util.go. ```go\nfunc x(){}\n```"
-	if s := scoreComplexity(complex); s < veryHardThreshold {
+	if s := scoreComplexity(complex, len(complex)); s < veryHardThreshold {
 		t.Errorf("complex prompt scored %v, want >= %v", s, veryHardThreshold)
 	}
-	if s := scoreComplexity("optimize this"); s < hardThreshold-0.3 { // 1 keyword only
+	if s := scoreComplexity("optimize this", len("optimize this")); s < hardThreshold-0.3 { // 1 keyword only
 		t.Errorf("single-keyword scored %v unexpectedly low", s)
+	}
+}
+
+// The agent-loop shape this feature exists for: a short last message riding on
+// a huge transcript. Scored on the message alone it looks trivial; scored with
+// the transcript it clears the escalation bar.
+func TestScoreComplexitySeesTranscriptNotJustLastMessage(t *testing.T) {
+	const toolResult = "ok, applied the patch"
+
+	alone := scoreComplexity(toolResult, len(toolResult))
+	if alone >= hardThreshold {
+		t.Fatalf("precondition: short message alone scored %v, expected below %v", alone, hardThreshold)
+	}
+
+	withTranscript := scoreComplexity(toolResult, 60000)
+	if withTranscript <= alone {
+		t.Errorf("transcript size did not raise the score: %v -> %v", alone, withTranscript)
+	}
+	if withTranscript < hardThreshold {
+		t.Errorf("60k-char transcript scored %v, want >= %v so it escalates", withTranscript, hardThreshold)
+	}
+}
+
+// The 20k tier exists so a live agent loop does not peg the old top bucket and
+// flatten size back into a constant.
+func TestScoreComplexityLargeTranscriptOutranksMerelyLong(t *testing.T) {
+	long := scoreComplexity("", 5000)
+	huge := scoreComplexity("", 50000)
+	if huge <= long {
+		t.Errorf("50k transcript (%v) should outscore 5k (%v)", huge, long)
+	}
+}
+
+func TestTranscriptChars(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "system", "content": "abc"},
+		map[string]any{"role": "user", "content": "defg"},
+		map[string]any{"role": "assistant", "content": "hi"},
+	}
+	if got := transcriptChars(msgs); got != 9 {
+		t.Errorf("transcriptChars = %d, want 9 (every role counts)", got)
+	}
+
+	// Multimodal parts contribute their text; the image part does not.
+	multi := []any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:..."}},
+		}},
+	}
+	if got := transcriptChars(multi); got != 4 {
+		t.Errorf("multimodal transcriptChars = %d, want 4", got)
+	}
+
+	if got := transcriptChars(nil); got != 0 {
+		t.Errorf("empty transcriptChars = %d, want 0", got)
 	}
 }
 

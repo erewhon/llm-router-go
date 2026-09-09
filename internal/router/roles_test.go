@@ -103,7 +103,7 @@ func newRoleRouter(t *testing.T, down map[string]bool, extra ...Option) (*Router
 func TestRoleResolvesToFirstAvailableCandidate(t *testing.T) {
 	rt, _ := newRoleRouter(t, nil)
 
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRoleFailsOverWhenPrimaryIsDown(t *testing.T) {
 	// The motivating scenario: hypatia is powered down overnight.
 	rt, _ := newRoleRouter(t, map[string]bool{"qwen36-hypatia": true})
 
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestRoleSkipsOutOfModeCandidates(t *testing.T) {
 		"qwen36-hypatia": true,
 		"minimax-reap":   true,
 	})
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRoleOverflowsOnlyWhenEverythingLocalIsDown(t *testing.T) {
 		"minimax-reap":     true,
 		"ling-flash-local": true,
 	})
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestStrictRoleErrorsRatherThanSubstitute(t *testing.T) {
 		"minimax-reap":   true,
 		"qwen36-hypatia": true,
 	})
-	_, err := rt.resolveModel("thinker", false)
+	_, err := rt.resolveModel("thinker", false, 0)
 	if err == nil {
 		t.Fatalf("expected an error; thinker declares on_empty: error")
 	}
@@ -196,7 +196,7 @@ func TestDirectModelNameNeverFailsOver(t *testing.T) {
 	rt, _ := newRoleRouter(t, map[string]bool{"qwen36-hypatia": true})
 
 	for _, name := range []string{"qwen36-hypatia", "qwen3.6-local", "Qwen/Qwen3.6-35B-A3B-FP8"} {
-		res, err := rt.resolveModel(name, false)
+		res, err := rt.resolveModel(name, false, 0)
 		if err != nil {
 			t.Fatalf("resolve %q: %v", name, err)
 		}
@@ -214,7 +214,7 @@ func TestDirectModelNameNeverFailsOver(t *testing.T) {
 
 func TestRoleRemainingTailDrivesFailover(t *testing.T) {
 	rt, _ := newRoleRouter(t, nil)
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestRoleRemainingTailDrivesFailover(t *testing.T) {
 
 func TestNextRoleCandidateSkipsUnavailable(t *testing.T) {
 	rt, _ := newRoleRouter(t, map[string]bool{"minimax-reap": true})
-	res, err := rt.resolveModel("coder", false)
+	res, err := rt.resolveModel("coder", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestNextRoleCandidateSkipsUnavailable(t *testing.T) {
 
 func TestNextRoleCandidateExhausted(t *testing.T) {
 	rt, _ := newRoleRouter(t, nil)
-	res, err := rt.resolveModel("thinker", false)
+	res, err := rt.resolveModel("thinker", false, 0)
 	if err != nil {
 		t.Fatalf("resolve thinker: %v", err)
 	}
@@ -470,7 +470,7 @@ func newRoleChainRouter(t *testing.T, down map[string]bool) (*Router, *stubAvail
 func TestRoleWithChainCandidatesResolvesToProvider(t *testing.T) {
 	rt, _ := newRoleChainRouter(t, nil)
 
-	res, err := rt.resolveModel("coder-hard", false)
+	res, err := rt.resolveModel("coder-hard", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder-hard: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestRoleWithChainCandidatesResolvesToProvider(t *testing.T) {
 func TestRoleWithChainCandidatesFailsOverAcrossChains(t *testing.T) {
 	rt, _ := newRoleChainRouter(t, map[string]bool{"go/kimi": true, "or/kimi": true})
 
-	res, err := rt.resolveModel("coder-hard", false)
+	res, err := rt.resolveModel("coder-hard", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder-hard: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestRoleWithChainCandidatesFailsOverAcrossChains(t *testing.T) {
 func TestNextRoleCandidateRelabelsChainAcrossHops(t *testing.T) {
 	rt, _ := newRoleChainRouter(t, nil)
 
-	res, err := rt.resolveModel("coder-hard", false)
+	res, err := rt.resolveModel("coder-hard", false, 0)
 	if err != nil {
 		t.Fatalf("resolve coder-hard: %v", err)
 	}
