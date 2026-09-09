@@ -15,6 +15,14 @@ permissions:
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    # Skip on the homelab forge runner. sprinkle-runner hands act a synthetic
+    # push event and does not honour the `tags:` filter above, so this job
+    # fires on every push to main and fails on `missing GITHUB_TOKEN` — that
+    # runner has no secrets at all, by design. `github.event.act` is false on
+    # real GitHub, so releases there are unaffected.
+    # NB: must be github.event.act, not env.ACT — a job-level `if:` cannot read
+    # the env context and would silently evaluate wrong.
+    if: ${{ !github.event.act }}
     steps:
       - uses: actions/checkout@v4
         with:
