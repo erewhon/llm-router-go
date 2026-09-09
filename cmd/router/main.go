@@ -8,11 +8,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -65,6 +67,9 @@ func run(args []string) int {
 		// Availability tracking — what lets a role follow the fleet as nodes
 		// are powered down for the night. Off means roles always pick their
 		// first candidate (the pre-roles behaviour).
+		zdrCanary         = fs.Bool("zdr-canary", true, "periodically verify the OpenRouter account still enforces zero data retention account-wide; reported on /health as zdr_account")
+		zdrCanaryInterval = fs.Duration("zdr-canary-interval", 6*time.Hour, "how often the ZDR canary probes account posture")
+
 		healthTracking  = fs.Bool("health-tracking", true, "poll node agents so roles route to models that are actually up")
 		healthInterval  = fs.Duration("health-interval", health.DefaultInterval, "how often to poll each node agent")
 		healthDownAfter = fs.Int("health-down-after", health.DefaultDownAfter, "consecutive failed polls before a model is considered down (one success restores it)")
@@ -265,6 +270,15 @@ func run(args []string) int {
 		routerOpts = append(routerOpts, router.WithAvailability(tracker))
 	}
 
+	var canary *router.ZDRCanary
+	if *zdrCanary {
+		if canary = buildZDRCanary(registry, *zdrCanaryInterval, logger); canary != nil {
+			routerOpts = append(routerOpts, router.WithZDRCanary(canary))
+		} else {
+			logger.Info("ZDR canary idle: no OpenRouter model in models.yaml with a resolvable api_key")
+		}
+	}
+
 	rt := router.New(registry, logger, routerOpts...)
 	if tracker != nil {
 		// Republish the availability gauges after each poll, so /metrics
@@ -327,6 +341,11 @@ func run(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if canary != nil {
+		go canary.Run(ctx)
+		logger.Info("ZDR canary started", "interval", zdrCanaryInterval.String())
+	}
 
 	if tracker != nil {
 		go tracker.Run(ctx)
@@ -419,4 +438,55 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// buildZDRCanary picks a probe target for the account-posture canary out of
+// models.yaml, returning nil when there is nothing to watch.
+//
+// The target is discovered rather than configured because a flag would be one
+// more thing to keep in sync with the registry, and a stale flag pointing at a
+// retired model would make the canary report "unknown" forever — the failure
+// mode a compliance check can least afford, since it looks like silence rather
+// than like breakage.
+//
+// Selection: a ZDR-enforceable (OpenRouter) chat model whose api_key resolves,
+// preferring an Anthropic-backed one because zdrCanaryProvider pins the
+// Anthropic endpoint and the probe must name a model that endpoint actually
+// serves. Ids are sorted first so the choice is deterministic across restarts
+// — an unstable target would make the /health detail string change for no
+// reason and cost someone an afternoon.
+func buildZDRCanary(registry *config.ModelRegistry, interval time.Duration, logger *slog.Logger) *router.ZDRCanary {
+	ids := make([]string, 0, len(registry.Models))
+	for id := range registry.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var fallbackID string
+	for _, id := range ids {
+		m := registry.Models[id]
+		if !m.Enabled || m.APIClass != config.APIClassChat || !m.ZDREnforceable() {
+			continue
+		}
+		if os.Getenv(m.APIKey) == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(m.HFRepo), "anthropic/") {
+			return router.NewZDRCanary(m.APIBase, os.Getenv(m.APIKey), m.HFRepo, interval, logger)
+		}
+		if fallbackID == "" {
+			fallbackID = id
+		}
+	}
+	if fallbackID == "" {
+		return nil
+	}
+	// No Anthropic-backed entry. Probing a non-Anthropic model pinned to the
+	// Anthropic provider yields "no endpoints" rather than a ZDR verdict, so
+	// say plainly that the canary will be inconclusive instead of letting it
+	// look healthy.
+	m := registry.Models[fallbackID]
+	logger.Warn("ZDR canary has no Anthropic-backed OpenRouter model to probe; verdicts will likely be inconclusive",
+		"using", fallbackID)
+	return router.NewZDRCanary(m.APIBase, os.Getenv(m.APIKey), m.HFRepo, interval, logger)
 }

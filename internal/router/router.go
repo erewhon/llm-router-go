@@ -77,10 +77,20 @@ type Router struct {
 	// upstreamStats is the rolling 24h window of upstream attempt outcomes per
 	// (model, endpoint). Feeds the dashboard's /api/upstream failure panel.
 	upstreamStats *upstreamTracker
+	// zdrCanary reports whether the OpenRouter account is still enforcing
+	// zero data retention account-wide. Nil when unconfigured; Status() is
+	// nil-safe so /health needs no branch.
+	zdrCanary *ZDRCanary
 }
 
 // Option configures a Router at construction time.
 type Option func(*Router)
+
+// WithZDRCanary attaches the account-posture canary, whose last verdict is
+// reported on /health. Purely observational: it never gates a request.
+func WithZDRCanary(c *ZDRCanary) Option {
+	return func(r *Router) { r.zdrCanary = c }
+}
 
 // WithTransport overrides the HTTP transport used to talk to upstreams.
 // Used by tests; production gets http.DefaultTransport.
@@ -391,8 +401,26 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// Forward, advancing along the role's preference order if an upstream
 		// fails to answer at all. Only role-resolved requests fail over:
 		// naming a model is a statement about that model.
+		// Re-evaluated on every attempt, not hoisted: failover reassigns res
+		// to a different candidate, and a tolerance that held for the first
+		// seat says nothing about the second. Load-time validation makes a
+		// role's own candidates safe, but the caller-supplied header can
+		// tighten beyond any role — including on a directly named model,
+		// which has no role contract behind it at all.
+		zdrWanted, zdrSource := rt.zdrRequired(r, res)
+
 		for attempt := 0; ; attempt++ {
 			bodyMap["model"] = res.BackendModel
+			if zdrWanted {
+				if refusal := rt.applyPrivacy(bodyMap, res, zdrSource); refusal != "" {
+					rt.logger.WarnContext(r.Context(), "refusing on retention tolerance",
+						"model", model, "resolved_via", res.ModelID, "role", res.Role, "reason", refusal)
+					errMsg = refusal
+					writePrivacyRefusal(rec, refusal)
+					return
+				}
+				rec.Header().Set(PrivacyHeader, PrivacyZDR)
+			}
 			newBody, err := json.Marshal(bodyMap)
 			if err != nil {
 				errMsg = "re-encode body: " + err.Error()
@@ -716,5 +744,9 @@ func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"models":          len(rt.active),
 		"models_by_class": modelsByClass,
 		"streaming":       true,
+		// Reported unconditionally, including as "unknown". An absent field
+		// reads as "fine"; a field saying "unknown" reads as "nobody has
+		// checked", which is the truth and is actionable.
+		"zdr_account": rt.zdrCanary.Status(),
 	})
 }

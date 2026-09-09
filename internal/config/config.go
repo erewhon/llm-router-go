@@ -8,6 +8,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -301,7 +302,43 @@ const (
 	// local by this definition: they run on our hardware and die with it.
 	// A nodeless external (Zen, the Anthropic gateway) is not.
 	LocalityLocal Locality = "local"
+	// LocalityLocalOrZDR admits local models plus cloud endpoints the router
+	// can hold to zero data retention PER REQUEST — today that means
+	// OpenRouter, where `provider: {"zdr": true}` is accepted on the wire and
+	// refused loudly when no endpoint qualifies (see ZDREnforceable).
+	//
+	// This is the "sensitive, but zero-retention is sufficient" tier. It is
+	// deliberately a mechanism check, not a vetting claim: a hand-maintained
+	// "this vendor is trustworthy" boolean asserts something that is not even
+	// stable per model, because on OpenRouter ZDR is a property of the
+	// ENDPOINT serving a request, not of the model id. Probing
+	// z-ai/glm-5.3-flash on 2026-09-06 returned 23 endpoints across as many
+	// operators and jurisdictions. What the router can honestly promise is
+	// that it asked for zero retention and the request failed if that was
+	// not on offer.
+	//
+	// NOT exempt from the overflow list, unlike LocalityLocal — see
+	// bindsOverflow. Overflowing a retention tolerance would break exactly
+	// the guarantee the role declares.
+	LocalityLocalOrZDR Locality = "local_or_zdr"
 )
+
+// bindsOverflow reports whether a locality also governs a role's overflow
+// list.
+//
+// LocalityLocal does not: an overflow list exists precisely to cross the
+// local/cloud boundary when the fleet cannot serve, and models.yaml says so.
+// A retention tolerance is the opposite case. "Local or zero-retention cloud"
+// is a promise about what happens to the prompt after it is sent, and a role
+// that quietly overflowed to a retaining seat when its candidates were down
+// would violate that promise at exactly the moment nobody was watching. The
+// coder and thinker roles overflow to Zen entries today, which is the concrete
+// version of this: Zen's published policy covers what the model providers do
+// and is silent on what transits OpenCode's own servers, and there is no
+// routing-layer mechanism to enforce zero retention there at all.
+func (l Locality) bindsOverflow() bool {
+	return l == LocalityLocalOrZDR
+}
 
 // OnEmpty is what a role does when no candidate is available.
 type OnEmpty string
@@ -363,6 +400,50 @@ func (rd *RoleDefinition) UnmarshalYAML(node *yaml.Node) error {
 // IsLocal reports whether a model is pinned to fleet hardware.
 func (m ModelDefinition) IsLocal() bool {
 	return m.Node != "" || m.MultiNode != nil
+}
+
+// zdrEnforceableHosts are the api_base hosts on which the router can attach a
+// per-request zero-retention directive that the provider actually honours.
+//
+// Membership is a fact about an API, not a judgement about a vendor — which is
+// why it lives in code as a small table rather than as a `zdr: true` field on
+// twenty model entries. A YAML boolean would be a claim someone made once and
+// nobody re-checked; this list says only "we know the wire syntax here, and the
+// endpoint rejects the request when it cannot comply".
+//
+// OpenRouter accepts `provider: {"zdr": true}` and answers a request nothing
+// qualifies for with "No endpoints found matching your data policy (Zero data
+// retention)" — a hard failure, which is the property that makes it
+// enforceable rather than merely advertised. OpenCode Zen deliberately is NOT
+// here: its zero-retention page describes what the upstream model providers
+// do, says nothing about prompts transiting OpenCode's own servers, and a
+// feature request for a routing-layer flag to enforce any of it is still open
+// (anomalyco/opencode#2836).
+//
+// Adding a provider is one line — plus teaching zdrDirective its wire syntax.
+var zdrEnforceableHosts = map[string]bool{
+	"openrouter.ai": true,
+}
+
+// ZDREnforceable reports whether the router can hold this placement to zero
+// data retention on a per-request basis.
+//
+// A local model is not "ZDR-enforceable" by this definition and does not need
+// to be: the prompt never leaves the fleet, so there is no retention policy to
+// enforce against a third party. Callers wanting "local or ZDR" should ask
+// IsLocal() || ZDREnforceable(), which is what roleMemberErrs does.
+//
+// A virtual chain entry answers false here — it has no api_base of its own.
+// Chains are resolved member-by-member; see chainZDREnforceable.
+func (m ModelDefinition) ZDREnforceable() bool {
+	if m.APIBase == "" {
+		return false
+	}
+	u, err := url.Parse(m.APIBase)
+	if err != nil {
+		return false
+	}
+	return zdrEnforceableHosts[strings.ToLower(u.Hostname())]
 }
 
 // HasCapability reports whether a model declares the given capability.
@@ -487,9 +568,10 @@ func validateRole(name string, role *RoleDefinition, r *ModelRegistry) error {
 	}
 
 	switch role.Require.Locality {
-	case LocalityAny, LocalityLocal:
+	case LocalityAny, LocalityLocal, LocalityLocalOrZDR:
 	default:
-		errs = append(errs, fmt.Errorf("role %q: unknown require.locality %q (want %q or %q)", name, role.Require.Locality, LocalityAny, LocalityLocal))
+		errs = append(errs, fmt.Errorf("role %q: unknown require.locality %q (want %q, %q or %q)",
+			name, role.Require.Locality, LocalityAny, LocalityLocal, LocalityLocalOrZDR))
 	}
 	if role.Require.APIClass != "" {
 		if _, ok := validAPIClasses[role.Require.APIClass]; !ok {
@@ -501,13 +583,15 @@ func validateRole(name string, role *RoleDefinition, r *ModelRegistry) error {
 		errs = append(errs, fmt.Errorf("role %q: needs at least one candidate", name))
 	}
 
-	// Candidates bear the full contract; overflow entries are exempt from
-	// locality only — crossing that boundary is precisely what they are for.
+	// Candidates bear the full contract. Overflow entries are exempt from
+	// locality when crossing that boundary is precisely what they are for
+	// (locality: local) — but NOT when the locality is a retention tolerance,
+	// which an overflow would silently break. See Locality.bindsOverflow.
 	for _, id := range role.Candidates {
 		errs = append(errs, roleMemberErrs(name, "candidate", id, role, r, true)...)
 	}
 	for _, id := range role.Overflow {
-		errs = append(errs, roleMemberErrs(name, "overflow", id, role, r, false)...)
+		errs = append(errs, roleMemberErrs(name, "overflow", id, role, r, role.Require.Locality.bindsOverflow())...)
 	}
 
 	return errors.Join(errs...)
@@ -521,8 +605,17 @@ func roleMemberErrs(role, kind, id string, rd *RoleDefinition, r *ModelRegistry,
 		return []error{fmt.Errorf("role %q: %s %q is not a known model", role, kind, id)}
 	}
 	var errs []error
-	if enforceLocality && rd.Require.Locality == LocalityLocal && !m.IsLocal() {
-		errs = append(errs, fmt.Errorf("role %q: %s %q is not local (no node/multi_node) but require.locality is %q", role, kind, id, LocalityLocal))
+	if enforceLocality {
+		switch rd.Require.Locality {
+		case LocalityLocal:
+			if !m.IsLocal() {
+				errs = append(errs, fmt.Errorf("role %q: %s %q is not local (no node/multi_node) but require.locality is %q", role, kind, id, LocalityLocal))
+			}
+		case LocalityLocalOrZDR:
+			if why := zdrToleranceErr(id, m, r); why != "" {
+				errs = append(errs, fmt.Errorf("role %q: %s %q %s but require.locality is %q", role, kind, id, why, LocalityLocalOrZDR))
+			}
+		}
 	}
 	for _, want := range rd.Require.Capabilities {
 		if !m.HasCapability(want) {
@@ -533,6 +626,37 @@ func roleMemberErrs(role, kind, id string, rd *RoleDefinition, r *ModelRegistry,
 		errs = append(errs, fmt.Errorf("role %q: %s %q has api_class %q, role requires %q", role, kind, id, m.APIClass, rd.Require.APIClass))
 	}
 	return errs
+}
+
+// zdrToleranceErr reports why a model fails the local_or_zdr tolerance, or ""
+// when it passes. The phrasing completes the sentence "candidate %q ...".
+//
+// A chain is only as private as its worst member. Chains fail over silently by
+// design — that is their whole value — so a chain holding one enforceable and
+// one unenforceable provider offers no guarantee at all: which one served is
+// decided by whichever happened to be up. `claude-sonnet-5` is the live
+// example, an or/ entry backed up by a zen/ entry. Requiring EVERY member to
+// qualify is what keeps the tolerance meaningful; the fix in config is to
+// point the role at the or/ entry directly rather than at the bare chain.
+func zdrToleranceErr(id string, m ModelDefinition, r *ModelRegistry) string {
+	if m.IsLocal() || m.ZDREnforceable() {
+		return ""
+	}
+	if !m.IsVirtual() {
+		return "is neither local nor a zero-retention-enforceable endpoint"
+	}
+	for _, fid := range m.Fallbacks {
+		fm, ok := r.Models[fid]
+		if !ok {
+			// validateFallbacks reports the unknown member itself; from here
+			// an unresolvable link is simply not something we can vouch for.
+			return fmt.Sprintf("is a chain whose member %q could not be resolved", fid)
+		}
+		if !fm.IsLocal() && !fm.ZDREnforceable() {
+			return fmt.Sprintf("is a chain whose member %q is neither local nor zero-retention-enforceable", fid)
+		}
+	}
+	return ""
 }
 
 func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
