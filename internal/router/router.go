@@ -273,6 +273,12 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			// ("timeout"/"connect"/"transport"), empty when the upstream
 			// answered with a status line (whatever it was) or was never tried.
 			upstreamClass string
+			// privacyTolerance names the retention posture enforced on this
+			// request ("zdr"), for the reqlog row. Declared up here rather
+			// than beside zdrWanted because the deferred record closes over
+			// it, and a refused request must log the tolerance that refused
+			// it — that row is the evidence the refusal happened.
+			privacyTolerance string
 		)
 
 		defer func() {
@@ -310,12 +316,15 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 					rt.upstreamStats.record(resolved.ModelID, resolved.BackendURL, lr.ErrorClass, time.Now())
 				}
 			}
+			lr.PrivacyTolerance = privacyTolerance
 			var tokPerSec *float64
 			switch {
 			case cap.jsonBody != nil:
 				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = parseUsage(cap.jsonBody)
+				lr.UpstreamProvider = parseUpstreamProvider(cap.jsonBody)
 			case cap.sseTail != nil:
 				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = extractSSEUsage(cap.sseTail.Tail())
+				lr.UpstreamProvider = extractSSEProvider(cap.sseTail.Tail())
 			}
 			if resolved != nil {
 				rt.tokStats.record(resolved.ModelID, tokPerSec, lr.CompletionTokens, lr.LatencyMS, time.Now())
@@ -408,6 +417,9 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// tighten beyond any role — including on a directly named model,
 		// which has no role contract behind it at all.
 		zdrWanted, zdrSource := rt.zdrRequired(r, res)
+		if zdrWanted {
+			privacyTolerance = PrivacyZDR
+		}
 
 		for attempt := 0; ; attempt++ {
 			bodyMap["model"] = res.BackendModel

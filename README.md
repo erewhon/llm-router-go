@@ -37,6 +37,23 @@ instead (it takes precedence), or pass `--reqlog=off` to disable logging
 entirely. Query the SQLite log with any tool: `sqlite3 requests.db 'select
 model, status, latency_ms from router_requests order by id desc limit 20'`.
 
+Two columns cover **where a cloud request actually went**, which nothing else
+records. `upstream_provider` is the operator the upstream itself named
+(OpenRouter reports `provider`: "Amazon Bedrock", "Novita", "DeepInfra"), and
+`privacy_tolerance` is the retention posture the router enforced (`zdr`, or NULL
+when none was asked for). Both are NULL for local backends. They matter because
+the router picks a *model* while the provider picks the *endpoint*, from a pool
+that changes between requests — so `resolved_via` alone cannot tell you where a
+given prompt was served. Together they answer the audit question:
+
+```sh
+sqlite3 requests.db "select resolved_via, upstream_provider, count(*)
+  from router_requests where privacy_tolerance = 'zdr' group by 1,2"
+```
+
+A refused request (403, upstream never called) records the tolerance with a NULL
+provider, so the refusal is queryable too rather than leaving no trace.
+
 ### Anthropic gateway (measurement tap)
 
 With an `api_class: anthropic` entry in `models.yaml` (see Scenario 8 in the

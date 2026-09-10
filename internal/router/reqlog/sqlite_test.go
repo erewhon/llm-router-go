@@ -260,3 +260,99 @@ func TestSQLiteSink_UnattributedStoresNull(t *testing.T) {
 		t.Errorf("rows with NULL attribution = %d, want 1", n)
 	}
 }
+
+// Provenance columns must land on a table created by an older binary, for the
+// same reason the attribution ones must: CREATE TABLE IF NOT EXISTS is a no-op
+// against an existing table, so a missing migration entry passes every
+// fresh-DB test and then fails every insert in production.
+func TestSQLiteSink_MigratesProvenanceColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "preprovenance.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A table with every column up to (but not including) provenance.
+	const preProvenance = `
+CREATE TABLE router_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, ts TEXT NOT NULL,
+    method TEXT NOT NULL, path TEXT NOT NULL, model TEXT NOT NULL,
+    backend_model TEXT, backend_url TEXT, resolved_via TEXT, api_class TEXT,
+    via_tool_proxy INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+    cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER,
+    prefix_hash_chain TEXT, role TEXT, role_overflowed INTEGER NOT NULL DEFAULT 0,
+    failover_from TEXT, error TEXT, upstream_status INTEGER, error_class TEXT,
+    principal TEXT, token_id TEXT);`
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(preProvenance); err != nil {
+		t.Fatalf("create pre-provenance schema: %v", err)
+	}
+	seed.Close()
+
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite (migrate): %v", err)
+	}
+	sink.Log(Record{
+		Method: "POST", Path: "/v1/chat/completions", Model: "thinker",
+		ResolvedVia: "or/minimax-m3", Status: 200, LatencyMS: 900,
+		UpstreamProvider: "Amazon Bedrock", PrivacyTolerance: "zdr",
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+
+	var provider, tolerance *string
+	if err := db.QueryRow(
+		`SELECT upstream_provider, privacy_tolerance FROM router_requests WHERE model = ?`, "thinker",
+	).Scan(&provider, &tolerance); err != nil {
+		t.Fatalf("query migrated row: %v", err)
+	}
+	if provider == nil || *provider != "Amazon Bedrock" {
+		t.Errorf("upstream_provider = %v, want Amazon Bedrock", provider)
+	}
+	if tolerance == nil || *tolerance != "zdr" {
+		t.Errorf("privacy_tolerance = %v, want zdr", tolerance)
+	}
+}
+
+// A local request has no serving provider and no tolerance, and must store SQL
+// NULL for both rather than "". Most rows in this table are local, so "the
+// provider is unknown" has to be queryable as IS NULL without a special case.
+func TestSQLiteSink_LocalRequestStoresNullProvenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "localprov.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite: %v", err)
+	}
+	sink.Log(Record{
+		Method: "POST", Path: "/v1/chat/completions", Model: "qwen3.6-hypatia",
+		Status: 200, LatencyMS: 30,
+	})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM router_requests
+		   WHERE upstream_provider IS NULL AND privacy_tolerance IS NULL`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rows with NULL provenance = %d, want 1", n)
+	}
+}

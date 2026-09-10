@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
+	"github.com/erewhon/llm-router-go/internal/router/reqlog"
 )
 
 // privacyRegistryYAML sets up the three placement kinds the tolerance has to
@@ -359,5 +360,184 @@ func TestHealthReportsAccountPosture(t *testing.T) {
 	}
 	if out.ZDRAccount.Posture != ZDRPostureUnknown {
 		t.Errorf("zdr_account.posture = %q, want %q", out.ZDRAccount.Posture, ZDRPostureUnknown)
+	}
+}
+
+// --- reqlog provenance -----------------------------------------------------
+
+// newPrivacyRouterWithSink is newPrivacyRouter plus a record sink, for the
+// provenance assertions.
+func newPrivacyRouterWithSink(t *testing.T, upstreamURL string, sink *reqlog.MemorySink) *Router {
+	t.Helper()
+	reg, err := config.LoadBytes([]byte(privacyRegistryYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	opts := []Option{WithMode("default"), WithFlushInterval(0), WithSink(sink)}
+	if upstreamURL != "" {
+		opts = append(opts, WithTransport(&transportRedirect{to: upstreamURL, rt: http.DefaultTransport}))
+	}
+	return New(reg, slog.New(slog.NewTextHandler(io.Discard, nil)), opts...)
+}
+
+// providerUpstream answers like OpenRouter: a top-level "provider" naming the
+// operator that served the request, alongside the usual usage block.
+func providerUpstream(t *testing.T, provider string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gen-1","provider":"` + provider +
+			`","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`))
+	}))
+}
+
+func TestReqlogRecordsTheServingProvider(t *testing.T) {
+	upstream := providerUpstream(t, "Amazon Bedrock")
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+
+	rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"private","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	got := recs[0]
+	if got.UpstreamProvider != "Amazon Bedrock" {
+		t.Errorf("UpstreamProvider = %q, want %q", got.UpstreamProvider, "Amazon Bedrock")
+	}
+	if got.PrivacyTolerance != PrivacyZDR {
+		t.Errorf("PrivacyTolerance = %q, want %q", got.PrivacyTolerance, PrivacyZDR)
+	}
+	// Provenance must not have displaced the usage parsing it sits beside.
+	if got.PromptTokens == nil || *got.PromptTokens != 9 {
+		t.Errorf("PromptTokens = %v, want 9 — usage parsing regressed", got.PromptTokens)
+	}
+}
+
+func TestReqlogRecordsTheProviderFromAnSSEStream(t *testing.T) {
+	// OpenRouter stamps "provider" on every chunk, so the tail buffer carries
+	// it even though the first chunk is long gone by the time the stream ends.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"provider\":\"Novita\",\"choices\":[{\"delta\":{\"content\":\"o\"}}]}\n\n" +
+				"data: {\"provider\":\"Novita\",\"choices\":[{\"delta\":{\"content\":\"k\"}}]," +
+				"\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+
+	rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"private","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	if !recs[0].Stream {
+		t.Errorf("Stream = false, want true")
+	}
+	if recs[0].UpstreamProvider != "Novita" {
+		t.Errorf("UpstreamProvider = %q, want Novita", recs[0].UpstreamProvider)
+	}
+	if recs[0].TotalTokens == nil || *recs[0].TotalTokens != 6 {
+		t.Errorf("TotalTokens = %v, want 6 — SSE usage parsing regressed", recs[0].TotalTokens)
+	}
+}
+
+func TestReqlogLeavesProvenanceEmptyForLocalAndUntolerated(t *testing.T) {
+	// A local upstream reports no provider, and a role with no tolerance
+	// records none. Both must stay empty rather than picking up a placeholder.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+
+	if rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"anywhere","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	if recs[0].UpstreamProvider != "" {
+		t.Errorf("UpstreamProvider = %q, want empty", recs[0].UpstreamProvider)
+	}
+	if recs[0].PrivacyTolerance != "" {
+		t.Errorf("PrivacyTolerance = %q, want empty", recs[0].PrivacyTolerance)
+	}
+}
+
+func TestReqlogRecordsTheToleranceOnARefusal(t *testing.T) {
+	// The row that matters most for an audit: the request that was REFUSED.
+	// It has no serving provider by definition — the upstream was never
+	// called — but it must still carry the tolerance that refused it, or the
+	// refusal leaves no trace anyone can query.
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, "", sink)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"zen-seat","messages":[{"role":"user","content":"secret"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(PrivacyHeader, PrivacyZDR)
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	got := recs[0]
+	if got.PrivacyTolerance != PrivacyZDR {
+		t.Errorf("PrivacyTolerance = %q, want %q on a refused request", got.PrivacyTolerance, PrivacyZDR)
+	}
+	if got.UpstreamProvider != "" {
+		t.Errorf("UpstreamProvider = %q, want empty — nothing served it", got.UpstreamProvider)
+	}
+	if got.Status != http.StatusForbidden {
+		t.Errorf("Status = %d, want 403", got.Status)
+	}
+	if !strings.Contains(got.Error, "zero data retention") {
+		t.Errorf("Error should say why it was refused: %q", got.Error)
+	}
+}
+
+func TestParseUpstreamProviderIsAbsentSafe(t *testing.T) {
+	// Every local backend hits this path on every request.
+	cases := []struct{ name, body, want string }{
+		{"openrouter", `{"provider":"DeepInfra","choices":[]}`, "DeepInfra"},
+		{"local llama-server", `{"choices":[],"usage":{"prompt_tokens":1}}`, ""},
+		{"not json", `<html>502</html>`, ""},
+		{"empty", ``, ""},
+		{"provider is not a string", `{"provider":{"order":["x"]}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseUpstreamProvider([]byte(tc.body)); got != tc.want {
+				t.Errorf("parseUpstreamProvider(%s) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
 	}
 }

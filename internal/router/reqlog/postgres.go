@@ -69,6 +69,16 @@ CREATE INDEX IF NOT EXISTS router_requests_error_class_idx ON router_requests (e
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS principal TEXT;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS token_id TEXT;
 CREATE INDEX IF NOT EXISTS router_requests_principal_idx ON router_requests (principal) WHERE principal IS NOT NULL;
+
+-- Migrations for tables created before upstream provenance (idempotent).
+-- upstream_provider is the operator that served the request as the upstream
+-- reported it; privacy_tolerance is the retention posture the router enforced.
+-- Both indexed sparsely: only cloud requests populate them, so a partial index
+-- stays small even though the table is mostly local traffic.
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_provider TEXT;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS privacy_tolerance TEXT;
+CREATE INDEX IF NOT EXISTS router_requests_upstream_provider_idx ON router_requests (upstream_provider) WHERE upstream_provider IS NOT NULL;
+CREATE INDEX IF NOT EXISTS router_requests_privacy_tolerance_idx ON router_requests (privacy_tolerance) WHERE privacy_tolerance IS NOT NULL;
 `
 
 const insertSQL = `
@@ -78,9 +88,9 @@ INSERT INTO router_requests
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
-   principal, token_id)
+   principal, token_id, upstream_provider, privacy_tolerance)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -184,6 +194,7 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfEmpty(rec.Error),
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
+		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

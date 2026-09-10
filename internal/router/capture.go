@@ -132,6 +132,56 @@ func extractSSEUsage(tail []byte) (prompt, completion, total *int, tokPerSec *fl
 	return prompt, completion, total, tokPerSec
 }
 
+// ---------------------------------------------------------------------------
+// serving-provider parsing
+// ---------------------------------------------------------------------------
+
+// parseUpstreamProvider extracts OpenRouter's top-level `provider` field — the
+// operator that actually served the request ("Amazon Bedrock", "Novita").
+//
+// Separate from parseUsage rather than folded into it because the two answer
+// different questions and are absent independently: a local llama-server
+// reports usage and no provider, and an OpenRouter error envelope can report a
+// provider with no usage at all. Returns "" when the field is absent, which is
+// every non-OpenRouter upstream.
+func parseUpstreamProvider(body []byte) string {
+	var r struct {
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return ""
+	}
+	return r.Provider
+}
+
+// extractSSEProvider finds the serving provider in the tail of an SSE stream.
+//
+// OpenRouter stamps `provider` on EVERY chunk, not just the final usage one
+// (verified 2026-09-09), so the tail buffer is guaranteed to carry it whenever
+// the stream produced any output — no need to reach back to the first chunk,
+// which the rolling buffer has usually dropped by then.
+//
+// Takes the LAST value seen for the same reason extractSSEUsage does: if a
+// stream somehow reported more than one, the one that finished the response is
+// the one that served it.
+func extractSSEProvider(tail []byte) string {
+	provider := ""
+	for _, line := range bytes.Split(tail, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		if p := parseUpstreamProvider(data); p != "" {
+			provider = p
+		}
+	}
+	return provider
+}
+
 // contentTypeIsSSE reports whether the value indicates Server-Sent Events.
 func contentTypeIsSSE(ct string) bool {
 	return strings.HasPrefix(ct, "text/event-stream")

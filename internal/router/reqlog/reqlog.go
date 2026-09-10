@@ -75,6 +75,29 @@ type Record struct {
 	// request. It is what you revoke, and it is safe to store: the secret
 	// half never reaches this struct. Empty whenever Principal is.
 	TokenID string
+	// UpstreamProvider is the operator that actually served the request, as
+	// the upstream itself reported it — OpenRouter's top-level `provider`
+	// field ("Amazon Bedrock", "Novita", "DeepInfra"). Empty for local
+	// backends and for any upstream that does not report one.
+	//
+	// This is the only place the answer exists. The router chooses a MODEL;
+	// OpenRouter chooses the endpoint that serves it, from a pool that
+	// changes between requests — the same three models served from
+	// DeepInfra/Novita/Sail Research on one probe and
+	// Inceptron/Novita/DigitalOcean minutes later (2026-09-09). Neither
+	// models.yaml nor ResolvedVia can say where a given request went, so
+	// without this field that fact is simply not recoverable afterwards.
+	UpstreamProvider string
+	// PrivacyTolerance names the retention posture the router ENFORCED on
+	// this request ("zdr"), empty when none was demanded. Set whether the
+	// tolerance was satisfied by a local placement or by putting the
+	// directive on the wire.
+	//
+	// Paired with UpstreamProvider on purpose: a provider name alone is
+	// trivia, and a tolerance alone is a claim. Together they are evidence —
+	// "this request required zero retention AND was served by Amazon
+	// Bedrock" is a statement someone can audit a quarter later.
+	PrivacyTolerance string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     upstream_status   INTEGER,
     error_class       TEXT,
     principal         TEXT,
-    token_id          TEXT
+    token_id          TEXT,
+    upstream_provider TEXT,
+    privacy_tolerance TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -69,6 +71,8 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"error_class", "ALTER TABLE router_requests ADD COLUMN error_class TEXT"},
 	{"principal", "ALTER TABLE router_requests ADD COLUMN principal TEXT"},
 	{"token_id", "ALTER TABLE router_requests ADD COLUMN token_id TEXT"},
+	{"upstream_provider", "ALTER TABLE router_requests ADD COLUMN upstream_provider TEXT"},
+	{"privacy_tolerance", "ALTER TABLE router_requests ADD COLUMN privacy_tolerance TEXT"},
 }
 
 // sqlitePostMigrateSQL runs AFTER migrateSQLite, never inside
@@ -79,6 +83,7 @@ var sqliteMigrations = []struct{ name, ddl string }{
 // migration exists to support.
 const sqlitePostMigrateSQL = `
 CREATE INDEX IF NOT EXISTS router_requests_principal_idx ON router_requests (principal);
+CREATE INDEX IF NOT EXISTS router_requests_upstream_provider_idx ON router_requests (upstream_provider);
 `
 
 const sqliteInsertSQL = `
@@ -88,8 +93,8 @@ INSERT INTO router_requests
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
-   principal, token_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   principal, token_id, upstream_provider, privacy_tolerance)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -216,6 +221,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.Error),
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
+		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)
