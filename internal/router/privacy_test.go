@@ -541,3 +541,170 @@ func TestParseUpstreamProviderIsAbsentSafe(t *testing.T) {
 		})
 	}
 }
+
+// --- cost, cache and session headers ---------------------------------------
+
+func TestReqlogRecordsProviderBilledCostAndCacheHit(t *testing.T) {
+	// The OpenRouter usage shape, verbatim in the fields that matter: cost
+	// alongside the token counts, cached_tokens nested in
+	// prompt_tokens_details.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"provider":"Together","choices":[{"message":{"content":"ok"}}],
+			"usage":{"prompt_tokens":1650,"completion_tokens":4,"total_tokens":1654,
+			         "cost":9.718e-05,"prompt_tokens_details":{"cached_tokens":1536}}}`))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+	if rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"private","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	got := sink.Records()[0]
+	if got.UpstreamCostUSD == nil || *got.UpstreamCostUSD != 9.718e-05 {
+		t.Errorf("UpstreamCostUSD = %v, want 9.718e-05", got.UpstreamCostUSD)
+	}
+	if got.CachedPromptTokens == nil || *got.CachedPromptTokens != 1536 {
+		t.Errorf("CachedPromptTokens = %v, want 1536", got.CachedPromptTokens)
+	}
+	if got.PromptTokens == nil || *got.PromptTokens != 1650 {
+		t.Errorf("PromptTokens = %v, want 1650", got.PromptTokens)
+	}
+}
+
+func TestCostAndCacheSurviveTheSSETail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"provider\":\"Together\",\"choices\":[{\"delta\":{\"content\":\"o\"}}]}\n\n" +
+				"data: {\"provider\":\"Together\",\"choices\":[{\"delta\":{}}]," +
+				"\"usage\":{\"prompt_tokens\":1650,\"completion_tokens\":4,\"total_tokens\":1654," +
+				"\"cost\":0.00010868,\"prompt_tokens_details\":{\"cached_tokens\":1536}}}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+	if rec := postTo(t, rt, "/v1/chat/completions",
+		`{"model":"private","stream":true,"messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	got := sink.Records()[0]
+	if got.UpstreamCostUSD == nil || *got.UpstreamCostUSD != 0.00010868 {
+		t.Errorf("UpstreamCostUSD = %v, want 0.00010868", got.UpstreamCostUSD)
+	}
+	if got.CachedPromptTokens == nil || *got.CachedPromptTokens != 1536 {
+		t.Errorf("CachedPromptTokens = %v, want 1536", got.CachedPromptTokens)
+	}
+}
+
+func TestZeroCachedTokensIsRecordedNotDroppedAsAbsent(t *testing.T) {
+	// A total cache MISS reports cached_tokens: 0. That is the single most
+	// interesting value in the field — it is what a broken prefix cache looks
+	// like — so it must reach the row as 0, never as NULL.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"provider":"Parasail","choices":[],
+			"usage":{"prompt_tokens":1650,"cost":0.0003005,"prompt_tokens_details":{"cached_tokens":0}}}`))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+	postTo(t, rt, "/v1/chat/completions", `{"model":"private","messages":[]}`)
+
+	got := sink.Records()[0]
+	if got.CachedPromptTokens == nil {
+		t.Fatal("CachedPromptTokens = nil, want a recorded 0 — a full cache miss is data, not absence")
+	}
+	if *got.CachedPromptTokens != 0 {
+		t.Errorf("CachedPromptTokens = %d, want 0", *got.CachedPromptTokens)
+	}
+}
+
+func TestLocalUpstreamReportsNoCostOrCache(t *testing.T) {
+	// A local llama-server reports usage and nothing else. Both fields must
+	// stay nil rather than defaulting to a fabricated zero cost.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`))
+	}))
+	defer upstream.Close()
+
+	sink := &reqlog.MemorySink{}
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+	postTo(t, rt, "/v1/chat/completions", `{"model":"anywhere","messages":[]}`)
+
+	got := sink.Records()[0]
+	if got.UpstreamCostUSD != nil {
+		t.Errorf("UpstreamCostUSD = %v, want nil for an upstream that reports none", *got.UpstreamCostUSD)
+	}
+	if got.CachedPromptTokens != nil {
+		t.Errorf("CachedPromptTokens = %v, want nil", *got.CachedPromptTokens)
+	}
+	if got.TotalTokens == nil || *got.TotalTokens != 15 {
+		t.Errorf("TotalTokens = %v, want 15 — plain usage parsing regressed", got.TotalTokens)
+	}
+}
+
+// Session-affinity headers must reach the upstream untouched.
+//
+// This is load-bearing, not incidental. Both providers the fleet uses key
+// prompt-cache stickiness off a caller-supplied header — OpenRouter's
+// x-session-id and Zen's x-opencode-session — and a cache miss measured ~3x
+// the cost of a hit on the same prompt (2026-09-09). ReverseProxy forwards
+// inbound headers by default, so this passes today; the test exists so that a
+// future header-scrubbing change fails here instead of showing up as a
+// quietly larger bill.
+func TestSessionAffinityHeadersReachTheUpstream(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	rt := newPrivacyRouter(t, upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"or-seat","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-Id", "agent-run-42")
+	req.Header.Set("X-Opencode-Session", "opencode-abc")
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if v := got.Get("X-Session-Id"); v != "agent-run-42" {
+		t.Errorf("X-Session-Id upstream = %q, want agent-run-42 (OpenRouter sticky routing)", v)
+	}
+	if v := got.Get("X-Opencode-Session"); v != "opencode-abc" {
+		t.Errorf("X-Opencode-Session upstream = %q, want opencode-abc (Zen sticky routing)", v)
+	}
+}
+
+func TestUpstreamProviderLabelIsBounded(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  reqlog.Record
+		want string
+	}{
+		{"cloud names the provider", reqlog.Record{UpstreamProvider: "Novita", BackendURL: "https://openrouter.ai"}, "Novita"},
+		{"local is named, not blank", reqlog.Record{BackendURL: "http://delphi:5392"}, "local"},
+		{"never forwarded is none", reqlog.Record{}, "none"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := upstreamProviderLabel(tc.rec); got != tc.want {
+				t.Errorf("upstreamProviderLabel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

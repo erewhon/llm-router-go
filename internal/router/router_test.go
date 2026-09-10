@@ -868,9 +868,9 @@ func TestMetrics_RequestsAndTokensObserved(t *testing.T) {
 
 	for _, want := range []string{
 		// research alias -> nemotron-3-super; chat path; status 200
-		`router_requests_total{api_class="chat",model="nemotron-3-super",path="/v1/chat/completions",status="200"} 1`,
+		`router_requests_total{api_class="chat",model="nemotron-3-super",path="/v1/chat/completions",status="200",upstream_provider="local"} 1`,
 		// unresolved 404
-		`router_requests_total{api_class="unknown",model="unresolved",path="/v1/chat/completions",status="404"} 1`,
+		`router_requests_total{api_class="unknown",model="unresolved",path="/v1/chat/completions",status="404",upstream_provider="none"} 1`,
 		// tokens 7 prompt, 11 completion from the upstream usage block
 		`router_upstream_tokens_total{api_class="chat",kind="prompt",model="nemotron-3-super"} 7`,
 		`router_upstream_tokens_total{api_class="chat",kind="completion",model="nemotron-3-super"} 11`,

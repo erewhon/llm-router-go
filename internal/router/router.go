@@ -317,15 +317,18 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				}
 			}
 			lr.PrivacyTolerance = privacyTolerance
-			var tokPerSec *float64
+			var usage usageStats
 			switch {
 			case cap.jsonBody != nil:
-				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = parseUsage(cap.jsonBody)
+				usage = parseUsage(cap.jsonBody)
 				lr.UpstreamProvider = parseUpstreamProvider(cap.jsonBody)
 			case cap.sseTail != nil:
-				lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens, tokPerSec = extractSSEUsage(cap.sseTail.Tail())
+				usage = extractSSEUsage(cap.sseTail.Tail())
 				lr.UpstreamProvider = extractSSEProvider(cap.sseTail.Tail())
 			}
+			lr.PromptTokens, lr.CompletionTokens, lr.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+			lr.UpstreamCostUSD, lr.CachedPromptTokens = usage.CostUSD, usage.CachedPromptTokens
+			tokPerSec := usage.TokPerSec
 			if resolved != nil {
 				rt.tokStats.record(resolved.ModelID, tokPerSec, lr.CompletionTokens, lr.LatencyMS, time.Now())
 			}

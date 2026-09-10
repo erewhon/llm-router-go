@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS router_requests (
     principal         TEXT,
     token_id          TEXT,
     upstream_provider TEXT,
-    privacy_tolerance TEXT
+    privacy_tolerance TEXT,
+    upstream_cost_usd REAL,
+    cached_prompt_tokens INTEGER
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -73,6 +75,8 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"token_id", "ALTER TABLE router_requests ADD COLUMN token_id TEXT"},
 	{"upstream_provider", "ALTER TABLE router_requests ADD COLUMN upstream_provider TEXT"},
 	{"privacy_tolerance", "ALTER TABLE router_requests ADD COLUMN privacy_tolerance TEXT"},
+	{"upstream_cost_usd", "ALTER TABLE router_requests ADD COLUMN upstream_cost_usd REAL"},
+	{"cached_prompt_tokens", "ALTER TABLE router_requests ADD COLUMN cached_prompt_tokens INTEGER"},
 }
 
 // sqlitePostMigrateSQL runs AFTER migrateSQLite, never inside
@@ -93,8 +97,9 @@ INSERT INTO router_requests
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
-   principal, token_id, upstream_provider, privacy_tolerance)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   principal, token_id, upstream_provider, privacy_tolerance,
+   upstream_cost_usd, cached_prompt_tokens)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -222,6 +227,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
+		rec.UpstreamCostUSD, rec.CachedPromptTokens,
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

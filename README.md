@@ -54,6 +54,26 @@ sqlite3 requests.db "select resolved_via, upstream_provider, count(*)
 A refused request (403, upstream never called) records the tolerance with a NULL
 provider, so the refusal is queryable too rather than leaving no trace.
 
+`upstream_cost_usd` is what the provider actually billed (OpenRouter's
+`usage.cost`) rather than a token-rate estimate — it already accounts for the
+cache discount and for which endpoint served the request. `cached_prompt_tokens`
+is the part of the prompt that hit the provider's cache. Read together they say
+what prefix caching is worth: the same 1650-token prompt measured **~3x cheaper
+cached than uncached**, and providers of the same model differ in whether they
+cache at all.
+
+```sh
+sqlite3 requests.db "select upstream_provider,
+    sum(cached_prompt_tokens)*1.0/sum(prompt_tokens) as hit_rate,
+    round(sum(upstream_cost_usd), 4) as usd
+  from router_requests where upstream_cost_usd is not null group by 1"
+```
+
+Both providers the fleet uses key cache stickiness off a caller-supplied header
+— OpenRouter's `x-session-id`, OpenCode Zen's `x-opencode-session`. The router
+forwards inbound headers untouched, so a client that sets one keeps its warm
+cache through the proxy.
+
 ### Anthropic gateway (measurement tap)
 
 With an `api_class: anthropic` entry in `models.yaml` (see Scenario 8 in the

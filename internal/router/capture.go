@@ -90,32 +90,78 @@ func (s *streamTailCapture) Tail() []byte { return s.buf.Bytes() }
 // usage parsing
 // ---------------------------------------------------------------------------
 
+// usageStats is what one response reports about its own cost, in every sense
+// of the word. A struct rather than a fifth and sixth positional return:
+// TokPerSec and CostUSD are both *float64 and would sit next to each other in
+// a tuple, which is a transposition waiting to happen.
+//
+// Every field is a pointer so a real zero is distinguishable from "absent" —
+// a rerank with no billable tokens genuinely reports 0, and a cached-in-full
+// prompt genuinely reports 0 uncached tokens.
+type usageStats struct {
+	PromptTokens     *int
+	CompletionTokens *int
+	TotalTokens      *int
+	// TokPerSec carries Atlas' non-standard `response_token/s`, the engine's
+	// own measured decode rate.
+	TokPerSec *float64
+	// CostUSD is OpenRouter's `usage.cost` — what the request actually cost,
+	// as the provider billed it. Absent on every local backend, and worth more
+	// than a computed estimate: it already accounts for cache discounts and
+	// for whichever endpoint happened to serve the request, neither of which
+	// models.yaml's per-million rates can know.
+	CostUSD *float64
+	// CachedPromptTokens is `usage.prompt_tokens_details.cached_tokens` — the
+	// part of the prompt that hit the provider's cache. This is the only
+	// signal that says whether prefix caching is working at all: a cache hit
+	// measured ~3x cheaper than a miss on the same 1650-token prompt
+	// (2026-09-09), so a run of zeroes here is a bill, not a curiosity.
+	CachedPromptTokens *int
+}
+
 // parseUsage extracts an OpenAI-shape `usage` object from a non-streaming
-// response body. Returns nil if the body has no usage field. The token counts
-// are *int so a real 0 (e.g. rerank with zero billable tokens) is
-// distinguishable from "absent". tokPerSec carries Atlas' non-standard
-// `response_token/s` (the engine's own measured decode rate) when present.
-func parseUsage(body []byte) (prompt, completion, total *int, tokPerSec *float64) {
+// response body. Returns the zero struct if the body has no usage field.
+func parseUsage(body []byte) usageStats {
 	var r struct {
 		Usage *struct {
-			PromptTokens     *int     `json:"prompt_tokens"`
-			CompletionTokens *int     `json:"completion_tokens"`
-			TotalTokens      *int     `json:"total_tokens"`
-			RespTokPerSec    *float64 `json:"response_token/s"`
+			PromptTokens        *int     `json:"prompt_tokens"`
+			CompletionTokens    *int     `json:"completion_tokens"`
+			TotalTokens         *int     `json:"total_tokens"`
+			RespTokPerSec       *float64 `json:"response_token/s"`
+			Cost                *float64 `json:"cost"`
+			PromptTokensDetails *struct {
+				CachedTokens *int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &r); err != nil || r.Usage == nil {
-		return nil, nil, nil, nil
+		return usageStats{}
 	}
-	return r.Usage.PromptTokens, r.Usage.CompletionTokens, r.Usage.TotalTokens, r.Usage.RespTokPerSec
+	u := usageStats{
+		PromptTokens:     r.Usage.PromptTokens,
+		CompletionTokens: r.Usage.CompletionTokens,
+		TotalTokens:      r.Usage.TotalTokens,
+		TokPerSec:        r.Usage.RespTokPerSec,
+		CostUSD:          r.Usage.Cost,
+	}
+	if r.Usage.PromptTokensDetails != nil {
+		u.CachedPromptTokens = r.Usage.PromptTokensDetails.CachedTokens
+	}
+	return u
+}
+
+// present reports whether the response said anything about usage at all.
+func (u usageStats) present() bool {
+	return u.PromptTokens != nil || u.CompletionTokens != nil || u.TotalTokens != nil ||
+		u.TokPerSec != nil || u.CostUSD != nil || u.CachedPromptTokens != nil
 }
 
 // extractSSEUsage scans the tail bytes of an SSE stream for the last
 // `data: { ... "usage": {...} ... }` event and returns the parsed usage.
 // Robust to a truncated leading event (the tail may start mid-event after
 // the rolling buffer wraps).
-func extractSSEUsage(tail []byte) (prompt, completion, total *int, tokPerSec *float64) {
-	// Walk lines, find data: payloads, parse each, keep the last usage seen.
+func extractSSEUsage(tail []byte) usageStats {
+	var out usageStats
 	for _, line := range bytes.Split(tail, []byte("\n")) {
 		line = bytes.TrimRight(line, "\r")
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -125,11 +171,11 @@ func extractSSEUsage(tail []byte) (prompt, completion, total *int, tokPerSec *fl
 		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}
-		if p, c, tot, tps := parseUsage(data); p != nil || c != nil || tot != nil || tps != nil {
-			prompt, completion, total, tokPerSec = p, c, tot, tps
+		if u := parseUsage(data); u.present() {
+			out = u
 		}
 	}
-	return prompt, completion, total, tokPerSec
+	return out
 }
 
 // ---------------------------------------------------------------------------

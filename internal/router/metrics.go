@@ -66,8 +66,8 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_requests_total",
-		Help: "Requests handled by the router, labeled by route + resolved model + status.",
-	}, []string{"path", "model", "api_class", "status"})
+		Help: "Requests handled by the router, labeled by route + resolved model + status + serving provider.",
+	}, []string{"path", "model", "api_class", "status", "upstream_provider"})
 	reg.MustRegister(requests)
 
 	duration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -247,6 +247,28 @@ func (m *routerMetrics) snapshot() metricsSnapshot {
 	return s
 }
 
+// upstreamProviderLabel bounds the cardinality of the serving-provider label.
+//
+// "local" rather than "" for anything the fleet served: an empty label reads
+// as "missing data" on a graph, and the overwhelming majority of rows are
+// local, so the common case deserves a name. Requests rejected before an
+// upstream was tried are "none" — distinct from local, because a 403 on a
+// retention tolerance and a request answered by hypatia are not the same
+// thing and should not share a series.
+//
+// The remaining values come from the upstream itself. OpenRouter lists ~106
+// providers, realistically a handful in play for any one fleet, so the label
+// is bounded in the way that matters — it cannot grow with request volume.
+func upstreamProviderLabel(rec reqlog.Record) string {
+	if rec.UpstreamProvider != "" {
+		return rec.UpstreamProvider
+	}
+	if rec.BackendURL == "" {
+		return "none"
+	}
+	return "local"
+}
+
 // Observe records one Record's worth of telemetry. Called from handleProxy's
 // defer alongside the reqlog Sink, so every request — including 400/404 —
 // shows up in the metrics. Unresolved model names collapse into a single
@@ -260,7 +282,7 @@ func (m *routerMetrics) Observe(rec reqlog.Record) {
 	if apiClass == "" {
 		apiClass = "unknown"
 	}
-	m.requests.WithLabelValues(rec.Path, model, apiClass, strconv.Itoa(rec.Status)).Inc()
+	m.requests.WithLabelValues(rec.Path, model, apiClass, strconv.Itoa(rec.Status), upstreamProviderLabel(rec)).Inc()
 	m.duration.WithLabelValues(rec.Path, apiClass).Observe(float64(rec.LatencyMS) / 1000.0)
 	// One upstream-outcome sample for the record's final attempt, but only
 	// when an upstream was actually tried: UpstreamStatus > 0 means it

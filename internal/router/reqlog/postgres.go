@@ -79,6 +79,14 @@ ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_provider TEXT;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS privacy_tolerance TEXT;
 CREATE INDEX IF NOT EXISTS router_requests_upstream_provider_idx ON router_requests (upstream_provider) WHERE upstream_provider IS NOT NULL;
 CREATE INDEX IF NOT EXISTS router_requests_privacy_tolerance_idx ON router_requests (privacy_tolerance) WHERE privacy_tolerance IS NOT NULL;
+
+-- Migrations for tables created before provider-billed cost (idempotent).
+-- upstream_cost_usd is what the PROVIDER billed, not a token-rate estimate;
+-- cached_prompt_tokens is the part of the prompt that hit the provider cache.
+-- DOUBLE PRECISION rather than NUMERIC: these are sub-cent floats straight off
+-- the wire, summed for reporting, never used for settlement.
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_cost_usd DOUBLE PRECISION;
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cached_prompt_tokens INTEGER;
 `
 
 const insertSQL = `
@@ -88,9 +96,10 @@ INSERT INTO router_requests
    prompt_tokens, completion_tokens, total_tokens,
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
-   principal, token_id, upstream_provider, privacy_tolerance)
+   principal, token_id, upstream_provider, privacy_tolerance,
+   upstream_cost_usd, cached_prompt_tokens)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -195,6 +204,7 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfZero(rec.UpstreamStatus), nullIfEmpty(rec.ErrorClass),
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
+		rec.UpstreamCostUSD, rec.CachedPromptTokens,
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

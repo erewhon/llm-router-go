@@ -295,10 +295,12 @@ CREATE TABLE router_requests (
 	if err != nil {
 		t.Fatalf("NewSQLite (migrate): %v", err)
 	}
+	cost, cached := 9.718e-05, 1536
 	sink.Log(Record{
 		Method: "POST", Path: "/v1/chat/completions", Model: "thinker",
 		ResolvedVia: "or/minimax-m3", Status: 200, LatencyMS: 900,
 		UpstreamProvider: "Amazon Bedrock", PrivacyTolerance: "zdr",
+		UpstreamCostUSD: &cost, CachedPromptTokens: &cached,
 	})
 	if err := sink.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -310,10 +312,15 @@ CREATE TABLE router_requests (
 	}
 	defer db.Close()
 
-	var provider, tolerance *string
+	var (
+		provider, tolerance *string
+		gotCost             *float64
+		gotCached           *int
+	)
 	if err := db.QueryRow(
-		`SELECT upstream_provider, privacy_tolerance FROM router_requests WHERE model = ?`, "thinker",
-	).Scan(&provider, &tolerance); err != nil {
+		`SELECT upstream_provider, privacy_tolerance, upstream_cost_usd, cached_prompt_tokens
+		   FROM router_requests WHERE model = ?`, "thinker",
+	).Scan(&provider, &tolerance, &gotCost, &gotCached); err != nil {
 		t.Fatalf("query migrated row: %v", err)
 	}
 	if provider == nil || *provider != "Amazon Bedrock" {
@@ -321,6 +328,12 @@ CREATE TABLE router_requests (
 	}
 	if tolerance == nil || *tolerance != "zdr" {
 		t.Errorf("privacy_tolerance = %v, want zdr", tolerance)
+	}
+	if gotCost == nil || *gotCost != 9.718e-05 {
+		t.Errorf("upstream_cost_usd = %v, want 9.718e-05", gotCost)
+	}
+	if gotCached == nil || *gotCached != 1536 {
+		t.Errorf("cached_prompt_tokens = %v, want 1536", gotCached)
 	}
 }
 
@@ -349,7 +362,8 @@ func TestSQLiteSink_LocalRequestStoresNullProvenance(t *testing.T) {
 	var n int
 	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM router_requests
-		   WHERE upstream_provider IS NULL AND privacy_tolerance IS NULL`).Scan(&n); err != nil {
+		   WHERE upstream_provider IS NULL AND privacy_tolerance IS NULL
+		     AND upstream_cost_usd IS NULL AND cached_prompt_tokens IS NULL`).Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 1 {

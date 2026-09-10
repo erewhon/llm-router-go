@@ -88,6 +88,25 @@ type Record struct {
 	// models.yaml nor ResolvedVia can say where a given request went, so
 	// without this field that fact is simply not recoverable afterwards.
 	UpstreamProvider string
+	// UpstreamCostUSD is what the request cost, as the PROVIDER billed it
+	// (OpenRouter's `usage.cost`). Nil for local backends and for any upstream
+	// that does not report one.
+	//
+	// Preferred over multiplying tokens by the per-million rates in
+	// models.yaml, which cannot know two things this does: the cache discount
+	// actually applied, and which endpoint served the request — and endpoints
+	// of the same model are priced differently.
+	UpstreamCostUSD *float64
+	// CachedPromptTokens is the part of the prompt served from the provider's
+	// cache (`usage.prompt_tokens_details.cached_tokens`). Nil when the
+	// upstream reports no cache detail.
+	//
+	// Read against PromptTokens it is the prefix-cache hit rate, and read
+	// against UpstreamCostUSD it is what that hit rate is worth: the same
+	// 1650-token prompt measured ~3x cheaper cached than uncached
+	// (2026-09-09). Read against UpstreamProvider it says whether a provider
+	// switch cost you a warm cache.
+	CachedPromptTokens *int
 	// PrivacyTolerance names the retention posture the router ENFORCED on
 	// this request ("zdr"), empty when none was demanded. Set whether the
 	// tolerance was satisfied by a local placement or by putting the
