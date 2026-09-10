@@ -48,7 +48,8 @@ ExecStart=/usr/local/bin/llm-router-go \
     --wellknown-base-url=https://llm.bcc.sh/v1 \
     --dashboard \
     --dashboard-addr=:4011 \
-    --dashboard-public-url=https://llm.bcc.sh
+    --dashboard-public-url=https://llm.bcc.sh \
+    --pat-db=/var/lib/llm-router-go/pat.db
 
 # --dashboard serves the status UI on :4011 — the port the retired Python
 # litellm-dashboard used, so the hub Caddy front door (llm-dashboard.bcc.sh
@@ -57,6 +58,34 @@ ExecStart=/usr/local/bin/llm-router-go \
 # all interfaces because Caddy reaches it over Tailscale, and UFW + oauth2-proxy
 # are the access boundary. --dashboard-public-url only sets the copy-paste base
 # URL shown in the dashboard's Connection card.
+
+# --pat-db turns on per-user personal access tokens. The path sits inside
+# StateDirectory (below), which systemd creates and chowns to llm-router before
+# ExecStart, so it survives ProtectSystem=strict. OpenStore creates the file and
+# schema on first start and chmods it 0600 — no pre-seeding needed.
+#
+# THIS FLAG FAILS CLOSED, unlike every other optional subsystem in this unit: a
+# --pat-db that cannot be opened is fatal and the router does not listen. That
+# is deliberate (auth must never degrade to "serve anyway"), but it means the
+# path is load-bearing. Do not point it at a directory systemd is not creating.
+#
+# Shared --api-keys keep working alongside PATs and are attributed as
+# legacy:<fingerprint>, so this changes nothing for existing clients. Watch
+# legacy-principal traffic fall to zero before retiring ROUTER_API_KEYS:
+#   SELECT principal, count(*) FROM router_requests
+#    WHERE ts > now() - interval '1 day' GROUP BY 1;
+#
+# Mint a token (the secret is shown exactly once):
+#   sudo -u llm-router /usr/local/bin/llm-router-go \
+#       --pat-db=/var/lib/llm-router-go/pat.db \
+#       --pat-mint --pat-user steven --pat-label laptop
+#
+# NOTE: the store is a LOCAL SQLite file, so tokens are per-instance. That is
+# correct for this unit (one router per host, reached directly by local
+# consumers) and NOT sufficient for the OVN-LB replicas behind llm.bcc.sh,
+# where a token minted on one replica would be unknown to the other. See
+# homeops config/common/llm-router-replicas — those stay on shared keys until
+# the store question is settled.
 
 # Secrets land here from `ho secret get llm-router/api-key` via
 # deploy/scripts/deploy-router-secrets.sh. The `-` prefix makes the unit
