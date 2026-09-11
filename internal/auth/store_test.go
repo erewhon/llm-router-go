@@ -160,7 +160,7 @@ func TestListFiltersAndOrders(t *testing.T) {
 
 func TestScopesRoundTrip(t *testing.T) {
 	s := newStore(t)
-	wire, _, err := s.Mint("agent", "bg", []string{"models:local", "a:b"}, nil)
+	wire, _, err := s.Mint("agent", "bg", []string{"models:local_or_zdr", "models:local"}, nil)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestScopesRoundTrip(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 	// Stored sorted, so the column is stable and diffable.
-	want := []string{"a:b", "models:local"}
+	want := []string{"models:local", "models:local_or_zdr"}
 	if len(id.Scopes) != len(want) {
 		t.Fatalf("scopes = %v, want %v", id.Scopes, want)
 	}

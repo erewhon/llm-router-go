@@ -274,6 +274,11 @@ func (s *Store) Mint(principal, label string, scopes []string, expires *time.Tim
 		// meaning what the migration needs it to mean.
 		return "", Token{}, fmt.Errorf("auth: principal may not start with %q", LegacyPrincipalPrefix)
 	}
+	// A scope the router does not enforce must never reach the store: a
+	// token labelled with a posture nobody implements is trusted and wrong.
+	if err := ValidateScopes(scopes); err != nil {
+		return "", Token{}, err
+	}
 	wire, id, hash, err := Generate()
 	if err != nil {
 		return "", Token{}, err
@@ -382,6 +387,31 @@ func (s *Store) Revoke(id string) error {
 		// Distinguish "already revoked" from "no such token".
 		var exists int
 		if err := s.db.QueryRow(s.dial.rebind(`SELECT COUNT(1) FROM pat_tokens WHERE id = ?`), id).Scan(&exists); err != nil {
+			return fmt.Errorf("auth: revoke %s: %w", id, err)
+		}
+		if exists == 0 {
+			return ErrUnknown
+		}
+	}
+	return nil
+}
+
+// RevokeOwned revokes a token only if it belongs to principal. A token that
+// exists under another principal is reported as ErrUnknown, identically to a
+// token that does not exist: a self-service caller must not be able to learn
+// which ids are real by probing revoke.
+func (s *Store) RevokeOwned(id, principal string) error {
+	res, err := s.db.Exec(
+		s.dial.rebind(`UPDATE pat_tokens SET revoked_at = ? WHERE id = ? AND principal = ? AND revoked_at IS NULL`),
+		time.Now().UTC(), id, principal)
+	if err != nil {
+		return fmt.Errorf("auth: revoke %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var exists int
+		if err := s.db.QueryRow(
+			s.dial.rebind(`SELECT COUNT(1) FROM pat_tokens WHERE id = ? AND principal = ?`), id, principal,
+		).Scan(&exists); err != nil {
 			return fmt.Errorf("auth: revoke %s: %w", id, err)
 		}
 		if exists == 0 {

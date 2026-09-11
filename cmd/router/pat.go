@@ -22,12 +22,15 @@ type patAdminOpts struct {
 	// dsn selects the shared Postgres store. Mutually exclusive with dbPath,
 	// and it must be supported here rather than only on the serving path:
 	// a store you cannot mint into is not a store.
-	dsn     string
-	mint    bool
-	list    bool
-	revoke  string
-	user    string
-	label   string
+	dsn    string
+	mint   bool
+	list   bool
+	revoke string
+	user   string
+	label  string
+	// scope is the models: scope to mint with; empty mints an unrestricted
+	// token (auth.ScopeModelsAll). Validated by the store.
+	scope   string
 	expires time.Duration
 	stdout  io.Writer
 	stderr  io.Writer
@@ -91,7 +94,11 @@ func patMintCmd(store *auth.Store, o patAdminOpts) int {
 		t := time.Now().UTC().Add(o.expires)
 		expires = &t
 	}
-	wire, tok, err := store.Mint(o.user, o.label, nil, expires)
+	var scopes []string
+	if o.scope != "" {
+		scopes = []string{o.scope}
+	}
+	wire, tok, err := store.Mint(o.user, o.label, scopes, expires)
 	if err != nil {
 		fmt.Fprintf(o.stderr, "mint: %v\n", err)
 		return 1
@@ -103,6 +110,7 @@ func patMintCmd(store *auth.Store, o patAdminOpts) int {
 	if tok.Label != "" {
 		fmt.Fprintf(o.stdout, "label:     %s\n", tok.Label)
 	}
+	fmt.Fprintf(o.stdout, "scope:     %s\n", auth.Identity{Scopes: tok.Scopes}.ModelScope())
 	if expires != nil {
 		fmt.Fprintf(o.stdout, "expires:   %s\n", expires.Format(time.RFC3339))
 	}
@@ -127,7 +135,7 @@ func patListCmd(store *auth.Store, o patAdminOpts) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(o.stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tPRINCIPAL\tLABEL\tCREATED\tLAST USED\tSTATE")
+	fmt.Fprintln(tw, "ID\tPRINCIPAL\tLABEL\tSCOPE\tCREATED\tLAST USED\tSTATE")
 	now := time.Now()
 	for _, t := range toks {
 		state := "active"
@@ -139,8 +147,8 @@ func patListCmd(store *auth.Store, o patAdminOpts) int {
 				state = "expired"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			t.ID, t.Principal, dash(t.Label),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			t.ID, t.Principal, dash(t.Label), auth.Identity{Scopes: t.Scopes}.ModelScope(),
 			t.CreatedAt.Format("2006-01-02"), tsOrDash(t.LastUsedAt), state)
 	}
 	_ = tw.Flush()

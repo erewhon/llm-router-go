@@ -284,8 +284,10 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			privacyTolerance string
 			// privacyRefused marks a request the tier turned away, so reqlog
 			// and metrics can count it as a refusal rather than an error or
-			// an outage.
+			// an outage. refusalClass says which policy did it: the caller's
+			// header (privacy_refused) or the token's scope (scope_refused).
 			privacyRefused bool
+			refusalClass   = errorClassPrivacyRefused
 		)
 
 		defer func() {
@@ -329,7 +331,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				// Distinct from every upstream class: nothing was sent, so
 				// this must not count against any model's failure rate, and
 				// it must not fold into the 5xx error rate on the dashboard.
-				lr.ErrorClass = errorClassPrivacyRefused
+				lr.ErrorClass = refusalClass
 			}
 			var usage usageStats
 			switch {
@@ -378,11 +380,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// included — an agent loop's last message says nothing about its size.
 		promptTokens := estimatePromptTokens(body)
 
-		// The caller's privacy tier is read BEFORE resolution: it filters
-		// which candidates a role may consider, so a role listing a cloud
-		// seat first still serves a `local` request from a local seat lower
-		// down. A malformed value is refused here, before any seat is chosen.
-		callerTier, privSource, privRefuse := parsePrivacyHeader(r)
+		// The caller's privacy tier — the stricter of their X-Router-Privacy
+		// header and their token's scope (scope.go) — is read BEFORE
+		// resolution: it filters which candidates a role may consider, so a
+		// role listing a cloud seat first still serves a `local` request from
+		// a local seat lower down. A malformed value is refused here, before
+		// any seat is chosen.
+		demand, privRefuse := privacyDemandFor(r)
 		if privRefuse != "" {
 			errMsg = privRefuse
 			privacyRefused = true
@@ -390,6 +394,8 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			writePrivacyRefusal(rec, tierNone, privRefuse, nil)
 			return
 		}
+		callerTier, privSource := demand.tier, demand.source
+		refusalClass = demand.errorClass()
 
 		res, err := rt.resolveModel(model, forceDirect, promptTokens, callerTier)
 		if err != nil {
@@ -404,9 +410,10 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				privacyTolerance = privErr.Tier.String()
 				privacyRefused = true
 				rt.logger.WarnContext(r.Context(), "refusing on privacy tier: no compliant candidate",
-					"subject", privErr.Subject, "tier", privErr.Tier.String(), "excluded", privErr.Excluded)
+					"subject", privErr.Subject, "tier", privErr.Tier.String(), "excluded", privErr.Excluded,
+					"scope", demand.scope, "token_id", demand.tokenID)
 				rt.metrics.ObservePrivacyRefusal(privErr.Tier.String(), privErr.Subject)
-				writePrivacyRefusal(rec, privErr.Tier, errMsg, privErr.Excluded)
+				demand.writeRefusal(rec, privErr.Tier, errMsg, privErr.Excluded)
 				return
 			}
 			// A role that resolved to nothing is a fleet-state problem, not a
@@ -476,11 +483,12 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				if refusal := rt.applyPrivacy(bodyMap, res, privTier, privSource); refusal != "" {
 					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
 						"model", model, "resolved_via", res.ModelID, "role", res.Role,
-						"tier", privTier.String(), "reason", refusal)
+						"tier", privTier.String(), "scope", demand.scope, "token_id", demand.tokenID,
+						"reason", refusal)
 					errMsg = refusal
 					privacyRefused = true
 					rt.metrics.ObservePrivacyRefusal(privTier.String(), coalesce(res.Role, res.Chain))
-					writePrivacyRefusal(rec, privTier, refusal, nil)
+					demand.writeRefusal(rec, privTier, refusal, nil)
 					return
 				}
 				rec.Header().Set(PrivacyHeader, privTier.String())

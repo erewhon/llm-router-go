@@ -45,6 +45,10 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 			modelIn  string
 			resolved *resolveResult
 			errMsg   string
+			// refusalClass is set when a privacy tier or token scope turned
+			// the request away before any upstream was tried.
+			refusalClass     string
+			privacyTolerance string
 		)
 
 		defer func() {
@@ -65,6 +69,10 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 				lr.BackendURL = resolved.BackendURL
 				lr.ResolvedVia = resolved.ModelID
 				lr.APIClass = string(resolved.APIClass)
+			}
+			lr.PrivacyTolerance = privacyTolerance
+			if refusalClass != "" {
+				lr.ErrorClass = refusalClass
 			}
 			rt.sink.Log(lr)
 			rt.metrics.Observe(lr)
@@ -97,9 +105,23 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 		}
 		modelIn = model
 
+		// The caller's privacy tier and the token's scope bind here exactly
+		// as on the JSON endpoints: an image model on a paid provider is
+		// still a paid provider, and a models:local token must not reach it
+		// via the multipart door when the JSON one is shut.
+		demand, refuse := privacyDemandFor(r)
+		if refuse != "" {
+			errMsg = refuse
+			refusalClass = errorClassPrivacyRefused
+			rt.metrics.ObservePrivacyRefusal("invalid", "")
+			writePrivacyRefusal(rec, tierNone, refuse, nil)
+			return
+		}
+		privacyTolerance = demand.tier.String()
+
 		// 0 disables the context gate: image models declare no envelope, and
 		// the multipart body's size is dominated by pixels, not prompt.
-		res, err := rt.resolveModel(model, true, 0, tierNone)
+		res, err := rt.resolveModel(model, true, 0, demand.tier)
 		if err != nil {
 			errMsg = err.Error()
 			rt.logger.WarnContext(r.Context(), "resolve failed", "model", model, "err", err)
@@ -107,6 +129,20 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 			return
 		}
 		resolved = &res
+		if demand.tier != tierNone {
+			if m, ok := rt.registry.Models[res.ModelID]; ok {
+				if why := privacyGate(m, demand.tier); why != "" {
+					errMsg = fmt.Sprintf("%s, but %q is %s", demand.source, res.ModelID, why)
+					refusalClass = demand.errorClass()
+					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
+						"model", model, "resolved_via", res.ModelID, "tier", demand.tier.String(),
+						"scope", demand.scope, "token_id", demand.tokenID, "reason", errMsg)
+					rt.metrics.ObservePrivacyRefusal(demand.tier.String(), "")
+					demand.writeRefusal(rec, demand.tier, errMsg, nil)
+					return
+				}
+			}
+		}
 
 		if requireClass != "" && res.APIClass != requireClass {
 			errMsg = fmt.Sprintf("model %q has api_class %q; %s requires %q",

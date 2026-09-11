@@ -312,7 +312,7 @@ func (m *routerMetrics) Observe(rec reqlog.Record) {
 	// Requests rejected before forwarding (400/404/503) contribute nothing.
 	// A privacy refusal never reached an upstream, so it must not be scored
 	// against one — even when a seat had been resolved before the refusal.
-	if rec.BackendURL != "" && rec.ErrorClass != errorClassPrivacyRefused &&
+	if rec.BackendURL != "" && !isPolicyRefusal(rec.ErrorClass) &&
 		(rec.UpstreamStatus > 0 || rec.ErrorClass != "") {
 		m.ObserveUpstream(model, rec.BackendURL, rec.ErrorClass)
 	}

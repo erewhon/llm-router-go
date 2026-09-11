@@ -127,7 +127,14 @@ const errorClassPrivacyRefused = "privacy_refused"
 // it would make a healthy endpoint look degraded under a misbehaving client.
 // privacy_refused is excluded because no upstream was involved at all.
 func isUpstreamFailure(class string) bool {
-	return class != "" && class != "client_error" && class != errorClassPrivacyRefused
+	return class != "" && class != "client_error" && !isPolicyRefusal(class)
+}
+
+// isPolicyRefusal reports whether an error class means the router itself
+// turned the request away on policy — a privacy tier or a token scope —
+// before any upstream was involved. Neither counts against a seat.
+func isPolicyRefusal(class string) bool {
+	return class == errorClassPrivacyRefused || class == errorClassScopeRefused
 }
 
 // ---------------------------------------------------------------------------
