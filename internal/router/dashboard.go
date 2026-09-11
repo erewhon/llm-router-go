@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/erewhon/llm-router-go/internal/auth"
 	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/health"
 )
@@ -39,14 +40,32 @@ var dashboardHTMLTemplate string
 // answered. The dashboard still probes live rather than reading the tracker's
 // cache: it wants sub-second VRAM and tok/s, which a 15s poll can't give.
 
-// DashboardConfig holds the values substituted into the served HTML. Both are
-// display-only reference material in the "Connection" card — they don't affect
-// routing. APIBase is the public OpenAI-compatible base URL clients should hit
-// (e.g. http://localhost:4010 locally, https://llm.bcc.sh on euclid); APIKey is
-// the hint shown in the curl example.
+// DashboardConfig configures the dashboard listener.
+//
+// APIBase and APIKey are display-only reference material substituted into the
+// "Connection" card — they don't affect routing. APIBase is the public
+// OpenAI-compatible base URL clients should hit (e.g. http://localhost:4010
+// locally, https://llm.bcc.sh on euclid); APIKey is the hint shown in the
+// curl example.
+//
+// The remaining fields wire token self-service; see dashboard_tokens.go.
 type DashboardConfig struct {
 	APIBase string
 	APIKey  string
+	// Tokens is the PAT store self-service mints into. Nil disables the
+	// /api/tokens routes (they answer 404-shaped 503s, not silence).
+	Tokens *auth.Store
+	// AuthSecret is the value the front proxy must send in X-Dashboard-Auth
+	// for an identity header to be believed. Empty means the listener has no
+	// way to verify identity: /api/tokens is off, and /api/chat + /api/usage
+	// stay open exactly as before (the local-dev posture).
+	AuthSecret string
+	// IdentityHeader names the header carrying the proxy-verified principal
+	// (oauth2-proxy's X-Auth-Request-Email by default).
+	IdentityHeader string
+	// Owners may mint any scope from the dashboard. Everyone else is capped
+	// at models:local — a family token must be structurally unable to spend.
+	Owners []string
 }
 
 // DashboardHandler returns the http.Handler for the dashboard listener. The
@@ -77,8 +96,16 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.HandleFunc("GET /api/node-metrics", rt.handleDashNodeMetrics)
 	mux.HandleFunc("GET /api/router-metrics", rt.handleDashRouterMetrics)
 	mux.HandleFunc("GET /api/upstream", rt.handleDashUpstream)
-	mux.HandleFunc("POST /api/chat", rt.handleDashChat)
 	rt.dashConfig = cfg
+	// Identity-bearing routes. When a secret is configured every one of
+	// these demands the proxy's identity; without one, chat and usage stay
+	// open (local dev) and tokens are refused, since minting needs a person.
+	ident := rt.dashIdentityGate(cfg)
+	mux.Handle("POST /api/chat", ident(http.HandlerFunc(rt.handleDashChat)))
+	mux.Handle("GET /api/usage", ident(http.HandlerFunc(rt.handleDashUsage)))
+	mux.Handle("GET /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensList)))
+	mux.Handle("POST /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensMint)))
+	mux.Handle("DELETE /api/tokens/{id}", ident(http.HandlerFunc(rt.handleDashTokensRevoke)))
 	return mux
 }
 

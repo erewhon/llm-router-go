@@ -181,6 +181,28 @@
   .chat-send:disabled { opacity: 0.5; cursor: default; }
   .chat-stop { background: rgba(248,113,113,0.15); color: var(--red); border: 1px solid var(--red); }
 
+  /* Access tokens dialog + usage table */
+  .header-btns { display: flex; gap: 0.5rem; flex-shrink: 0; }
+  .tok-who { flex: 1; min-width: 0; color: var(--text-dim); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tok-body { padding: 1rem; overflow-y: auto; max-height: 70vh; font-size: 0.85rem; }
+  .tok-reveal { border: 1px solid var(--green); background: rgba(74,222,128,0.08); border-radius: 8px; padding: 0.7rem 0.9rem; margin-bottom: 1rem; }
+  .tok-secret { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; }
+  .tok-secret code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 0.8rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; }
+  .tok-form { display: grid; grid-template-columns: minmax(12rem, 2fr) auto auto auto; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+  .tok-form input, .tok-form select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.5rem; font-size: 0.82rem; font-family: inherit; min-width: 0; }
+  .tok-form button { cursor: pointer; font-weight: 600; font-size: 0.82rem; border-radius: 6px; padding: 0.45rem 0.9rem; background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+  .tok-form button:disabled { opacity: 0.5; cursor: default; }
+  .tok-hint { color: var(--text-dim); font-size: 0.75rem; margin: -0.5rem 0 1rem; }
+  .tok-table, .usage-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+  .tok-table th, .usage-table th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); }
+  .tok-table td, .usage-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .tok-table td.num, .usage-table td.num, .tok-table th.num, .usage-table th.num { text-align: right; }
+  .tok-table tr.dead td { color: var(--text-dim); }
+  .tok-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.74rem; color: var(--text-dim); }
+  .tok-revoke { cursor: pointer; font-size: 0.72rem; border-radius: 5px; padding: 0.2rem 0.55rem; background: rgba(248,113,113,0.12); color: var(--red); border: 1px solid var(--red); }
+  .tok-err { color: var(--red); margin-bottom: 0.8rem; white-space: pre-wrap; }
+  @media (max-width: 640px) { .tok-form { grid-template-columns: 1fr 1fr; } }
+
   /* Models table */
   table {
     width: 100%;
@@ -373,7 +395,10 @@
       <h1>LLM Router</h1>
       <p class="subtitle">Model registry and routing status</p>
     </div>
-    <button class="chat-open-btn" onclick="openChat()">&#128172; Chat</button>
+    <div class="header-btns">
+      <button class="chat-open-btn" onclick="openTokens()" title="Personal access tokens for llm.bcc.sh">&#128273; Tokens</button>
+      <button class="chat-open-btn" onclick="openChat()">&#128172; Chat</button>
+    </div>
   </div>
 
   <div id="content"><p class="loading">Loading...</p></div>
@@ -391,6 +416,15 @@
       <button id="chatSend" class="chat-send" onclick="sendChat()">Send</button>
       <button id="chatStop" class="chat-stop" onclick="stopChat()" style="display:none">Stop</button>
     </div>
+  </dialog>
+
+  <dialog id="tokDialog" class="chat-dialog">
+    <div class="chat-head">
+      <strong>Access tokens</strong>
+      <span id="tokWho" class="tok-who"></span>
+      <button class="chat-x" onclick="closeTokens()" title="Close">&#10005;</button>
+    </div>
+    <div id="tokBody" class="tok-body"><p class="chat-placeholder">Loading&#8230;</p></div>
   </dialog>
 
 <script>
@@ -435,6 +469,7 @@ async function load() {
     updateHistory(lastData.node_metrics || {});
     await fetchRouterMetrics();
     await fetchUpstream();
+    await fetchUsage();
     el.innerHTML = render(lastData);
   } catch (e) {
     el.innerHTML = `<p class="error">Failed to load: ${e.message}</p>`;
@@ -467,6 +502,31 @@ async function fetchUpstream() {
     const d = await r.json();
     lastData.upstream = d.upstream || [];
   } catch (_) { /* keep previous upstream data on a failed poll */ }
+}
+
+// Usage by principal — from the reqlog sink, so it survives router restarts.
+// A 401 means this listener wants the front proxy's identity and we came in
+// some other way; the panel simply stays hidden.
+async function fetchUsage() {
+  if (!lastData) return;
+  try {
+    const r = await fetch('/api/usage?hours=24');
+    if (!r.ok) { lastData.usage = null; return; }
+    lastData.usage = await r.json();
+  } catch (_) { /* keep previous usage data on a failed poll */ }
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function fmtAgoIso(iso) {
+  if (!iso) return '';
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 90) return `${Math.round(s)}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)}m ago`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 
 async function pollMetrics() {
@@ -773,6 +833,30 @@ function render(data) {
           <div class="node-name">Top models <span style="color:var(--text-dim);font-weight:400">by requests</span></div>
           <div class="node-detail" style="margin-top:0.4rem;line-height:1.7">${topModels}</div>
         </div>
+      </div>`;
+  }
+
+  // Usage by user — who is spending what, from the durable request log.
+  // Hidden when the sink cannot answer (no reqlog) or the listener wanted
+  // an identity we did not present.
+  const us = data.usage;
+  if (us && us.available && (us.rows || []).length) {
+    const rows = us.rows.map(r => {
+      const who = r.principal
+        ? escHtml(r.principal)
+        : '<span style="color:var(--text-dim)">(unattributed)</span>';
+      const tok = (r.prompt_tokens || 0) + (r.completion_tokens || 0);
+      const cost = r.cost_usd ? '$' + r.cost_usd.toFixed(r.cost_usd < 0.1 ? 4 : 2) : '<span style="color:var(--text-dim)">local</span>';
+      const fail = r.failures ? `<span style="color:var(--red)">${r.failures}</span>` : '0';
+      return `<tr><td>${who}</td><td class="num">${(r.requests || 0).toLocaleString()}</td><td class="num">${fail}</td><td class="num">${tok.toLocaleString()}</td><td class="num">${cost}</td><td>${fmtAgoIso(r.last_seen)}</td></tr>`;
+    }).join('');
+    html += `
+      <div class="section-title">Usage by user <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(last ${us.hours}h, from the request log)</span></div>
+      <div class="node-card" style="padding:0.5rem 0.9rem;overflow-x:auto">
+        <table class="usage-table">
+          <thead><tr><th>principal</th><th class="num">requests</th><th class="num">failures</th><th class="num">tokens</th><th class="num">cost</th><th>last seen</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>`;
   }
 
@@ -1268,6 +1352,125 @@ setInterval(pollMetrics, 1000);  // fast live metrics (GPU, requests, tok/s)
 // same way modelType() classifies them by tag.
 // ----------------------------------------------------------------------------
 let chatAbort = null;
+
+// ----------------------------------------------------------------------------
+// Access tokens: list / mint / revoke the signed-in person's own PATs. The
+// listener verifies identity via the front proxy's shared secret; reached any
+// other way, /api/tokens answers 401/503 and the dialog says so.
+// ----------------------------------------------------------------------------
+let tokState = null;
+
+const SCOPE_LABEL = {
+  'models:local': 'local only — fleet hardware, nothing billed',
+  'models:local_or_zdr': 'local or zero-retention cloud',
+  'models:*': 'unrestricted — any model, including paid providers',
+};
+
+async function openTokens() {
+  document.getElementById('tokDialog').showModal();
+  await loadTokens();
+}
+
+function closeTokens() {
+  document.getElementById('tokDialog').close();
+}
+
+async function loadTokens(reveal) {
+  const body = document.getElementById('tokBody');
+  try {
+    const r = await fetch('/api/tokens', { cache: 'no-store' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      tokState = null;
+      document.getElementById('tokWho').textContent = '';
+      body.innerHTML = `<p class="chat-err">${escHtml(d.error || ('HTTP ' + r.status))}</p>`;
+      return;
+    }
+    tokState = d;
+    renderTokens(reveal);
+  } catch (e) {
+    body.innerHTML = `<p class="chat-err">${escHtml(e.message)}</p>`;
+  }
+}
+
+function renderTokens(reveal, err) {
+  const d = tokState;
+  document.getElementById('tokWho').textContent = d.principal + (d.owner ? ' · owner' : '');
+  const allowed = d.allowed_scopes || ['models:local'];
+  const defaultScope = allowed.includes('models:local') ? 'models:local' : allowed[allowed.length - 1];
+  let h = '';
+  if (err) h += `<div class="tok-err">${escHtml(err)}</div>`;
+  if (reveal) {
+    h += `<div class="tok-reveal">
+      <div><strong>New token “${escHtml(reveal.label)}” — copy it now.</strong> Only its hash is stored, so it cannot be shown again.</div>
+      <div class="tok-secret"><code id="tokSecret">${escHtml(reveal.token)}</code><button class="copy-btn" onclick="copyText(document.getElementById('tokSecret').textContent, this)">copy</button></div>
+      <div class="tok-hint" style="margin:0.5rem 0 0">Use it as the API key at <code>%%API_BASE%%/v1</code>.</div>
+    </div>`;
+  }
+  h += `<form class="tok-form" onsubmit="mintToken(event)">
+      <input id="tokLabel" placeholder="label (laptop, opencode, night-agent)" maxlength="80" required>
+      <select id="tokScope">${allowed.map(s => `<option value="${escHtml(s)}"${s === defaultScope ? ' selected' : ''}>${escHtml(SCOPE_LABEL[s] || s)}</option>`).join('')}</select>
+      <select id="tokExp"><option value="0">never expires</option><option value="30">30 days</option><option value="90">90 days</option><option value="365" selected>1 year</option></select>
+      <button id="tokMint" type="submit">Mint</button>
+    </form>
+    <div class="tok-hint">${d.owner
+      ? 'You are an owner: you may mint any scope. Blank defaults to local-only.'
+      : 'Your tokens are local-only: they reach fleet hardware and can never bill a cloud provider.'}</div>`;
+  const toks = d.tokens || [];
+  if (!toks.length) {
+    h += '<p class="chat-placeholder">No tokens yet.</p>';
+  } else {
+    const fmtDay = iso => iso ? new Date(iso).toISOString().slice(0, 10) : '—';
+    h += `<table class="tok-table"><thead><tr><th>label</th><th>id</th><th>scope</th><th>created</th><th>last used</th><th>expires</th><th>state</th><th></th></tr></thead><tbody>` +
+      toks.map(t => `<tr class="${t.state === 'active' ? '' : 'dead'}">
+        <td>${escHtml(t.label) || '—'}</td>
+        <td class="tok-id">${escHtml(t.id)}</td>
+        <td>${escHtml(t.scope)}</td>
+        <td>${fmtDay(t.created_at)}</td>
+        <td>${t.last_used_at ? fmtAgoIso(t.last_used_at) : 'never'}</td>
+        <td>${t.expires_at ? fmtDay(t.expires_at) : 'never'}</td>
+        <td>${escHtml(t.state)}</td>
+        <td>${t.state === 'active' ? `<button class="tok-revoke" onclick="revokeToken('${escHtml(t.id)}', '${escHtml(t.label)}')">revoke</button>` : ''}</td>
+      </tr>`).join('') + '</tbody></table>';
+  }
+  document.getElementById('tokBody').innerHTML = h;
+}
+
+async function mintToken(ev) {
+  ev.preventDefault();
+  const btn = document.getElementById('tokMint');
+  btn.disabled = true;
+  const payload = {
+    label: document.getElementById('tokLabel').value.trim(),
+    scope: document.getElementById('tokScope').value,
+    expires_days: parseInt(document.getElementById('tokExp').value, 10) || 0,
+  };
+  try {
+    const r = await fetch('/api/tokens', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { renderTokens(null, d.error || ('HTTP ' + r.status)); return; }
+    await loadTokens(d);
+  } catch (e) {
+    renderTokens(null, e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function revokeToken(id, label) {
+  if (!confirm(`Revoke token “${label || id}”? Anything using it stops working on its next request.`)) return;
+  try {
+    const r = await fetch('/api/tokens/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (!r.ok && r.status !== 204) {
+      const d = await r.json().catch(() => ({}));
+      renderTokens(null, d.error || ('HTTP ' + r.status));
+      return;
+    }
+    await loadTokens();
+  } catch (e) {
+    renderTokens(null, e.message);
+  }
+}
 
 function chatCapable(m) {
   if (!m.enabled) return false;

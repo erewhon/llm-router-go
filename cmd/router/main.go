@@ -111,7 +111,18 @@ func run(args []string) int {
 		patRevoke  = fs.String("pat-revoke", "", "revoke the PAT with this id in --pat-db and exit")
 		patUser    = fs.String("pat-user", "", "with --pat-mint: the principal the token belongs to; with --pat-list: filter to one principal")
 		patLabel   = fs.String("pat-label", "", "with --pat-mint: a human label for the token (e.g. 'laptop', 'background-agent')")
+		patScope   = fs.String("pat-scope", "", "with --pat-mint: models scope — models:local (fleet hardware only), models:local_or_zdr, or models:* (default, unrestricted)")
 		patExpires = fs.Duration("pat-expires", 0, "with --pat-mint: lifetime (e.g. 720h); zero means no expiry")
+
+		// Dashboard identity. The dashboard listener has no auth of its own:
+		// behind the hub it is oauth2-proxy-gated and Caddy forwards the
+		// resolved identity in X-Auth-Request-*. Nothing proves those headers
+		// came from Caddy rather than from whoever can reach the VIP, so the
+		// identity-bearing routes (/api/tokens, /api/chat, /api/usage) also
+		// require a shared secret only Caddy knows. Empty = self-service off.
+		dashAuthSecret = fs.String("dashboard-auth-secret", "", "shared secret the front proxy sends in X-Dashboard-Auth; gates the dashboard's identity-bearing routes. Empty falls back to $DASHBOARD_AUTH_SECRET, then disables token self-service")
+		dashOwners     = fs.String("dashboard-owners", "", "comma-separated principals allowed to mint unrestricted (models:*) tokens from the dashboard; everyone else is capped at models:local. Empty falls back to $DASHBOARD_OWNERS")
+		dashIDHeader   = fs.String("dashboard-identity-header", "X-Auth-Request-Email", "request header carrying the proxy-verified principal")
 
 		showVer = fs.Bool("version", false, "print version and exit")
 
@@ -160,6 +171,7 @@ func run(args []string) int {
 			revoke:  *patRevoke,
 			user:    *patUser,
 			label:   *patLabel,
+			scope:   *patScope,
 			expires: *patExpires,
 			stdout:  os.Stdout,
 			stderr:  os.Stderr,
@@ -396,12 +408,31 @@ func run(args []string) int {
 		if apiBase == "" {
 			apiBase = deriveAPIBase(*addr)
 		}
-		if !isLoopbackBind(*dashboardAddr) {
-			logger.Warn("dashboard listener is NOT loopback — it has no bearer auth and its /api/chat can invoke any model; front it with your own auth (oauth2-proxy) or bind 127.0.0.1",
+		secret := *dashAuthSecret
+		if secret == "" {
+			secret = os.Getenv("DASHBOARD_AUTH_SECRET")
+		}
+		owners := *dashOwners
+		if owners == "" {
+			owners = os.Getenv("DASHBOARD_OWNERS")
+		}
+		switch {
+		case !isLoopbackBind(*dashboardAddr) && secret == "":
+			logger.Warn("dashboard listener is NOT loopback and no --dashboard-auth-secret is set — it has no bearer auth and its /api/chat can invoke any model; front it with your own auth (oauth2-proxy) or bind 127.0.0.1. Token self-service is OFF",
 				"addr", *dashboardAddr)
+		case secret != "" && patStore == nil:
+			logger.Warn("dashboard identity is configured but no PAT store is — /api/chat and /api/usage are gated, token self-service is OFF")
+		case secret != "":
+			logger.Info("dashboard identity enabled: token self-service on", "identity_header", *dashIDHeader, "owners", len(splitCSV(owners)))
 		}
 		dashHandler := httpx.Chain(
-			rt.DashboardHandler(router.DashboardConfig{APIBase: apiBase}),
+			rt.DashboardHandler(router.DashboardConfig{
+				APIBase:        apiBase,
+				Tokens:         patStore,
+				AuthSecret:     secret,
+				IdentityHeader: *dashIDHeader,
+				Owners:         splitCSV(owners),
+			}),
 			httpx.RequestID,
 			httpx.AccessLog(logger.With("svc", "dashboard")),
 			httpx.Recover(logger),
