@@ -312,8 +312,10 @@ func TestAutoRouter_ComplexityUpgrades(t *testing.T) {
 	if got := ar.Classify(ctx, msgs, TierFree); got != "coder-hard" {
 		t.Errorf("auto-free -> %q, want coder-hard", got)
 	}
-	if got := ar.Classify(ctx, msgs, TierFull); got != "claude-opus-4-6" {
-		t.Errorf("auto-full -> %q, want claude-opus-4-6", got)
+	// The alias, never a generation-specific key: the key it once named had
+	// been removed from models.yaml and the escalation was 404ing.
+	if got := ar.Classify(ctx, msgs, TierFull); got != escalationModel {
+		t.Errorf("auto-full -> %q, want %q", got, escalationModel)
 	}
 
 	// A simple coder prompt must NOT upgrade even on the higher tiers.

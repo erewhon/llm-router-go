@@ -4,13 +4,13 @@ package toolproxy
 // comparing against pre-computed category embeddings, then returns a model
 // alias. The proxy redirects the request (with the chosen alias) through
 // LiteLLM, which resolves the alias to a real backend — the alias may be an
-// external model (e.g. claude-opus-4-6) the tool proxy can't route itself.
+// external model (the `opus` alias) the tool proxy can't route itself.
 //
 // Port of src/llm_router/tool_proxy/auto_router.py. Three coding-focused
 // complexity tiers:
 //   - auto:      coder (default) / thinker / research / vision
 //   - auto-free: + coder-hard upgrade for hard coding tasks
-//   - auto-full: + claude-opus-4-6 for very hard coding tasks
+//   - auto-full: + the `opus` alias (whatever Opus chain models.yaml points it at) for very hard coding tasks
 
 import (
 	"bytes"
@@ -141,6 +141,18 @@ func NewAutoRouter(embedURL, embedModel string, client *http.Client, logger *slo
 }
 
 // canRoute reports whether a target is usable right now, failing open.
+// escalationModel is where auto-full sends a very hard coding task. It is
+// the `opus` ALIAS, not a registry key, on purpose: the alias rides on
+// whichever Opus-generation chain models.yaml currently points it at, so a
+// new generation is a config swap and never a code change. Before 2026-09-11
+// this was the literal "claude-opus-4-6" — a key that no longer existed in
+// models.yaml. canRoute treats unknown names as routable (the mirror only
+// knows what is DOWN), so nothing stopped the escalation — the router would
+// have answered 404 unknown model. reqlog holds no request to that name, so
+// in practice no auto-full prompt ever crossed the threshold; the path was
+// broken, not bleeding.
+const escalationModel = "opus"
+
 func (ar *AutoRouter) canRoute(name string) bool {
 	if ar.routable == nil {
 		return true
@@ -290,9 +302,9 @@ func (ar *AutoRouter) Classify(ctx context.Context, messages []any, tier AutoTie
 	// would turn a working request into a failing one.
 	if bestRoutable == "coder" && (tier == TierFree || tier == TierFull) {
 		complexity := scoreComplexity(userMsg, size)
-		if tier == TierFull && complexity >= veryHardThreshold && ar.canRoute("claude-opus-4-6") {
-			ar.logDecision(ctx, tier, classifyText, bestRoutable, "claude-opus-4-6", scores, &complexity, size)
-			return "claude-opus-4-6"
+		if tier == TierFull && complexity >= veryHardThreshold && ar.canRoute(escalationModel) {
+			ar.logDecision(ctx, tier, classifyText, bestRoutable, escalationModel, scores, &complexity, size)
+			return escalationModel
 		}
 		if complexity >= hardThreshold && ar.canRoute("coder-hard") {
 			ar.logDecision(ctx, tier, classifyText, bestRoutable, "coder-hard", scores, &complexity, size)
