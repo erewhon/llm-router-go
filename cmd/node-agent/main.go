@@ -31,14 +31,15 @@ func main() {
 func run(args []string) int {
 	fs := flag.NewFlagSet("node-agent", flag.ContinueOnError)
 	var (
-		addr       = fs.String("addr", ":8100", "listen address")
-		modelsYAML = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
-		nodeName   = fs.String("node", "", "node name in models.yaml (defaults to hostname's first label)")
-		logLevel   = fs.String("log-level", "info", "log level: debug, info, warn, error")
-		logFormat  = fs.String("log-format", "json", "log format: json or text")
-		shutdownTo = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
-		probeHost  = fs.String("probe-host", "localhost", "host name backend probes target")
-		showVer    = fs.Bool("version", false, "print version and exit")
+		addr         = fs.String("addr", ":8100", "listen address")
+		modelsYAML   = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
+		nodeName     = fs.String("node", "", "node name in models.yaml (defaults to hostname's first label)")
+		logLevel     = fs.String("log-level", "info", "log level: debug, info, warn, error")
+		logFormat    = fs.String("log-format", "json", "log format: json or text")
+		shutdownTo   = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
+		probeHost    = fs.String("probe-host", "localhost", "host name backend probes target")
+		showVer      = fs.Bool("version", false, "print version and exit")
+		validateOnly = fs.Bool("validate", false, "load --models-yaml with THIS binary's config package, report OK or the load error, and exit; the deploy preflight runs this on every reader before pushing a registry")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -46,6 +47,20 @@ func run(args []string) int {
 
 	if *showVer {
 		fmt.Println(version)
+		return 0
+	}
+	// --validate exists so a registry can be checked against EVERY binary
+	// that will read it, not only the router. The three cmds share the config
+	// package but ship separately, and on 2026-09-10 a models.yaml using a
+	// value only the newest router understood crash-looped every agent and
+	// the tool proxy while the router's own validator reported 0 errors.
+	// The check is exactly the load this binary performs at startup.
+	if *validateOnly {
+		if _, err := config.Load(*modelsYAML); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", *modelsYAML, err)
+			return 1
+		}
+		fmt.Printf("OK — %s loads with %s\n", *modelsYAML, version)
 		return 0
 	}
 

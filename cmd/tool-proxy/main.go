@@ -63,13 +63,28 @@ func run(args []string) int {
 		egressDefault    = fs.String("egress-default", "", "egress spec when a request sends no X-Egress (empty = current default exit)")
 		egressMaxTries   = fs.Int("egress-max-tries", 3, "max relays to try per request before failing (failover on a dead relay)")
 
-		showVer = fs.Bool("version", false, "print version and exit")
+		showVer      = fs.Bool("version", false, "print version and exit")
+		validateOnly = fs.Bool("validate", false, "load --models-yaml with THIS binary's config package, report OK or the load error, and exit; the deploy preflight runs this on every reader before pushing a registry")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *showVer {
 		fmt.Println(version)
+		return 0
+	}
+	// --validate exists so a registry can be checked against EVERY binary
+	// that will read it, not only the router. The three cmds share the config
+	// package but ship separately, and on 2026-09-10 a models.yaml using a
+	// value only the newest router understood crash-looped every agent and
+	// the tool proxy while the router's own validator reported 0 errors.
+	// The check is exactly the load this binary performs at startup.
+	if *validateOnly {
+		if _, err := config.Load(*modelsYAML); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", *modelsYAML, err)
+			return 1
+		}
+		fmt.Printf("OK — %s loads with %s\n", *modelsYAML, version)
 		return 0
 	}
 
