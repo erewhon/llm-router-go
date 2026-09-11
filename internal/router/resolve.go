@@ -72,6 +72,13 @@ type resolveResult struct {
 	// BINDS, this header and the availability reason are the only way a
 	// caller learns their preferred seat was skipped.
 	Downshift string
+	// PressureNote is the "id=n,..." summary of the routable candidates' load
+	// at resolution time, surfaced as X-Router-Pressure. Empty unless the role
+	// used balance: pressure.
+	PressureNote string
+	// CandidatePressure is the chosen seat's pressure score, for reqlog. Nil
+	// unless the role balanced and the chosen seat is a plain candidate.
+	CandidatePressure *int
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in

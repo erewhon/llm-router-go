@@ -785,6 +785,68 @@ func (t *Tracker) NodeStatuses() []NodeStatus {
 	return out
 }
 
+// SeatLoad is the per-seat load telemetry the pressure balancer consumes:
+// how many requests the agent sees in flight and queued for this model, and
+// the GPU-utilisation percentage of the node it runs on (-1 = unknown). The
+// router reads these on the poll callback and never on the request path.
+type SeatLoad struct {
+	Running    int
+	Waiting    int
+	GPUBusyPct int
+	Node       string
+}
+
+// SeatLoads returns per-model load for every fleet-resident model, folded from
+// the most recent node poll. Nodeless externals are omitted (nothing to
+// balance). GPUBusyPct is the node's aggregate GPU utilisation, or the max of
+// its per-GPU busy percentages, and -1 when the agent reported none.
+func (t *Tracker) SeatLoads() map[string]SeatLoad {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	reg := t.cfg.Registry
+	if reg == nil {
+		return nil
+	}
+	out := make(map[string]SeatLoad, len(reg.Models))
+	for id, m := range reg.Models {
+		nodes := modelNodes(m)
+		if len(nodes) == 0 {
+			continue // nodeless external: not balanced
+		}
+		node := nodes[0] // head node's card is the one that decodes
+		snap := t.nodes[node]
+		load := SeatLoad{GPUBusyPct: -1, Node: node}
+		if snap.Health != nil {
+			load.GPUBusyPct = nodeGPUBusy(snap.Health)
+		}
+		for _, am := range snap.Models {
+			if am.ModelID == id {
+				load.Running = am.RequestsRunning
+				load.Waiting = am.RequestsWaiting
+				break
+			}
+		}
+		out[id] = load
+	}
+	return out
+}
+
+// nodeGPUBusy folds an agent health payload into one GPU-utilisation percent:
+// the top-level gpu_busy_pct if present, else the busiest per-GPU reading,
+// else -1 (unknown).
+func nodeGPUBusy(h *AgentHealth) int {
+	if h.GPUBusyPct != nil {
+		return *h.GPUBusyPct
+	}
+	busy := -1
+	for _, g := range h.GPUs {
+		if g.BusyPct != nil && *g.BusyPct > busy {
+			busy = *g.BusyPct
+		}
+	}
+	return busy
+}
+
 // Nodes returns the most recent snapshot per node, for callers that want the
 // raw agent payload (the dashboard).
 func (t *Tracker) Nodes() map[string]NodeSnapshot {

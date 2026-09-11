@@ -47,6 +47,11 @@ type Record struct {
 	// RoleOverflowed marks a role that exhausted its in-contract candidates
 	// and fell through to its declared overflow list.
 	RoleOverflowed bool
+	// CandidatePressure is the load score of the seat this request was routed
+	// to, when the role used pressure balancing. Nil otherwise. Makes the
+	// balancing effect measurable: group rows by resolved model and read the
+	// spread of pressures each seat served at.
+	CandidatePressure *int
 	// FailoverFrom is the model that failed mid-request, when this record's
 	// ResolvedVia is the candidate that took over. Empty when no failover
 	// happened.

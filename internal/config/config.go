@@ -361,6 +361,17 @@ func (l Locality) bindsOverflow() bool {
 	return l == LocalityLocalOrZDR
 }
 
+// RoleBalance selects how a role orders its same-rank routable candidates.
+type RoleBalance string
+
+const (
+	// BalanceOrder keeps the declared candidate order (the default).
+	BalanceOrder RoleBalance = "order"
+	// BalancePressure sorts same-rank, same-locality routable candidates by
+	// ascending load, so interchangeable seats share traffic.
+	BalancePressure RoleBalance = "pressure"
+)
+
 // OnEmpty is what a role does when no candidate is available.
 type OnEmpty string
 
@@ -393,6 +404,18 @@ type RoleDefinition struct {
 	// Candidates are model ids in preference order. Order is the whole point:
 	// it is read top-to-bottom as "best first, last resort last".
 	Candidates []string `yaml:"candidates"`
+	// Balance selects how the routable candidates at one preference rank are
+	// ordered. "order" (the default) keeps declared order — the pre-existing
+	// behaviour. "pressure" sorts the routable, same-rank, same-locality
+	// candidates by ascending load, so interchangeable seats share traffic.
+	// Rank is declared order unless BalanceGroups ties seats to one rank.
+	Balance RoleBalance `yaml:"balance,omitempty"`
+	// BalanceGroups declares sets of candidates that are interchangeable and
+	// should be treated as ONE preference rank — the seats pressure balancing
+	// spreads across. Every id must appear in Candidates. Candidates not named
+	// in any group keep their own rank (declared order). Inert unless
+	// Balance == "pressure".
+	BalanceGroups [][]string `yaml:"balance_groups,omitempty"`
 	// OnEmpty selects the behaviour when no candidate is available.
 	// Defaults to OnEmptyError.
 	OnEmpty OnEmpty `yaml:"on_empty,omitempty"`
@@ -414,6 +437,9 @@ func (rd *RoleDefinition) UnmarshalYAML(node *yaml.Node) error {
 	*rd = RoleDefinition(aux)
 	if rd.Require.Locality == "" {
 		rd.Require.Locality = LocalityAny
+	}
+	if rd.Balance == "" {
+		rd.Balance = BalanceOrder
 	}
 	return nil
 }
@@ -489,10 +515,68 @@ type ModelRegistry struct {
 	// resolution behaves exactly as it did before they existed.
 	Roles map[string]RoleDefinition `yaml:"roles,omitempty"`
 
+	// Router carries global router tuning that is not per-model or per-role
+	// (pressure balancing today). Absent means every default applies.
+	Router RouterConfig `yaml:"router,omitempty"`
+
 	// ToolProxyAddr is the address tool_proxy models are routed to. Not read
 	// from YAML — set programmatically (router --tool-proxy-url flag). Empty
 	// falls back to DefaultToolProxyAddr.
 	ToolProxyAddr string `yaml:"-"`
+}
+
+// RouterConfig is global router tuning (the models.yaml `router:` block).
+type RouterConfig struct {
+	Pressure PressureConfig `yaml:"pressure,omitempty"`
+}
+
+// PressureConfig tunes pressure-aware role balancing. Zero values mean the
+// documented defaults, resolved by the accessors so an absent block behaves
+// exactly like the shipped defaults.
+type PressureConfig struct {
+	// WindowS is how recently a seat must have served a role's model to earn
+	// the warm-cache preference (-1 pressure). Default 90s.
+	WindowS int `yaml:"window_s,omitempty"`
+	// GPUBuckets are the GPU-utilisation percentages (ascending) that raise a
+	// seat's node into pressure bucket 1, 2, 3. Default 40/70/85.
+	GPUBuckets []int `yaml:"gpu_buckets,omitempty"`
+}
+
+// DefaultPressureWindowS / DefaultPressureGPUBuckets back the accessors.
+const DefaultPressureWindowS = 90
+
+// DefaultPressureGPUBuckets returns a fresh copy of the default thresholds.
+func DefaultPressureGPUBuckets() []int { return []int{40, 70, 85} }
+
+// Window returns the warm-cache window, defaulting when unset.
+func (p PressureConfig) Window() int {
+	if p.WindowS <= 0 {
+		return DefaultPressureWindowS
+	}
+	return p.WindowS
+}
+
+// Buckets returns the GPU-utilisation thresholds, defaulting when unset.
+func (p PressureConfig) Buckets() []int {
+	if len(p.GPUBuckets) == 0 {
+		return DefaultPressureGPUBuckets()
+	}
+	return p.GPUBuckets
+}
+
+// GPUBucket maps a GPU-utilisation percentage to a 0-3 pressure bucket using
+// the configured thresholds. A negative pct (unknown) is bucket 0.
+func (p PressureConfig) GPUBucket(pct int) int {
+	if pct < 0 {
+		return 0
+	}
+	b := 0
+	for _, thr := range p.Buckets() {
+		if pct >= thr {
+			b++
+		}
+	}
+	return b
 }
 
 // Load reads and validates the registry from a YAML file.
@@ -613,6 +697,31 @@ func validateRole(name string, role *RoleDefinition, r *ModelRegistry) error {
 	}
 	for _, id := range role.Overflow {
 		errs = append(errs, roleMemberErrs(name, "overflow", id, role, r, role.Require.Locality.bindsOverflow())...)
+	}
+
+	switch role.Balance {
+	case "", BalanceOrder, BalancePressure:
+	default:
+		errs = append(errs, fmt.Errorf("role %q: unknown balance %q (want %q or %q)", name, role.Balance, BalanceOrder, BalancePressure))
+	}
+	// Every balance-group member must be a candidate (never an overflow entry:
+	// overflow is a different locality and is never pressure-balanced), and no
+	// candidate may sit in two groups.
+	cand := make(map[string]bool, len(role.Candidates))
+	for _, id := range role.Candidates {
+		cand[id] = true
+	}
+	seen := map[string]int{}
+	for gi, g := range role.BalanceGroups {
+		for _, id := range g {
+			if !cand[id] {
+				errs = append(errs, fmt.Errorf("role %q: balance_groups references %q, which is not one of its candidates", name, id))
+			}
+			if prev, dup := seen[id]; dup {
+				errs = append(errs, fmt.Errorf("role %q: %q appears in balance_groups %d and %d; a candidate belongs to one rank", name, id, prev, gi))
+			}
+			seen[id] = gi
+		}
 	}
 
 	return errors.Join(errs...)
@@ -917,6 +1026,25 @@ func (r *ModelRegistry) RolesForMode(mode string) map[string]RoleDefinition {
 	for name, role := range r.Roles {
 		role.Candidates = keep(role.Candidates)
 		role.Overflow = keep(role.Overflow)
+		if len(role.BalanceGroups) > 0 {
+			present := make(map[string]bool, len(role.Candidates))
+			for _, id := range role.Candidates {
+				present[id] = true
+			}
+			groups := make([][]string, 0, len(role.BalanceGroups))
+			for _, g := range role.BalanceGroups {
+				kept := make([]string, 0, len(g))
+				for _, id := range g {
+					if present[id] {
+						kept = append(kept, id)
+					}
+				}
+				if len(kept) > 0 {
+					groups = append(groups, kept)
+				}
+			}
+			role.BalanceGroups = groups
+		}
 		if len(role.Candidates) == 0 && len(role.Overflow) == 0 {
 			continue
 		}

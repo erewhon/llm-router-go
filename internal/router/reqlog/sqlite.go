@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS router_requests (
     prefix_hash_chain TEXT,
     role              TEXT,
     role_overflowed   INTEGER NOT NULL DEFAULT 0,
+    candidate_pressure INTEGER,
     failover_from     TEXT,
     error             TEXT,
     upstream_status   INTEGER,
@@ -77,6 +78,7 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"privacy_tolerance", "ALTER TABLE router_requests ADD COLUMN privacy_tolerance TEXT"},
 	{"upstream_cost_usd", "ALTER TABLE router_requests ADD COLUMN upstream_cost_usd REAL"},
 	{"cached_prompt_tokens", "ALTER TABLE router_requests ADD COLUMN cached_prompt_tokens INTEGER"},
+	{"candidate_pressure", "ALTER TABLE router_requests ADD COLUMN candidate_pressure INTEGER"},
 }
 
 // sqlitePostMigrateSQL runs AFTER migrateSQLite, never inside
@@ -98,8 +100,8 @@ INSERT INTO router_requests
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
    principal, token_id, upstream_provider, privacy_tolerance,
-   upstream_cost_usd, cached_prompt_tokens)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   upstream_cost_usd, cached_prompt_tokens, candidate_pressure)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -228,6 +230,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
 		rec.UpstreamCostUSD, rec.CachedPromptTokens,
+		rec.CandidatePressure,
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

@@ -119,7 +119,13 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 	}
 	tier := effectiveTier(rd, caller)
 
-	order := rt.expandChains(roleOrder(rd))
+	base := roleOrder(rd)
+	var pressureNote string
+	var pressureByID map[string]int
+	if rd.Balance == config.BalancePressure {
+		base, pressureByID, pressureNote = rt.orderByPressure(base, rd, rt.avail.Routable)
+	}
+	order := rt.expandChains(base)
 	reasons := make([]string, 0, len(order))
 	// excluded is the privacy tier's own list, kept apart from reasons so a
 	// total miss can be classified: policy-only is a 403 the caller cannot
@@ -174,6 +180,13 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 		res.PromptTokens = promptTokens
 		res.Downshift = gatedOut
 		res.PrivacyTier = tier
+		res.PressureNote = pressureNote
+		if pressureByID != nil {
+			if p, ok := pressureByID[cand.ModelID]; ok {
+				pv := p
+				res.CandidatePressure = &pv
+			}
+		}
 		return res, nil
 	}
 

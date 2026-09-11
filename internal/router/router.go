@@ -77,6 +77,9 @@ type Router struct {
 	// upstreamStats is the rolling 24h window of upstream attempt outcomes per
 	// (model, endpoint). Feeds the dashboard's /api/upstream failure panel.
 	upstreamStats *upstreamTracker
+	// pressure holds per-seat load signals for pressure-aware role balancing.
+	// Never nil; New builds it from the registry's router.pressure config.
+	pressure *pressureTracker
 	// zdrCanary reports whether the OpenRouter account is still enforcing
 	// zero data retention account-wide. Nil when unconfigured; Status() is
 	// nil-safe so /health needs no branch.
@@ -189,6 +192,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 	}
 	r.active = registry.ModelsForMode(r.mode)
 	r.roles = registry.RolesForMode(r.mode)
+	r.pressure = newPressureTracker(registry.Router.Pressure, logger.With("subsys", "pressure"))
 	r.metrics = newRouterMetrics(r.version, r.started, r.active)
 	return r
 }
@@ -307,6 +311,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.ViaToolProxy = resolved.ViaToolProxy
 				lr.Role = resolved.Role
 				lr.RoleOverflowed = resolved.Overflowed
+				lr.CandidatePressure = resolved.CandidatePressure
 				lr.FailoverFrom = failoverFrom
 				// Upstream outcome of the final attempt. Envelope detection is
 				// JSON-body-only by design: a 2xx JSON body carrying a
@@ -505,7 +510,9 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				_, suppressRetryable = rt.nextRoleCandidate(res, forceDirect)
 			}
 
+			rt.pressure.addInflight(res.ModelID)
 			upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap, suppressRetryable)
+			rt.pressure.doneInflight(res.ModelID)
 			if upstreamErr == nil {
 				// A 503 that passed through from a fleet seat is the "Loading
 				// model" shape: the listing is up, generation is not. Tell the
@@ -516,6 +523,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 					rt.avail.ReportFailure(res.ModelID, &errUpstreamStatus{Status: http.StatusServiceUnavailable})
 				} else {
 					rt.avail.ReportSuccess(res.ModelID)
+					rt.pressure.markServed(res.ModelID)
 				}
 				return
 			}
@@ -589,6 +597,9 @@ func (rt *Router) setRoleHeaders(w http.ResponseWriter, res resolveResult) {
 	h.Set("X-Router-Resolved", res.ModelID)
 	if res.Overflowed {
 		h.Set("X-Router-Overflow", "true")
+	}
+	if res.PressureNote != "" {
+		h.Set("X-Router-Pressure", res.PressureNote)
 	}
 	// The soft gate binds, so a caller who asked for a role and got something
 	// other than its first choice has no other way to find out. Never silent —

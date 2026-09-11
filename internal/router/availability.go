@@ -105,6 +105,12 @@ func (rt *Router) roleBindings() []roleBinding {
 // current tracker state. Wire it as the tracker's OnPoll callback so the
 // gauges track fleet state rather than request traffic.
 func (rt *Router) PublishAvailabilityMetrics() {
+	// Refresh the pressure balancer's agent-load table off the request path.
+	if src, ok := rt.avail.(interface {
+		SeatLoads() map[string]health.SeatLoad
+	}); ok {
+		rt.pressure.setLoads(src.SeatLoads())
+	}
 	models := make(map[string]bool, len(rt.active))
 	for id := range rt.active {
 		models[id] = rt.avail.Routable(id)
