@@ -152,9 +152,10 @@ models:
 	saturday := at(t, "2026-08-08 03:00")
 	fleet := &fakeFleet{down: map[string]bool{"archimedes": true}}
 	tr := NewTracker(Config{
-		Registry: reg,
-		Probe:    fleet.probe(map[string]string{"archimedes.local": "archimedes"}),
-		Now:      func() time.Time { return saturday },
+		Registry:        reg,
+		Probe:           fleet.probe(map[string]string{"archimedes.local": "archimedes"}),
+		GenerationProbe: probeOK,
+		Now:             func() time.Time { return saturday },
 	})
 	tr.PollOnce(t.Context())
 	tr.PollOnce(t.Context())

@@ -507,7 +507,16 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 
 			upstreamErr := rt.reverseProxyTo(rec, r, res.BackendURL, newBody, res.AuthBearer, res.AuthHeader, cap, suppressRetryable)
 			if upstreamErr == nil {
-				rt.avail.ReportSuccess(res.ModelID)
+				// A 503 that passed through from a fleet seat is the "Loading
+				// model" shape: the listing is up, generation is not. Tell the
+				// tracker so the seat goes back to warming instead of taking
+				// the next request too. Only fleet seats — a provider's 503 is
+				// its own business and stays with the breaker's chain path.
+				if cap.upstreamStatus == http.StatusServiceUnavailable && rt.isLocalSeat(res.ModelID) {
+					rt.avail.ReportFailure(res.ModelID, &errUpstreamStatus{Status: http.StatusServiceUnavailable})
+				} else {
+					rt.avail.ReportSuccess(res.ModelID)
+				}
 				return
 			}
 
@@ -549,6 +558,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			*cap = responseCapture{}
 		}
 	}
+}
+
+// isLocalSeat reports whether a resolved model is pinned to fleet hardware —
+// the seats whose 503s mean "still loading" rather than "provider trouble".
+func (rt *Router) isLocalSeat(id string) bool {
+	m, ok := rt.registry.Models[id]
+	return ok && m.IsLocal()
 }
 
 // maxFailoverAttempts caps how far down a role's preference order one request
@@ -799,8 +815,7 @@ func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, m := range rt.active {
 		modelsByClass[string(m.APIClass)]++
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"status":          "ok",
 		"version":         rt.version,
 		"mode":            rt.mode,
@@ -812,5 +827,19 @@ func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// reads as "fine"; a field saying "unknown" reads as "nobody has
 		// checked", which is the truth and is actionable.
 		"zdr_account": rt.zdrCanary.Status(),
-	})
+	}
+	// Verdict tallies over the active set, so a seat stuck warming shows up
+	// on the endpoint every monitor already hits. Per-model detail is on
+	// /v1/availability.
+	if rep, ok := rt.avail.(availabilityReporter); ok {
+		counts := map[string]int{}
+		for _, s := range rep.Snapshot() {
+			if _, active := rt.active[s.Model]; active {
+				counts[string(s.State)]++
+			}
+		}
+		body["availability"] = counts
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }

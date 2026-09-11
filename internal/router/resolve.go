@@ -305,7 +305,7 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 	// not a registry key, because the tool proxy keys auto-routing off the name.
 	viaToolProxy := m.Backend != config.BackendExternal && effectiveToolProxy
 
-	backendModel := strings.SplitN(m.HFRepo, "#", 2)[0]
+	backendModel := m.BackendModelName()
 	if viaToolProxy {
 		// The tool proxy disambiguates shared hf_repos by registry key, so the
 		// router forwards the model_id (PLAN Phase 3: "model_id preserved").

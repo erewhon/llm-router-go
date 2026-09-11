@@ -138,7 +138,8 @@ func (m *Mirror) FetchOnce(ctx context.Context) {
 	routable := make(map[string]bool, len(doc.Models)+len(doc.Roles))
 	for _, mo := range doc.Models {
 		// Unknown counts as routable — the router has no evidence against it.
-		routable[mo.Model] = mo.State != string(Unavailable)
+		// Warming does not: the listing is up but the seat cannot generate yet.
+		routable[mo.Model] = mo.State != string(Unavailable) && mo.State != string(Warming)
 	}
 	for _, r := range doc.Roles {
 		routable[r.Role] = r.Available

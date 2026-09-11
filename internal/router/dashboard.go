@@ -240,26 +240,31 @@ func (rt *Router) handleDashNodeMetrics(w http.ResponseWriter, r *http.Request) 
 }
 
 type dashModel struct {
-	ID              string   `json:"id"`
-	HFRepo          string   `json:"hf_repo"`
-	Backend         string   `json:"backend"`
-	Nodes           []string `json:"nodes"`
-	HeadNode        *string  `json:"head_node"`
-	VRAMGB          int      `json:"vram_gb"`
-	AlwaysOn        bool     `json:"always_on"`
-	Enabled         bool     `json:"enabled"`
-	ToolProxy       bool     `json:"tool_proxy"`
-	Aliases         []string `json:"aliases"`
-	Capabilities    []string `json:"capabilities"`
-	Tags            []string `json:"tags"`
-	APIBase         string   `json:"api_base"`
-	Health          string   `json:"health"`
-	AgentState      *string  `json:"agent_state"`
-	RequestsRunning int      `json:"requests_running"`
-	RequestsWaiting int      `json:"requests_waiting"`
-	AvgTokPerS      *float64 `json:"avg_tok_per_s"`
-	TotalRequests   int      `json:"total_requests"`
-	GGUFFile        string   `json:"gguf_file"`
+	ID           string   `json:"id"`
+	HFRepo       string   `json:"hf_repo"`
+	Backend      string   `json:"backend"`
+	Nodes        []string `json:"nodes"`
+	HeadNode     *string  `json:"head_node"`
+	VRAMGB       int      `json:"vram_gb"`
+	AlwaysOn     bool     `json:"always_on"`
+	Enabled      bool     `json:"enabled"`
+	ToolProxy    bool     `json:"tool_proxy"`
+	Aliases      []string `json:"aliases"`
+	Capabilities []string `json:"capabilities"`
+	Tags         []string `json:"tags"`
+	APIBase      string   `json:"api_base"`
+	Health       string   `json:"health"`
+	AgentState   *string  `json:"agent_state"`
+	// Availability is the tracker's routing verdict ("available", "warming",
+	// "unavailable", "unknown") when tracking is on, else empty. It is what
+	// the router actually acts on; agent_state is what the node agent says.
+	Availability       string   `json:"availability,omitempty"`
+	AvailabilityReason string   `json:"availability_reason,omitempty"`
+	RequestsRunning    int      `json:"requests_running"`
+	RequestsWaiting    int      `json:"requests_waiting"`
+	AvgTokPerS         *float64 `json:"avg_tok_per_s"`
+	TotalRequests      int      `json:"total_requests"`
+	GGUFFile           string   `json:"gguf_file"`
 	// ContextLength is the window as served; EffectiveContext is the window
 	// within which the seat is actually worth routing to. They travel together
 	// because either one alone invites the wrong reading. Zero means unset.
@@ -285,6 +290,13 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+
+	verdicts := map[string]health.Status{}
+	if rep, ok := rt.avail.(availabilityReporter); ok {
+		for _, s := range rep.Snapshot() {
+			verdicts[s.Model] = s
+		}
+	}
 
 	models := make([]dashModel, 0, len(ids))
 	for _, id := range ids {
@@ -341,26 +353,30 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		}
 
 		models = append(models, dashModel{
-			ID:              id,
-			HFRepo:          m.HFRepo,
-			Backend:         string(m.Backend),
-			Nodes:           nodes,
-			HeadNode:        head,
-			VRAMGB:          m.VRAMGB,
-			AlwaysOn:        m.AlwaysOn,
-			Enabled:         m.Enabled,
-			ToolProxy:       m.ToolProxy,
-			Aliases:         orEmpty(m.Aliases),
-			Capabilities:    capabilityStrings(m.Capabilities),
-			Tags:            orEmpty(m.Tags),
-			APIBase:         apiBase,
-			Health:          health,
-			AgentState:      statePtr,
-			RequestsRunning: reqs.RequestsRunning,
-			RequestsWaiting: reqs.RequestsWaiting,
-			AvgTokPerS:      avgTok,
-			TotalRequests:   reqs.TotalRequests,
-			GGUFFile:        m.GGUFFile,
+			ID:           id,
+			HFRepo:       m.HFRepo,
+			Backend:      string(m.Backend),
+			Nodes:        nodes,
+			HeadNode:     head,
+			VRAMGB:       m.VRAMGB,
+			AlwaysOn:     m.AlwaysOn,
+			Enabled:      m.Enabled,
+			ToolProxy:    m.ToolProxy,
+			Aliases:      orEmpty(m.Aliases),
+			Capabilities: capabilityStrings(m.Capabilities),
+			Tags:         orEmpty(m.Tags),
+			APIBase:      apiBase,
+			Health:       health,
+			AgentState:   statePtr,
+			// Zero-valued when no tracker is attached: the omitempty tags
+			// drop both fields and the UI falls back to agent_state.
+			Availability:       string(verdicts[id].State),
+			AvailabilityReason: verdicts[id].Reason,
+			RequestsRunning:    reqs.RequestsRunning,
+			RequestsWaiting:    reqs.RequestsWaiting,
+			AvgTokPerS:         avgTok,
+			TotalRequests:      reqs.TotalRequests,
+			GGUFFile:           m.GGUFFile,
 			// The advertised window, resolved the same way the well-known
 			// resolves it, so the dashboard and /.well-known never disagree.
 			ContextLength:    rt.wellKnownContext(m, 0),

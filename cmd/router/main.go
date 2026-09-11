@@ -75,6 +75,8 @@ func run(args []string) int {
 		healthDownAfter = fs.Int("health-down-after", health.DefaultDownAfter, "consecutive failed polls before a model is considered down (one success restores it)")
 		breakerTrip     = fs.Int("breaker-trip", health.DefaultBreakerTrip, "consecutive upstream failures before a model's circuit breaker opens")
 		breakerCooldown = fs.Duration("breaker-cooldown", health.DefaultBreakerCooldown, "how long an open circuit breaker waits before admitting a probe request")
+		genProbe        = fs.Bool("generation-probe", true, "a fleet seat is routable only after one minimal generation succeeds against its backend, not merely when its listing is up (per-model override: health.generation_probe)")
+		genProbeTimeout = fs.Duration("generation-probe-timeout", health.DefaultProbeTimeout, "how long one generation probe may take before the seat is still considered warming")
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
@@ -261,13 +263,19 @@ func run(args []string) int {
 				logger.Warn("node schedule ignored", "err", e)
 			}
 		}
+		// Probe only what this router can route to: an out-of-mode seat's
+		// port is expected to be dead and must not sit in "warming" forever.
+		active := registry.ModelsForMode(*mode)
 		tracker = health.NewTracker(health.Config{
-			Registry:        registry,
-			Interval:        *healthInterval,
-			DownAfter:       *healthDownAfter,
-			BreakerTrip:     *breakerTrip,
-			BreakerCooldown: *breakerCooldown,
-			Logger:          logger.With("subsys", "availability"),
+			Registry:               registry,
+			Interval:               *healthInterval,
+			DownAfter:              *healthDownAfter,
+			BreakerTrip:            *breakerTrip,
+			BreakerCooldown:        *breakerCooldown,
+			DisableGenerationProbe: !*genProbe,
+			ProbeTimeout:           *genProbeTimeout,
+			ProbeFilter:            func(id string) bool { _, ok := active[id]; return ok },
+			Logger:                 logger.With("subsys", "availability"),
 		})
 		routerOpts = append(routerOpts, router.WithAvailability(tracker))
 	}
@@ -377,7 +385,8 @@ func run(args []string) int {
 		go tracker.Run(ctx)
 		logger.Info("availability tracking started",
 			"interval", healthInterval.String(), "down_after", *healthDownAfter,
-			"breaker_trip", *breakerTrip, "breaker_cooldown", breakerCooldown.String())
+			"breaker_trip", *breakerTrip, "breaker_cooldown", breakerCooldown.String(),
+			"generation_probe", *genProbe, "generation_probe_timeout", genProbeTimeout.String())
 	} else {
 		logger.Warn("availability tracking disabled; roles will always pick their first candidate")
 	}

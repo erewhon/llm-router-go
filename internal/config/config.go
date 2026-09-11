@@ -250,6 +250,27 @@ type ModelDefinition struct {
 	//
 	// Unset means no envelope, i.e. the behaviour that predates the field.
 	EffectiveContext int `yaml:"effective_context,omitempty"`
+	// Health tunes how the availability tracker treats this placement. Nil
+	// means the class-based defaults (see health.ProbeEnabled).
+	Health *ModelHealth `yaml:"health,omitempty"`
+}
+
+// ModelHealth is the per-model availability tuning block.
+type ModelHealth struct {
+	// GenerationProbe decides whether the seat must answer one minimal
+	// generation before it is routable, rather than merely listing its model.
+	// Default (nil): on for fleet-resident chat, embeddings and rerank seats;
+	// off for media classes, the Anthropic passthrough, and nodeless
+	// externals. Set explicitly to override in either direction.
+	GenerationProbe *bool `yaml:"generation_probe,omitempty"`
+}
+
+// BackendModelName is the name the engine behind a direct (non-tool-proxy)
+// hop serves the model under: the hf_repo with any "#variant" suffix dropped.
+// The router and the health tracker's generation probe must agree on this,
+// which is why it lives here rather than in either.
+func (m ModelDefinition) BackendModelName() string {
+	return strings.SplitN(m.HFRepo, "#", 2)[0]
 }
 
 // IsVirtual reports whether the entry is a pure routing name: a fallback

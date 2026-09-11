@@ -57,6 +57,11 @@ func (e *errUpstreamStatus) Error() string {
 	return fmt.Sprintf("upstream status %d", e.Status)
 }
 
+// UpstreamStatus exposes the status to the health tracker, which reads it
+// through a small interface rather than this package's type: a 503 from a
+// probed seat means "warming", not "trip the breaker".
+func (e *errUpstreamStatus) UpstreamStatus() int { return e.Status }
+
 // errUpstreamEnvelope marks a suppressed error-envelope-in-2xx response —
 // the failure shape that looks like success until the body is read.
 var errUpstreamEnvelope = errors.New("upstream error envelope in 2xx")

@@ -1163,6 +1163,11 @@ function render(data) {
     if (isRouterModel(m)) {
       statusClass = 'health-healthy';
       statusLabel = 'router';
+    } else if (m.availability === 'warming') {
+      // Listed by the agent, but the router's generation probe has not
+      // succeeded yet: the router will not send traffic here.
+      statusClass = 'health-starting';
+      statusLabel = 'warming';
     } else if (m.agent_state) {
       statusClass = `health-${m.agent_state}`;
       statusLabel = m.agent_state;

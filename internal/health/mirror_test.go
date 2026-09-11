@@ -27,7 +27,8 @@ func TestMirrorReadsModelsAndRoles(t *testing.T) {
 			"models": [
 				{"model":"qwen3.6-hypatia","state":"unavailable"},
 				{"model":"minimax-reap","state":"available"},
-				{"model":"never-polled","state":"unknown"}
+				{"model":"never-polled","state":"unknown"},
+				{"model":"loading-seat","state":"warming"}
 			],
 			"roles": [
 				{"role":"coder","available":true,"target":"minimax-reap"},
@@ -48,6 +49,8 @@ func TestMirrorReadsModelsAndRoles(t *testing.T) {
 		"minimax-reap":    true,
 		// Unknown state means the router has no evidence against it.
 		"never-polled": true,
+		// Warming means the listing is up but nothing has generated yet.
+		"loading-seat": false,
 		"coder":        true,
 		"thinker":      false,
 		// A name the router didn't mention is not our business to block.

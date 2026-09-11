@@ -2,9 +2,12 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +23,11 @@ const (
 	// Unavailable means skip: the node is unreachable, the backend is stopped,
 	// or the circuit breaker is open.
 	Unavailable Availability = "unavailable"
+	// Warming means skip for now: the listing is up but no generation has
+	// succeeded since the seat came up. Distinct from Unavailable so an
+	// operator can tell a loading engine from a powered-down node, and so a
+	// role's reasons name what is actually happening.
+	Warming Availability = "warming"
 	// Unknown means nothing has been observed yet. Treated as available by
 	// Routable — a router that has just started must not refuse everything for
 	// its first poll interval.
@@ -38,7 +46,24 @@ const (
 	// SourceAssumed is a nodeless external (Zen, the Anthropic gateway):
 	// nothing to poll, so it is available until the breaker says otherwise.
 	SourceAssumed Source = "assumed"
+	// SourceProbe is the generation probe: the listing is up but the seat has
+	// not yet produced a token.
+	SourceProbe Source = "probe"
 )
+
+// WarmingInfo is the probe-side detail attached to a Warming status.
+type WarmingInfo struct {
+	// Since is when the seat entered warming (came up, or was demoted).
+	Since time.Time `json:"since"`
+	// Attempts is how many probes have failed since Since.
+	Attempts int `json:"attempts"`
+	// LastError is the most recent probe failure, empty before the first
+	// probe of this warm-up has run.
+	LastError string `json:"last_error,omitempty"`
+	// NextProbe is when the tracker will try again (subject to the poll
+	// interval).
+	NextProbe time.Time `json:"next_probe"`
+}
 
 // Status is the public view of one model's availability.
 type Status struct {
@@ -52,6 +77,8 @@ type Status struct {
 	// ExpectedDown marks a model whose node is outside its declared schedule,
 	// so a dashboard can render planned downtime as planned rather than broken.
 	ExpectedDown bool `json:"expected_down,omitempty"`
+	// Warming carries the probe detail while State is Warming.
+	Warming *WarmingInfo `json:"warming,omitempty"`
 }
 
 // NodeStatus is the public view of one node's reachability.
@@ -97,6 +124,22 @@ type Config struct {
 	// than request traffic. Must not block for long: it runs on the poll
 	// goroutine.
 	OnPoll func()
+
+	// GenerationProbe overrides the generation prober (tests). nil means
+	// ProbeGeneration, the real one.
+	GenerationProbe GenProbeFunc
+	// DisableGenerationProbe turns the warming stage off fleet-wide: a seat
+	// is routable as soon as its listing is up, the pre-probe behaviour.
+	DisableGenerationProbe bool
+	// ProbeTimeout bounds one generation probe. Zero means DefaultProbeTimeout.
+	ProbeTimeout time.Duration
+	// ProbeFilter, if set, restricts probing to the models it accepts — the
+	// router passes its mode-filtered active set so an out-of-mode seat's
+	// dead port is never probed. nil probes every eligible registry model.
+	ProbeFilter func(modelID string) bool
+	// Getenv resolves a node-pinned external's api_key for its probe. nil
+	// means os.Getenv.
+	Getenv func(string) string
 }
 
 // modelState is the tracker's per-model bookkeeping.
@@ -112,6 +155,18 @@ type modelState struct {
 	breakerOpenedAt time.Time
 	halfOpen        bool
 
+	// generation probe. probe is whether it applies to this model at all;
+	// confirmed is whether a generation has succeeded since the seat last
+	// came up. probeSeq is bumped whenever the seat re-enters warming so a
+	// probe launched against the previous warm-up cannot report into this one.
+	probe        bool
+	confirmed    bool
+	probeSeq     uint64
+	probeFails   int
+	probeErr     string
+	probeNextAt  time.Time
+	warmingSince time.Time
+
 	// last publicly-visible verdict, for Since bookkeeping
 	lastState Availability
 	since     time.Time
@@ -119,10 +174,12 @@ type modelState struct {
 
 // Tracker answers "is this model routable right now". Safe for concurrent use.
 type Tracker struct {
-	cfg    Config
-	logger *slog.Logger
-	now    func() time.Time
-	probe  ProbeFunc
+	cfg      Config
+	logger   *slog.Logger
+	now      func() time.Time
+	probe    ProbeFunc
+	genProbe GenProbeFunc
+	getenv   func(string) string
 
 	mu     sync.RWMutex
 	models map[string]*modelState
@@ -146,22 +203,33 @@ func NewTracker(cfg Config) *Tracker {
 	if cfg.BreakerCooldown <= 0 {
 		cfg.BreakerCooldown = DefaultBreakerCooldown
 	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = DefaultProbeTimeout
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Probe == nil {
 		cfg.Probe = ProbeNode
 	}
+	if cfg.GenerationProbe == nil {
+		cfg.GenerationProbe = ProbeGeneration
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Getenv == nil {
+		cfg.Getenv = os.Getenv
+	}
 	return &Tracker{
-		cfg:    cfg,
-		logger: cfg.Logger,
-		now:    cfg.Now,
-		probe:  cfg.Probe,
-		models: map[string]*modelState{},
-		nodes:  map[string]NodeSnapshot{},
+		cfg:      cfg,
+		logger:   cfg.Logger,
+		now:      cfg.Now,
+		probe:    cfg.Probe,
+		genProbe: cfg.GenerationProbe,
+		getenv:   cfg.Getenv,
+		models:   map[string]*modelState{},
+		nodes:    map[string]NodeSnapshot{},
 	}
 }
 
@@ -190,9 +258,10 @@ func (t *Tracker) Run(ctx context.Context) {
 	}
 }
 
-// PollOnce probes every node concurrently and folds the result into per-model
-// availability. Exported so tests (and an operator-triggered refresh) can step
-// the tracker deterministically.
+// PollOnce probes every node concurrently, folds the result into per-model
+// availability, then runs whatever generation probes are due against the
+// seats the listing says are up. Exported so tests (and an operator-triggered
+// refresh) can step the tracker deterministically.
 func (t *Tracker) PollOnce(ctx context.Context) {
 	reg := t.cfg.Registry
 	if reg == nil {
@@ -216,11 +285,24 @@ func (t *Tracker) PollOnce(ctx context.Context) {
 
 	t.mu.Lock()
 	t.nodes = snaps
-	t.polled = true
 	for id, m := range reg.Models {
 		ok, reason := observeModel(id, m, snaps)
 		t.applyObservation(id, ok, reason)
 	}
+	due := t.dueProbesLocked()
+	t.mu.Unlock()
+
+	// Generation probes run outside the lock — each may take up to
+	// ProbeTimeout — and concurrently, so one cold seat bounds the round at
+	// one timeout rather than N. Node observations above are already
+	// published, so a powered-down node is noticed even while a probe waits.
+	results := t.runProbes(ctx, due)
+
+	t.mu.Lock()
+	for _, r := range results {
+		t.applyProbeLocked(r)
+	}
+	t.polled = true
 	onPoll := t.cfg.OnPoll // read under the lock; SetOnPoll may race otherwise
 	t.mu.Unlock()
 
@@ -277,14 +359,27 @@ func modelNodes(m config.ModelDefinition) []string {
 	return nil
 }
 
+// stateFor returns the bookkeeping for a model, creating it — with the probe
+// eligibility decided from the registry — on first sight. Caller holds t.mu.
+func (t *Tracker) stateFor(id string) *modelState {
+	st := t.models[id]
+	if st != nil {
+		return st
+	}
+	st = &modelState{pollState: Unknown, since: t.now()}
+	if reg := t.cfg.Registry; reg != nil && !t.cfg.DisableGenerationProbe {
+		if m, ok := reg.Models[id]; ok && ProbeEnabled(m) {
+			st.probe = t.cfg.ProbeFilter == nil || t.cfg.ProbeFilter(id)
+		}
+	}
+	t.models[id] = st
+	return st
+}
+
 // applyObservation folds one observation into a model's state with hysteresis.
 // Caller holds t.mu.
 func (t *Tracker) applyObservation(id string, ok bool, reason string) {
-	st := t.models[id]
-	if st == nil {
-		st = &modelState{pollState: Unknown, since: t.now()}
-		t.models[id] = st
-	}
+	st := t.stateFor(id)
 
 	if ok {
 		// One success is enough to come back: the cost of a premature "up" is
@@ -292,7 +387,13 @@ func (t *Tracker) applyObservation(id string, ok bool, reason string) {
 		st.pollFails = 0
 		st.pollReason = ""
 		if st.pollState != Available {
-			t.logger.Info("model available", "model", id, "was", string(st.pollState))
+			t.logger.Info("model listed", "model", id, "was", string(st.pollState),
+				"generation_probe", st.probe)
+			// The seat (or its node) just came up: whatever it proved before
+			// is void. It is warming until a generation succeeds.
+			if st.probe {
+				t.enterWarmingLocked(st, "")
+			}
 		}
 		st.pollState = Available
 		return
@@ -306,16 +407,194 @@ func (t *Tracker) applyObservation(id string, ok bool, reason string) {
 	}
 }
 
+// enterWarmingLocked resets a seat's probe state so the next round probes it.
+// Caller holds t.mu.
+func (t *Tracker) enterWarmingLocked(st *modelState, why string) {
+	st.confirmed = false
+	st.probeSeq++
+	st.probeFails = 0
+	st.probeErr = why
+	st.probeNextAt = time.Time{}
+	st.warmingSince = t.now()
+}
+
+// probeJob is one due generation probe, captured under the lock.
+type probeJob struct {
+	id     string
+	seq    uint64
+	target GenTarget
+	err    error // set when the target could not be built; applied as a failure
+}
+
+type probeResult struct {
+	id      string
+	seq     uint64
+	err     error
+	elapsed time.Duration
+	// at is when the probe finished, on the tracker's clock. Warm-up is
+	// measured to this instant, not to the end of the round: one 10 s probe
+	// must not make every other seat in the round look like it took 10 s.
+	at time.Time
+}
+
+// dueProbesLocked lists the seats whose probe should run this round: listed
+// up, not yet confirmed, and past their backoff. Caller holds t.mu.
+func (t *Tracker) dueProbesLocked() []probeJob {
+	if t.cfg.DisableGenerationProbe {
+		return nil
+	}
+	now := t.now()
+	var jobs []probeJob
+	for id, st := range t.models {
+		if !st.probe || st.confirmed || st.pollState != Available {
+			continue
+		}
+		if !st.probeNextAt.IsZero() && now.Before(st.probeNextAt) {
+			continue
+		}
+		job := probeJob{id: id, seq: st.probeSeq}
+		job.target, job.err = t.genTarget(id)
+		jobs = append(jobs, job)
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].id < jobs[j].id })
+	return jobs
+}
+
+// genTarget builds the probe target for a model: the backend's own base
+// (tool proxy bypassed) and the name the engine serves it under.
+func (t *Tracker) genTarget(id string) (GenTarget, error) {
+	reg := t.cfg.Registry
+	m, ok := reg.Models[id]
+	if !ok {
+		return GenTarget{}, fmt.Errorf("model %q not in registry", id)
+	}
+	direct := false
+	base, err := reg.APIBase(id, &direct)
+	if err != nil {
+		return GenTarget{}, err
+	}
+	tgt := GenTarget{
+		Model:        id,
+		Root:         strings.TrimSuffix(base, "/v1"),
+		BackendModel: m.BackendModelName(),
+		APIClass:     m.APIClass,
+	}
+	if m.Backend == config.BackendExternal && m.APIKey != "" {
+		tgt.Bearer = resolveKey(m.APIKey, t.getenv)
+		tgt.BearerHeader = m.APIKeyHeader
+	}
+	return tgt, nil
+}
+
+// resolveKey mirrors the router's api_key convention: a literal "sk-" key is
+// used as is; anything else names an environment variable.
+func resolveKey(raw string, getenv func(string) string) string {
+	if strings.HasPrefix(raw, "sk-") {
+		return raw
+	}
+	return getenv(raw)
+}
+
+// runProbes executes the due probes concurrently, each under its own timeout.
+func (t *Tracker) runProbes(ctx context.Context, jobs []probeJob) []probeResult {
+	if len(jobs) == 0 {
+		return nil
+	}
+	results := make([]probeResult, len(jobs))
+	var wg sync.WaitGroup
+	for i, job := range jobs {
+		if job.err != nil {
+			results[i] = probeResult{id: job.id, seq: job.seq, err: job.err, at: t.now()}
+			continue
+		}
+		wg.Add(1)
+		go func(i int, job probeJob) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, t.cfg.ProbeTimeout)
+			defer cancel()
+			start := time.Now()
+			err := t.genProbe(pctx, job.target)
+			results[i] = probeResult{id: job.id, seq: job.seq, err: err, elapsed: time.Since(start), at: t.now()}
+		}(i, job)
+	}
+	wg.Wait()
+	return results
+}
+
+// applyProbeLocked folds one probe outcome into the seat's state. Results
+// from a superseded warm-up (the seat was demoted or re-listed while the probe
+// was in flight) are dropped; a failure that lands after real traffic already
+// confirmed the seat is dropped too. Caller holds t.mu.
+func (t *Tracker) applyProbeLocked(r probeResult) {
+	st := t.models[r.id]
+	if st == nil || st.probeSeq != r.seq || !st.probe {
+		return
+	}
+	var rejected *ProbeRejected
+	if r.err == nil || errors.As(r.err, &rejected) {
+		if st.confirmed {
+			return
+		}
+		st.confirmed = true
+		st.probeErr = ""
+		at := r.at
+		if at.IsZero() {
+			at = t.now()
+		}
+		warmup := at.Sub(st.warmingSince).Round(time.Millisecond).String()
+		if rejected != nil {
+			// Up, but our probe body was refused: say so once per warm-up so
+			// the probe gets fixed rather than the seat sitting out.
+			t.logger.Warn("seat warm (probe rejected — check the probe body for this class)",
+				"model", r.id, "warmup", warmup, "status", rejected.Status, "body", rejected.Body)
+		} else {
+			t.logger.Info("seat warm", "model", r.id, "via", "probe",
+				"warmup", warmup, "attempts", st.probeFails+1,
+				"probe_latency", r.elapsed.Round(time.Millisecond).String())
+		}
+		return
+	}
+	if st.confirmed {
+		return
+	}
+	st.probeFails++
+	st.probeErr = r.err.Error()
+	st.probeNextAt = t.now().Add(probeBackoff(st.probeFails))
+	if st.probeFails == 1 {
+		t.logger.Info("seat warming", "model", r.id, "err", st.probeErr,
+			"next_probe_in", probeBackoff(1).String())
+	} else {
+		t.logger.Debug("generation probe failed", "model", r.id, "attempt", st.probeFails,
+			"err", st.probeErr, "next_probe_in", probeBackoff(st.probeFails).String())
+	}
+}
+
 // ReportFailure records a real proxy failure against a model. Only genuine
 // transport-level failures should be reported — a 400 from a healthy backend
 // says nothing about availability.
+//
+// For a probed seat, a 503 or a refused connection is the reloading shape:
+// the seat is demoted to warming and re-probed, and the failure does not
+// count toward the breaker — the probe owns that recovery, and it is faster
+// and more specific than a 60 s cooldown.
 func (t *Tracker) ReportFailure(modelID string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	st := t.models[modelID]
-	if st == nil {
-		st = &modelState{pollState: Unknown, since: t.now()}
-		t.models[modelID] = st
+	st := t.stateFor(modelID)
+	if st.probe && isWarmingSignal(err) {
+		if st.confirmed || st.probeErr == "" {
+			why := ""
+			if err != nil {
+				why = err.Error()
+			}
+			t.logger.Warn("seat demoted to warming", "model", modelID, "err", why)
+			t.enterWarmingLocked(st, why)
+			// A real request just failed this way: count it as the first
+			// attempt so the next probe waits one backoff step, not zero.
+			st.probeFails = 1
+			st.probeNextAt = t.now().Add(probeBackoff(1))
+		}
+		return
 	}
 	st.halfOpen = false
 	st.breakerFails++
@@ -331,7 +610,8 @@ func (t *Tracker) ReportFailure(modelID string, err error) {
 	}
 }
 
-// ReportSuccess clears the breaker for a model.
+// ReportSuccess clears the breaker for a model, and confirms a warming seat:
+// a request it just served is better evidence than any probe.
 func (t *Tracker) ReportSuccess(modelID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -345,6 +625,12 @@ func (t *Tracker) ReportSuccess(modelID string) {
 	st.breakerFails = 0
 	st.breakerOpen = false
 	st.halfOpen = false
+	if st.probe && !st.confirmed {
+		st.confirmed = true
+		st.probeErr = ""
+		t.logger.Info("seat warm", "model", modelID, "via", "traffic",
+			"warmup", t.now().Sub(st.warmingSince).Round(time.Millisecond).String())
+	}
 }
 
 // State returns the current verdict for a model plus why.
@@ -379,6 +665,9 @@ func (t *Tracker) stateLocked(modelID string) (Availability, Source, string) {
 	case Unavailable:
 		return Unavailable, SourcePoll, st.pollReason
 	case Available:
+		if st.probe && !st.confirmed {
+			return Warming, SourceProbe, warmingReason(st)
+		}
 		return Available, SourcePoll, ""
 	default:
 		if !t.polled {
@@ -388,11 +677,19 @@ func (t *Tracker) stateLocked(modelID string) (Availability, Source, string) {
 	}
 }
 
+func warmingReason(st *modelState) string {
+	if st.probeErr == "" {
+		return "generation probe pending"
+	}
+	return "generation probe: " + st.probeErr
+}
+
 // Routable is the routing predicate: Unknown counts as routable so a
-// just-started router never refuses traffic it has no evidence against.
+// just-started router never refuses traffic it has no evidence against;
+// Warming does not — that is the whole point of the probe.
 func (t *Tracker) Routable(modelID string) bool {
 	state, _, _ := t.State(modelID)
-	return state != Unavailable
+	return state != Unavailable && state != Warming
 }
 
 // Reason returns a short human-readable explanation for a model's current
@@ -423,12 +720,21 @@ func (t *Tracker) Snapshot() []Status {
 		m := reg.Models[id]
 		st := t.models[id]
 		since := time.Time{}
+		var warming *WarmingInfo
 		if st != nil {
 			if st.lastState != state {
 				st.lastState = state
 				st.since = t.now()
 			}
 			since = st.since
+			if state == Warming {
+				warming = &WarmingInfo{
+					Since:     st.warmingSince,
+					Attempts:  st.probeFails,
+					LastError: st.probeErr,
+					NextProbe: st.probeNextAt,
+				}
+			}
 		}
 		out = append(out, Status{
 			Model:        id,
@@ -438,7 +744,17 @@ func (t *Tracker) Snapshot() []Status {
 			Node:         m.Node,
 			Since:        since,
 			ExpectedDown: t.nodeExpectedDownLocked(m.Node),
+			Warming:      warming,
 		})
+	}
+	return out
+}
+
+// Counts tallies the current verdicts, for /health.
+func (t *Tracker) Counts() map[Availability]int {
+	out := map[Availability]int{}
+	for _, s := range t.Snapshot() {
+		out[s.State]++
 	}
 	return out
 }

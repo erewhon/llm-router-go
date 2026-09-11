@@ -68,12 +68,16 @@ roles:
 // stubAvailability lets a test declare exactly which models are down.
 type stubAvailability struct {
 	down      map[string]bool
+	reasons   map[string]string // optional per-model Reason override
 	failures  []string
 	successes []string
 }
 
 func (s *stubAvailability) Routable(id string) bool { return !s.down[id] }
 func (s *stubAvailability) Reason(id string) string {
+	if r, ok := s.reasons[id]; ok {
+		return r
+	}
 	if s.down[id] {
 		return "unavailable (poll: node unreachable)"
 	}
