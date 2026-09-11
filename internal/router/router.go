@@ -595,6 +595,11 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target) // scheme+host, joins target.Path with the inbound path
 			pr.Out.Host = ""  // use the new Host from URL
+			// Per outbound attempt, on the copy: a chain failing over from a
+			// zen/ member to an or/ one rebuilds pr.Out from the inbound
+			// request, so a session header added for Zen never reaches
+			// OpenRouter. See session.go.
+			setSessionAffinity(pr.Out, target, body)
 			pr.Out.Body = io.NopCloser(bytes.NewReader(body))
 			pr.Out.ContentLength = int64(len(body))
 			pr.Out.Header.Set("Content-Length", strconv.Itoa(len(body)))
