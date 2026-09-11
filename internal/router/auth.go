@@ -79,6 +79,21 @@ func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 			bearer := hdr[len(prefix):]
 
 			id, err := a.resolve(bearer)
+			if errors.Is(err, auth.ErrStoreUnavailable) {
+				// The one failure that must NOT look like a credential
+				// problem. With a shared Postgres store, this is what a
+				// database outage looks like — and answering 401 would send
+				// every user in the fleet off rotating tokens that were never
+				// broken, mid-incident. 503 says "not you, and try again",
+				// which is both true and actionable.
+				//
+				// ERROR level, not Info: unlike a rejected key, this is the
+				// operator's problem and nobody else can fix it.
+				a.logger.Error("token store unavailable — answering 503; auth cannot be verified",
+					"path", r.URL.Path, "err", err.Error(), "token_id", safeTokenID(bearer))
+				writeStoreUnavailable(w)
+				return
+			}
 			if err != nil {
 				// One opaque message to the caller regardless of cause; the
 				// specific reason goes to the log, where the operator can see
@@ -130,6 +145,26 @@ func safeTokenID(bearer string) string {
 // keep working unchanged.
 func RequireBearer(keys []string, exempt []string) func(http.Handler) http.Handler {
 	return NewAuthenticator(nil, keys, exempt, slog.New(slog.DiscardHandler)).Middleware()
+}
+
+// writeStoreUnavailable answers a request whose credential could not be
+// checked because the token store is unreachable.
+//
+// 503 with Retry-After, deliberately distinct from the 401 every credential
+// failure gets. The message names the store rather than the caller's key: the
+// single most expensive mistake this code could make is telling a hundred
+// clients their credentials are bad when the database is simply down.
+func writeStoreUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "5")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"type":    "service_unavailable",
+			"code":    "token_store_unavailable",
+			"message": "cannot verify credentials right now: the token store is unreachable. Your API key is probably fine; retry shortly.",
+		},
+	})
 }
 
 func writeAuthError(w http.ResponseWriter, msg string) {

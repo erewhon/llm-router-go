@@ -49,7 +49,7 @@ ExecStart=/usr/local/bin/llm-router-go \
     --dashboard \
     --dashboard-addr=:4011 \
     --dashboard-public-url=https://llm.bcc.sh \
-    --pat-db=/var/lib/llm-router-go/pat.db
+    --pat-dsn=${ROUTER_PG_DSN}
 
 # --dashboard serves the status UI on :4011 — the port the retired Python
 # litellm-dashboard used, so the hub Caddy front door (llm-dashboard.bcc.sh
@@ -59,33 +59,43 @@ ExecStart=/usr/local/bin/llm-router-go \
 # are the access boundary. --dashboard-public-url only sets the copy-paste base
 # URL shown in the dashboard's Connection card.
 
-# --pat-db turns on per-user personal access tokens. The path sits inside
-# StateDirectory (below), which systemd creates and chowns to llm-router before
-# ExecStart, so it survives ProtectSystem=strict. OpenStore creates the file and
-# schema on first start and chmods it 0600 — no pre-seeding needed.
+# --pat-dsn turns on per-user personal access tokens, stored in the SHARED
+# Postgres — the same one reqlog writes to, reached through the same
+# ${ROUTER_PG_DSN}. One store for every router in the fleet: a token minted
+# anywhere authenticates everywhere, and one revoke takes effect on every
+# instance on the very next request.
 #
-# THIS FLAG FAILS CLOSED, unlike every other optional subsystem in this unit: a
-# --pat-db that cannot be opened is fatal and the router does not listen. That
-# is deliberate (auth must never degrade to "serve anyway"), but it means the
-# path is load-bearing. Do not point it at a directory systemd is not creating.
+# Why not the per-node SQLite --pat-db this unit used briefly: the front door
+# is an OVN load balancer over two replicas, and a per-node store makes a token
+# authenticate roughly half the time. Moved to Postgres 2026-09-10.
+#
+# THE COST, NAMED: auth now depends on Postgres. When it is unreachable nobody
+# authenticates. Accepted knowingly as a single point of failure to be solved
+# in the infrastructure workstream, not worked around here. What the router
+# guarantees in the meantime is that an outage never LOOKS like a credential
+# problem — callers get 503 "token store unavailable ... your API key is
+# probably fine", not 401 "invalid api key", so nobody rotates a good key
+# mid-incident. Recovery needs no restart; the pool reconnects on its own.
+#
+# THIS FLAG FAILS CLOSED at startup: an unreachable DSN is fatal and the router
+# does not listen. Deliberate — auth must never degrade to "serve anyway".
+#
+# SHARP EDGE: EnvironmentFile below is optional (the leading "-"), so if
+# proxy.env is missing, ROUTER_PG_DSN expands to "" and PATs are silently OFF
+# rather than fatal. Shared keys keep working; PAT holders get 401. Check the
+# journal for "PAT auth enabled ... backend=postgres" after every deploy.
 #
 # Shared --api-keys keep working alongside PATs and are attributed as
 # legacy:<fingerprint>, so this changes nothing for existing clients. Watch
-# legacy-principal traffic fall to zero before retiring ROUTER_API_KEYS:
+# legacy traffic fall to zero before retiring ROUTER_API_KEYS:
 #   SELECT principal, count(*) FROM router_requests
 #    WHERE ts > now() - interval '1 day' GROUP BY 1;
 #
-# Mint a token (the secret is shown exactly once):
-#   sudo -u llm-router /usr/local/bin/llm-router-go \
-#       --pat-db=/var/lib/llm-router-go/pat.db \
-#       --pat-mint --pat-user steven --pat-label laptop
-#
-# NOTE: the store is a LOCAL SQLite file, so tokens are per-instance. That is
-# correct for this unit (one router per host, reached directly by local
-# consumers) and NOT sufficient for the OVN-LB replicas behind llm.bcc.sh,
-# where a token minted on one replica would be unknown to the other. See
-# homeops config/common/llm-router-replicas — those stay on shared keys until
-# the store question is settled.
+# Mint a token (the secret is shown exactly once). Source the DSN from the
+# env-file rather than typing it — it carries the password:
+#   sudo -u llm-router sh -c '. /etc/llm-router/proxy.env && \
+#       /usr/local/bin/llm-router-go --pat-dsn "$ROUTER_PG_DSN" \
+#       --pat-mint --pat-user steven --pat-label laptop'
 
 # Secrets land here from `ho secret get llm-router/api-key` via
 # deploy/scripts/deploy-router-secrets.sh. The `-` prefix makes the unit

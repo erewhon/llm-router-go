@@ -296,3 +296,88 @@ func TestExemptPathCarriesNoIdentity(t *testing.T) {
 		t.Errorf("exempt path produced an identity %+v, want none", seen)
 	}
 }
+
+// A token store outage must answer 503, never 401.
+//
+// This is the safety net under the shared-Postgres SPOF accepted 2026-09-10.
+// If it regresses, a database outage tells every caller in the fleet "invalid
+// api key" and they all go rotate credentials that were never broken — during
+// the incident. The distinction is worth a test that says so.
+func TestStoreOutageAnswers503Not401(t *testing.T) {
+	dir := t.TempDir()
+	store, err := auth.OpenStore(dir + "/pat.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	wire, _, err := store.Mint("steven", "laptop", nil, nil)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	a := NewAuthenticator(store, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Healthy first, so the test proves the token itself is good.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+wire)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthy store: status = %d, want 200", rec.Code)
+	}
+
+	// Now take the store away under it.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+wire)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("store down: status = %d, want 503 (401 would blame the caller's key)", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"token_store_unavailable", "probably fine"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("503 body missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "invalid api key") {
+		t.Errorf("503 body must not blame the credential: %s", body)
+	}
+	if got := rec.Header().Get("Retry-After"); got == "" {
+		t.Error("Retry-After not set on the 503")
+	}
+}
+
+// A genuinely bad credential must still be 401 even while the store is fine —
+// the counterpart, so the 503 path cannot be implemented by answering 503 to
+// everything.
+func TestBadCredentialIsStill401(t *testing.T) {
+	dir := t.TempDir()
+	store, err := auth.OpenStore(dir + "/pat.db")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	a := NewAuthenticator(store, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := a.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, bearer := range []string{"pat_aaaaaaaaaaaa_nope", "sk-not-a-key", "garbage"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("bearer %q: status = %d, want 401", bearer, rec.Code)
+		}
+	}
+}

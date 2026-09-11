@@ -102,7 +102,8 @@ func run(args []string) int {
 		// accepted. Unlike --reqlog (which soft-fails to a NopSink), a
 		// configured store that cannot be opened is FATAL: a router told to
 		// check tokens must never quietly serve without checking them.
-		patDB      = fs.String("pat-db", "", "path to the personal-access-token SQLite store; empty disables PATs (shared --api-keys only)")
+		patDB      = fs.String("pat-db", "", "path to the personal-access-token SQLite store; empty disables PATs (shared --api-keys only). Per-node — do NOT use behind a load balancer, see --pat-dsn")
+		patDSN     = fs.String("pat-dsn", "", "Postgres DSN for the personal-access-token store, e.g. the reqlog DSN. Takes precedence over --pat-db. REQUIRED for multi-instance deployments: a per-node store means a token minted on one replica is unknown to the others")
 		patMint    = fs.Bool("pat-mint", false, "mint a PAT into --pat-db and exit; requires --pat-user")
 		patList    = fs.Bool("pat-list", false, "list PATs in --pat-db and exit")
 		patRevoke  = fs.String("pat-revoke", "", "revoke the PAT with this id in --pat-db and exit")
@@ -151,6 +152,7 @@ func run(args []string) int {
 	if *patMint || *patList || *patRevoke != "" {
 		return runPATAdmin(patAdminOpts{
 			dbPath:  *patDB,
+			dsn:     *patDSN,
 			mint:    *patMint,
 			list:    *patList,
 			revoke:  *patRevoke,
@@ -298,12 +300,32 @@ func run(args []string) int {
 	authKeys := splitCSV(apiKeysSrc)
 
 	// Token store. FATAL on failure, unlike every other optional subsystem
-	// here: --pat-db is an explicit instruction to authenticate callers, and
-	// falling back to "serve anyway" would silently drop the control the
-	// operator asked for. reqlog soft-fails because losing accounting is not
-	// dangerous; losing authentication is.
+	// here: asking for a token store is an explicit instruction to
+	// authenticate callers, and falling back to "serve anyway" would silently
+	// drop the control the operator asked for. reqlog soft-fails because
+	// losing accounting is not dangerous; losing authentication is.
+	//
+	// --pat-dsn (Postgres, shared) wins over --pat-db (SQLite, per-node), the
+	// same precedence reqlog gives --postgres-dsn over --sqlite-path. Passing
+	// both is a config mistake worth naming rather than resolving silently:
+	// the two stores hold different tokens, so picking one quietly would make
+	// half the fleet's credentials vanish depending on flag order.
 	var patStore *auth.Store
-	if *patDB != "" {
+	switch {
+	case *patDSN != "" && *patDB != "":
+		fmt.Fprintln(os.Stderr, "fatal: --pat-dsn and --pat-db are mutually exclusive; they are different stores holding different tokens")
+		return 2
+	case *patDSN != "":
+		st, err := auth.OpenPostgresStore(*patDSN)
+		if err != nil {
+			// Redacted: the DSN carries a password and this goes to the journal.
+			fmt.Fprintf(os.Stderr, "fatal: --pat-dsn %s: %v\n", auth.RedactDSN(*patDSN), err)
+			return 1
+		}
+		defer st.Close()
+		patStore = st
+		logger.Info("PAT auth enabled", "store", st.Path(), "backend", st.Backend())
+	case *patDB != "":
 		st, err := auth.OpenStore(*patDB)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fatal: --pat-db %s: %v\n", *patDB, err)
@@ -311,12 +333,16 @@ func run(args []string) int {
 		}
 		defer st.Close()
 		patStore = st
-		logger.Info("PAT auth enabled", "store", st.Path())
+		// Say the quiet part at startup rather than leaving it to a comment in
+		// a unit file: a per-node store behind a load balancer authenticates
+		// intermittently, which is the hardest kind of bug to recognise.
+		logger.Info("PAT auth enabled", "store", st.Path(), "backend", st.Backend())
+		logger.Warn("PAT store is PER-NODE (SQLite) — correct for a single router, WRONG behind a load balancer: tokens minted here are unknown to other instances. Use --pat-dsn for a shared store")
 	}
 
 	switch {
 	case patStore == nil && len(authKeys) == 0:
-		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys, $ROUTER_API_KEYS or --pat-db to enable")
+		logger.Warn("API key auth DISABLED — anyone reachable on :4010 can call the proxy; set --api-keys, $ROUTER_API_KEYS, --pat-dsn or --pat-db to enable")
 	case len(authKeys) > 0:
 		logger.Info("shared-key auth enabled", "keys", len(authKeys), "source", apiKeysFrom,
 			"note", "legacy shared keys are attributed as legacy:<fingerprint> in reqlog")

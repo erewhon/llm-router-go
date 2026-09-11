@@ -18,7 +18,11 @@ import (
 // Exit codes: 0 success, 1 operation failed, 2 usage error.
 
 type patAdminOpts struct {
-	dbPath  string
+	dbPath string
+	// dsn selects the shared Postgres store. Mutually exclusive with dbPath,
+	// and it must be supported here rather than only on the serving path:
+	// a store you cannot mint into is not a store.
+	dsn     string
 	mint    bool
 	list    bool
 	revoke  string
@@ -30,8 +34,12 @@ type patAdminOpts struct {
 }
 
 func runPATAdmin(o patAdminOpts) int {
-	if o.dbPath == "" {
-		fmt.Fprintln(o.stderr, "--pat-db is required for PAT admin commands")
+	switch {
+	case o.dsn != "" && o.dbPath != "":
+		fmt.Fprintln(o.stderr, "--pat-dsn and --pat-db are mutually exclusive; they are different stores holding different tokens")
+		return 2
+	case o.dsn == "" && o.dbPath == "":
+		fmt.Fprintln(o.stderr, "--pat-dsn or --pat-db is required for PAT admin commands")
 		return 2
 	}
 	// Exactly one mode. Silently preferring one over another would make a
@@ -47,8 +55,17 @@ func runPATAdmin(o patAdminOpts) int {
 		return 2
 	}
 
-	store, err := auth.OpenStore(o.dbPath)
+	var (
+		store *auth.Store
+		err   error
+	)
+	if o.dsn != "" {
+		store, err = auth.OpenPostgresStore(o.dsn)
+	} else {
+		store, err = auth.OpenStore(o.dbPath)
+	}
 	if err != nil {
+		// Never print o.dsn raw — it carries a password.
 		fmt.Fprintf(o.stderr, "open token store: %v\n", err)
 		return 1
 	}
@@ -91,7 +108,11 @@ func patMintCmd(store *auth.Store, o patAdminOpts) int {
 	}
 	fmt.Fprintf(o.stdout, "\n%s\n\n", wire)
 	fmt.Fprintln(o.stdout, "Copy it now — only its hash is stored, so it cannot be shown again.")
-	fmt.Fprintf(o.stdout, "Revoke with: llm-router-go --pat-db %s --pat-revoke %s\n", o.dbPath, tok.ID)
+	if o.dsn != "" {
+		fmt.Fprintf(o.stdout, "Revoke with: llm-router-go --pat-dsn \"$ROUTER_PG_DSN\" --pat-revoke %s\n", tok.ID)
+	} else {
+		fmt.Fprintf(o.stdout, "Revoke with: llm-router-go --pat-db %s --pat-revoke %s\n", o.dbPath, tok.ID)
+	}
 	return 0
 }
 
