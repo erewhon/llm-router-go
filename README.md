@@ -74,6 +74,45 @@ Both providers the fleet uses key cache stickiness off a caller-supplied header
 forwards inbound headers untouched, so a client that sets one keeps its warm
 cache through the proxy.
 
+### Privacy tiers per request (`X-Router-Privacy`)
+
+A caller can demand where its prompt is allowed to go, per request, with one
+header. Three values, strictest last:
+
+| value | admits | on a seat that does not qualify |
+| --- | --- | --- |
+| `any` (or omit the header) | anything the role/model allows | — |
+| `zdr` | local seats, **plus** cloud endpoints the router can hold to zero data retention for this request (OpenRouter today — `provider: {"zdr": true}` goes on the wire) | 403 |
+| `local` | fleet hardware only; nothing leaves the building | 403 |
+
+```sh
+curl https://llm.bcc.sh/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H "X-Router-Privacy: local" \
+  -d '{"model":"coder","messages":[...]}'
+```
+
+Rules worth knowing before wiring a script's `--privacy` flag to it:
+
+- **It works on roles and on directly named models.** A named model has no role
+  contract behind it, so the header is the only thing that can constrain it.
+- **A caller can tighten, never loosen.** If the role requires
+  `locality: local_or_zdr`, sending `any` still gets the ZDR directive; sending
+  `local` gets the stricter `local`. The stricter of the role's and the caller's
+  tier always governs.
+- **A refusal is 403 `privacy_tier_unavailable` and the upstream is never
+  called.** Retrying will not help; the answer changes only if the tier or the
+  routing does.
+- **An unrecognised value is refused, not ignored** — `locl`, `eu-only`,
+  `unrestricted` all 403 on every seat. A typo must never be served as though it
+  were a real posture. Values are case- and whitespace-insensitive.
+- The response echoes the tier that was **enforced** (`X-Router-Privacy: zdr`),
+  and reqlog records it in `privacy_tolerance` — including on refusals — so
+  "what did this script actually get?" is answerable afterwards.
+
+`local` is a stricter tool than `zdr` for a reason: a zero-retention endpoint is
+still somebody else's computer. Use `local` for anything that must not leave the
+fleet at all.
+
 ### Anthropic gateway (measurement tap)
 
 With an `api_class: anthropic` entry in `models.yaml` (see Scenario 8 in the

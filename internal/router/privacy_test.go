@@ -199,7 +199,7 @@ func TestCallerHeaderOnAnUnenforceableSeatIsRefused(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"zen-seat", "zero data retention", "zdr_unavailable"} {
+	for _, want := range []string{"zen-seat", "zero data retention", "privacy_tier_unavailable"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refusal body missing %q: %s", want, body)
 		}
@@ -207,23 +207,36 @@ func TestCallerHeaderOnAnUnenforceableSeatIsRefused(t *testing.T) {
 }
 
 func TestUnrecognisedPrivacyValueIsRefusedNotIgnored(t *testing.T) {
-	// A caller asking for a posture the router does not implement is asking
-	// for something it cannot promise. Ignoring the header would serve them
-	// while letting them believe otherwise.
-	rt := newPrivacyRouter(t, "")
+	// Regression for a real bug. This test used to send the unrecognised
+	// value at a ZEN seat — which gets refused anyway, for the unrelated
+	// reason that Zen is not enforceable — so it passed while the actual bug
+	// stood: on an OPENROUTER seat an unrecognised value fell through, was
+	// treated as zdr, and was SERVED. The seat that matters is the one where
+	// "just serve it" is possible, so that is the seat under test.
+	for _, seat := range []string{"or-seat", "zen-seat", "local-seat"} {
+		for _, v := range []string{"eu-only", "locl", "zdr-strict", "unrestricted"} {
+			t.Run(seat+"/"+v, func(t *testing.T) {
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("upstream called for %s with %s: %q — must be refused before sending", seat, PrivacyHeader, v)
+				}))
+				defer upstream.Close()
+				rt := newPrivacyRouter(t, upstream.URL)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		strings.NewReader(`{"model":"zen-seat","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(PrivacyHeader, "eu-only")
-	rec := httptest.NewRecorder()
-	rt.Handler().ServeHTTP(rec, req)
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+					strings.NewReader(`{"model":"`+seat+`","messages":[]}`))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set(PrivacyHeader, v)
+				rec := httptest.NewRecorder()
+				rt.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "unrecognised") {
-		t.Errorf("refusal should name the unrecognised value: %s", rec.Body.String())
+				if rec.Code != http.StatusForbidden {
+					t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+				}
+				if !strings.Contains(rec.Body.String(), "not a recognised privacy tier") {
+					t.Errorf("refusal should say the value is unrecognised: %s", rec.Body.String())
+				}
+			})
+		}
 	}
 }
 
@@ -706,5 +719,169 @@ func TestUpstreamProviderLabelIsBounded(t *testing.T) {
 				t.Errorf("upstreamProviderLabel = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- the three caller tiers: local / zdr / any -----------------------------
+
+// sendWithPrivacy posts to the router with an optional X-Router-Privacy value
+// and reports what reached the upstream, if anything.
+func sendWithPrivacy(t *testing.T, model, privacy string) (*httptest.ResponseRecorder, map[string]any, bool) {
+	t.Helper()
+	var got map[string]any
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	rt := newPrivacyRouter(t, upstream.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	if privacy != "" {
+		req.Header.Set(PrivacyHeader, privacy)
+	}
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+	return rec, got, called
+}
+
+func TestLocalTierServesALocalSeat(t *testing.T) {
+	rec, got, called := sendWithPrivacy(t, "local-seat", PrivacyLocal)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d called = %v, want 200 and served", rec.Code, called)
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != PrivacyLocal {
+		t.Errorf("%s = %q, want %q echoed back", PrivacyHeader, h, PrivacyLocal)
+	}
+	if _, present := got["provider"]; present {
+		t.Errorf("provider block sent to a local backend: %#v", got["provider"])
+	}
+}
+
+func TestLocalTierRefusesAnOpenRouterSeat(t *testing.T) {
+	// THE case the old code got wrong: "local" was unrecognised, fell through,
+	// and on an OpenRouter seat was served — from the cloud — as zdr. A ZDR
+	// endpoint is still somebody else's computer; local means local.
+	rec, _, called := sendWithPrivacy(t, "or-seat", PrivacyLocal)
+	if called {
+		t.Fatal("upstream was called — a local-only request reached a cloud endpoint")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not on fleet hardware") {
+		t.Errorf("refusal should say why: %s", rec.Body.String())
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != PrivacyLocal {
+		t.Errorf("%s on the refusal = %q, want %q — say which tier refused", PrivacyHeader, h, PrivacyLocal)
+	}
+}
+
+func TestLocalTierRefusesAZenSeat(t *testing.T) {
+	rec, _, called := sendWithPrivacy(t, "zen-seat", PrivacyLocal)
+	if called || rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d called = %v, want 403 and not sent", rec.Code, called)
+	}
+}
+
+func TestAnyIsAnExplicitNoOp(t *testing.T) {
+	// "any" exists so a script can pass --privacy any straight through. On a
+	// directly named model with no role behind it, it must behave exactly as
+	// if the header were absent.
+	rec, got, called := sendWithPrivacy(t, "or-seat", PrivacyAny)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d called = %v, want 200 and served", rec.Code, called)
+	}
+	if _, present := got["provider"]; present {
+		t.Errorf("provider block attached for %q: %#v", PrivacyAny, got["provider"])
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != "" {
+		t.Errorf("%s = %q, want empty — nothing was enforced", PrivacyHeader, h)
+	}
+}
+
+func TestAnyCannotLoosenARolesTolerance(t *testing.T) {
+	// The "private" role requires local_or_zdr. A caller sending "any" gets
+	// the role's promise anyway: the ZDR directive still goes on the wire.
+	rec, got, _ := sendWithPrivacy(t, "private", PrivacyAny)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	prov, ok := got["provider"].(map[string]any)
+	if !ok || prov["zdr"] != true {
+		t.Errorf("provider = %#v, want zdr:true — %q must not loosen a local_or_zdr role", got["provider"], PrivacyAny)
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != PrivacyZDR {
+		t.Errorf("%s = %q, want %q (the role's tier, which still applied)", PrivacyHeader, h, PrivacyZDR)
+	}
+}
+
+func TestStricterOfRoleAndCallerWins(t *testing.T) {
+	// "private" (local_or_zdr) resolves to or-seat first. The role alone would
+	// serve it with a ZDR directive; the caller asking for "local" is
+	// stricter, so the stricter tier governs and the cloud seat is refused.
+	rec, _, called := sendWithPrivacy(t, "private", PrivacyLocal)
+	if called {
+		t.Fatal("upstream called — the caller's stricter tier was ignored in favour of the role's")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestZDRTierStillServesAnEnforceableSeat(t *testing.T) {
+	// Guard: generalising to tiers must not have broken the original case.
+	rec, got, called := sendWithPrivacy(t, "or-seat", PrivacyZDR)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d called = %v, want 200 and served", rec.Code, called)
+	}
+	prov, ok := got["provider"].(map[string]any)
+	if !ok || prov["zdr"] != true {
+		t.Errorf("provider = %#v, want zdr:true", got["provider"])
+	}
+}
+
+func TestTierValuesAreCaseAndSpaceInsensitive(t *testing.T) {
+	// Scripts will send whatever their flag parser hands them.
+	for _, v := range []string{"LOCAL", " local ", "Local"} {
+		rec, _, called := sendWithPrivacy(t, "or-seat", v)
+		if called || rec.Code != http.StatusForbidden {
+			t.Errorf("%s: %q → status %d called %v, want it treated as local and refused", PrivacyHeader, v, rec.Code, called)
+		}
+	}
+}
+
+func TestReqlogRecordsTheLocalTier(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+	rt := newPrivacyRouterWithSink(t, upstream.URL, sink)
+
+	for _, model := range []string{"local-seat", "or-seat"} { // one served, one refused
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(PrivacyHeader, PrivacyLocal)
+		rt.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+	recs := sink.Records()
+	if len(recs) != 2 {
+		t.Fatalf("records = %d, want 2", len(recs))
+	}
+	for _, r := range recs {
+		if r.PrivacyTolerance != PrivacyLocal {
+			t.Errorf("%s: PrivacyTolerance = %q, want %q", r.Model, r.PrivacyTolerance, PrivacyLocal)
+		}
+	}
+	if recs[1].Status != http.StatusForbidden {
+		t.Errorf("or-seat under local: Status = %d, want 403 recorded", recs[1].Status)
 	}
 }

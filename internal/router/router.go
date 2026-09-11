@@ -419,22 +419,28 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// role's own candidates safe, but the caller-supplied header can
 		// tighten beyond any role — including on a directly named model,
 		// which has no role contract behind it at all.
-		zdrWanted, zdrSource := rt.zdrRequired(r, res)
-		if zdrWanted {
-			privacyTolerance = PrivacyZDR
+		privTier, privSource, privRefuse := rt.privacyRequirement(r, res)
+		privacyTolerance = privTier.String()
+		if privRefuse != "" {
+			// A malformed requirement is refused before anything is sent,
+			// whatever seat was resolved.
+			errMsg = privRefuse
+			writePrivacyRefusal(rec, tierNone, privRefuse)
+			return
 		}
 
 		for attempt := 0; ; attempt++ {
 			bodyMap["model"] = res.BackendModel
-			if zdrWanted {
-				if refusal := rt.applyPrivacy(bodyMap, res, zdrSource); refusal != "" {
-					rt.logger.WarnContext(r.Context(), "refusing on retention tolerance",
-						"model", model, "resolved_via", res.ModelID, "role", res.Role, "reason", refusal)
+			if privTier != tierNone {
+				if refusal := rt.applyPrivacy(bodyMap, res, privTier, privSource); refusal != "" {
+					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
+						"model", model, "resolved_via", res.ModelID, "role", res.Role,
+						"tier", privTier.String(), "reason", refusal)
 					errMsg = refusal
-					writePrivacyRefusal(rec, refusal)
+					writePrivacyRefusal(rec, privTier, refusal)
 					return
 				}
-				rec.Header().Set(PrivacyHeader, PrivacyZDR)
+				rec.Header().Set(PrivacyHeader, privTier.String())
 			}
 			newBody, err := json.Marshal(bodyMap)
 			if err != nil {

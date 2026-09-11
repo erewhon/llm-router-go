@@ -42,51 +42,88 @@ import (
 // rather than by reading router logs.
 const PrivacyHeader = "X-Router-Privacy"
 
-// PrivacyZDR is the only tolerance value today: local, or a cloud endpoint
-// held to zero data retention for this request.
-//
-// Named for the posture rather than for OpenRouter's spelling of it, so a
-// second enforceable provider does not need a second header value.
-const PrivacyZDR = "zdr"
+// The caller-facing privacy tiers, strictest last. These are the header values
+// a client sends, and the same strings come back on the response and land in
+// reqlog's privacy_tolerance column — so a script's --privacy flag, the wire,
+// and the audit row all use one vocabulary.
+const (
+	// PrivacyAny states "I have no requirement of my own". It is an explicit
+	// no-op, accepted so a script can pass its flag straight through without
+	// special-casing the default. It CANNOT loosen a role's declared
+	// tolerance — the role's promise is not the caller's to waive.
+	PrivacyAny = "any"
+	// PrivacyZDR admits a local placement, or a cloud endpoint the router can
+	// hold to zero data retention for this request (the directive goes on the
+	// wire). Matches locality: local_or_zdr.
+	PrivacyZDR = "zdr"
+	// PrivacyLocal admits only a placement on fleet hardware. Nothing leaves
+	// the building. Matches locality: local.
+	PrivacyLocal = "local"
+)
 
-// zdrRequired reports whether this request must be held to zero retention,
-// and where that demand came from (for the error message when it cannot be
-// met).
+// privacyTier orders the tiers by strictness so two requirements — the role's
+// and the caller's — combine by taking the stricter. The zero value is "no
+// requirement".
+type privacyTier int
+
+const (
+	tierNone privacyTier = iota
+	tierZDR
+	tierLocal
+)
+
+func (t privacyTier) String() string {
+	switch t {
+	case tierZDR:
+		return PrivacyZDR
+	case tierLocal:
+		return PrivacyLocal
+	default:
+		return ""
+	}
+}
+
+// privacyRequirement works out the retention tier this request must be held
+// to, and where the demand came from (for the refusal message).
 //
-// Two sources, either sufficient:
+// Two sources, combined by taking the STRICTER:
 //
-//   - The resolved ROLE declares require.locality: local_or_zdr. Load-time
-//     validation has already proved every candidate and overflow entry can
-//     satisfy it, so this is belt-and-braces at request time — but it is the
-//     belt that actually puts the directive on the wire.
-//   - The CALLER sent X-Router-Privacy: zdr. This is the per-request
-//     tightening: an ensemble reviewing a private diff can demand more than
-//     its role's default without needing its own role.
+//   - The resolved ROLE. Only locality: local_or_zdr produces a dispatch-time
+//     requirement (tier zdr). A role declaring locality: local deliberately
+//     does NOT: its overflow list is exempt by design — crossing the local/
+//     cloud boundary when the fleet is down is what that overflow is for — and
+//     enforcing "local" at dispatch would break exactly that. Load-time
+//     validation already holds a local role's own candidates to IsLocal().
+//   - The CALLER, via X-Router-Privacy. This is how a script says "local only"
+//     or "zdr" per request, on a role or on a directly named model. A caller
+//     may always tighten; "any" tightens nothing and loosens nothing.
 //
-// A caller may always tighten; nothing here lets one loosen. There is no
-// X-Router-Privacy: any that would relax a role's declared tolerance, because
-// the role's promise is not the caller's to waive.
-func (rt *Router) zdrRequired(r *http.Request, res resolveResult) (required bool, source string) {
-	if v := strings.TrimSpace(strings.ToLower(r.Header.Get(PrivacyHeader))); v != "" {
-		if v == PrivacyZDR {
-			return true, "request header " + PrivacyHeader + ": " + PrivacyZDR
+// An UNRECOGNISED header value is a hard refusal, returned as refuse != "".
+// It must never be mapped onto a real tier: a caller who typed a posture the
+// router does not implement ("eu-only", or "locl") has not been given what
+// they asked for, and serving them anyway lets them believe they were. An
+// earlier version let an unrecognised value fall through and, on an
+// OpenRouter seat, quietly serve it as zdr — which would have sent a script's
+// misspelled local-only request to the cloud. Fixed 2026-09-10.
+func (rt *Router) privacyRequirement(r *http.Request, res resolveResult) (tier privacyTier, source, refuse string) {
+	switch v := strings.TrimSpace(strings.ToLower(r.Header.Get(PrivacyHeader))); v {
+	case "", PrivacyAny:
+		// no caller requirement
+	case PrivacyZDR:
+		tier, source = tierZDR, "request header "+PrivacyHeader+": "+PrivacyZDR
+	case PrivacyLocal:
+		tier, source = tierLocal, "request header "+PrivacyHeader+": "+PrivacyLocal
+	default:
+		return tierNone, "", fmt.Sprintf("request header %s: %q is not a recognised privacy tier (want %q, %q or %q)",
+			PrivacyHeader, v, PrivacyLocal, PrivacyZDR, PrivacyAny)
+	}
+
+	if res.Role != "" {
+		if role, ok := rt.roles[res.Role]; ok && role.Require.Locality == config.LocalityLocalOrZDR && tier < tierZDR {
+			tier, source = tierZDR, "role "+res.Role+" requires "+string(config.LocalityLocalOrZDR)
 		}
-		// An unrecognised value is NOT ignored. Silently serving a request
-		// that asked for a privacy posture the router does not implement is
-		// the one failure mode this whole file exists to prevent.
-		return true, "request header " + PrivacyHeader + ": " + v + " (unrecognised)"
 	}
-	if res.Role == "" {
-		return false, ""
-	}
-	role, ok := rt.roles[res.Role]
-	if !ok {
-		return false, ""
-	}
-	if role.Require.Locality == config.LocalityLocalOrZDR {
-		return true, "role " + res.Role + " requires " + string(config.LocalityLocalOrZDR)
-	}
-	return false, ""
+	return tier, source, ""
 }
 
 // applyPrivacy enforces a retention tolerance on one outbound request. It
@@ -104,13 +141,18 @@ func (rt *Router) zdrRequired(r *http.Request, res resolveResult) (required bool
 //   - Anything else: REFUSE. A caller who asked for zero retention and got a
 //     best-effort answer from a retaining seat is worse off than one who got
 //     an error, because they do not know to stop.
-func (rt *Router) applyPrivacy(bodyMap map[string]any, res resolveResult, source string) string {
+func (rt *Router) applyPrivacy(bodyMap map[string]any, res resolveResult, tier privacyTier, source string) string {
 	m, ok := rt.registry.Models[res.ModelID]
 	if !ok {
 		return fmt.Sprintf("%s, but %q is not a known model", source, res.ModelID)
 	}
 	if m.IsLocal() {
 		return ""
+	}
+	if tier == tierLocal {
+		// No directive can make a cloud endpoint local. Refuse outright —
+		// a ZDR-enforceable seat is still somebody else's computer.
+		return fmt.Sprintf("%s, but %q is not on fleet hardware", source, res.ModelID)
 	}
 	if !m.ZDREnforceable() {
 		return fmt.Sprintf("%s, but %q is neither local nor an endpoint the router can hold to zero data retention", source, res.ModelID)
@@ -153,15 +195,17 @@ func setZDRDirective(bodyMap map[string]any) error {
 // exactly what 403 means. A 503 would invite a retry, and retrying will not
 // help — the answer will be the same until the config or the tolerance
 // changes.
-func writePrivacyRefusal(w http.ResponseWriter, reason string) {
-	w.Header().Set(PrivacyHeader, PrivacyZDR)
+func writePrivacyRefusal(w http.ResponseWriter, tier privacyTier, reason string) {
+	if t := tier.String(); t != "" {
+		w.Header().Set(PrivacyHeader, t)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
 			"message": "router refused: " + reason,
 			"type":    "privacy_policy_violation",
-			"code":    "zdr_unavailable",
+			"code":    "privacy_tier_unavailable",
 		},
 	})
 }
