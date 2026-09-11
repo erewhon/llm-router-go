@@ -83,47 +83,106 @@ func (t privacyTier) String() string {
 	}
 }
 
-// privacyRequirement works out the retention tier this request must be held
-// to, and where the demand came from (for the refusal message).
+// parsePrivacyHeader reads the caller's X-Router-Privacy, if any.
 //
-// Two sources, combined by taking the STRICTER:
+// An UNRECOGNISED value is a hard refusal, returned as refuse != "". It must
+// never be mapped onto a real tier: a caller who typed a posture the router
+// does not implement ("eu-only", or "locl") has not been given what they
+// asked for, and serving them anyway lets them believe they were. An earlier
+// version let an unrecognised value fall through and, on an OpenRouter seat,
+// quietly serve it as zdr — which would have sent a script's misspelled
+// local-only request to the cloud. Fixed 2026-09-10.
 //
-//   - The resolved ROLE. Only locality: local_or_zdr produces a dispatch-time
-//     requirement (tier zdr). A role declaring locality: local deliberately
-//     does NOT: its overflow list is exempt by design — crossing the local/
-//     cloud boundary when the fleet is down is what that overflow is for — and
-//     enforcing "local" at dispatch would break exactly that. Load-time
-//     validation already holds a local role's own candidates to IsLocal().
-//   - The CALLER, via X-Router-Privacy. This is how a script says "local only"
-//     or "zdr" per request, on a role or on a directly named model. A caller
-//     may always tighten; "any" tightens nothing and loosens nothing.
-//
-// An UNRECOGNISED header value is a hard refusal, returned as refuse != "".
-// It must never be mapped onto a real tier: a caller who typed a posture the
-// router does not implement ("eu-only", or "locl") has not been given what
-// they asked for, and serving them anyway lets them believe they were. An
-// earlier version let an unrecognised value fall through and, on an
-// OpenRouter seat, quietly serve it as zdr — which would have sent a script's
-// misspelled local-only request to the cloud. Fixed 2026-09-10.
-func (rt *Router) privacyRequirement(r *http.Request, res resolveResult) (tier privacyTier, source, refuse string) {
+// Parsed BEFORE resolution, because the tier is a filter on which candidates
+// a role may even consider (see privacyGate), not a check on whichever one
+// happened to come first. "any" and an absent header are the same thing: no
+// requirement of the caller's own.
+func parsePrivacyHeader(r *http.Request) (tier privacyTier, source, refuse string) {
 	switch v := strings.TrimSpace(strings.ToLower(r.Header.Get(PrivacyHeader))); v {
 	case "", PrivacyAny:
-		// no caller requirement
+		return tierNone, "", ""
 	case PrivacyZDR:
-		tier, source = tierZDR, "request header "+PrivacyHeader+": "+PrivacyZDR
+		return tierZDR, "request header " + PrivacyHeader + ": " + PrivacyZDR, ""
 	case PrivacyLocal:
-		tier, source = tierLocal, "request header "+PrivacyHeader+": "+PrivacyLocal
+		return tierLocal, "request header " + PrivacyHeader + ": " + PrivacyLocal, ""
 	default:
 		return tierNone, "", fmt.Sprintf("request header %s: %q is not a recognised privacy tier (want %q, %q or %q)",
 			PrivacyHeader, v, PrivacyLocal, PrivacyZDR, PrivacyAny)
 	}
+}
 
-	if res.Role != "" {
-		if role, ok := rt.roles[res.Role]; ok && role.Require.Locality == config.LocalityLocalOrZDR && tier < tierZDR {
-			tier, source = tierZDR, "role "+res.Role+" requires "+string(config.LocalityLocalOrZDR)
-		}
+// effectiveTier combines a role's declared tolerance with the caller's, taking
+// the STRICTER.
+//
+// Only locality: local_or_zdr produces a role-derived requirement (tier zdr).
+// A role declaring locality: local deliberately does NOT: its overflow list is
+// exempt by design — crossing the local/cloud boundary when the fleet is down
+// is what that overflow is for — and enforcing "local" at dispatch would break
+// exactly that. The caller is the only source of `local`. A caller may always
+// tighten; "any" tightens nothing and loosens nothing, because the role's
+// promise is not the caller's to waive.
+func effectiveTier(rd config.RoleDefinition, caller privacyTier) privacyTier {
+	if rd.Require.Locality == config.LocalityLocalOrZDR && caller < tierZDR {
+		return tierZDR
 	}
-	return tier, source, ""
+	return caller
+}
+
+// privacyGate reports why a candidate fails a tier, or "" when it passes.
+//
+// This is the resolution-time half of enforcement, and it runs FIRST in the
+// candidate walk — before availability, before the context envelope. Policy is
+// a property of the config and the header, not of fleet health, so it is the
+// most useful thing to say about a candidate, and checking it first is what
+// lets the walk classify a total miss exactly: if every candidate fell here,
+// no retry can ever help and the caller gets 403; if any compliant candidate
+// got past here and was merely down, that is a 503 worth retrying.
+//
+// The tier is a filter, not a verdict on the first choice: a role listing an
+// OpenRouter seat ahead of a local one still serves a `local` request — from
+// the local one. Before 2026-09-11 the check ran only at dispatch, on
+// whichever candidate resolution had already picked, and refused even when a
+// compliant candidate sat further down the order.
+func privacyGate(m config.ModelDefinition, tier privacyTier) string {
+	if tier == tierNone || m.IsLocal() {
+		return ""
+	}
+	if tier == tierLocal {
+		// No directive can make a cloud endpoint local — a ZDR-enforceable
+		// seat is still somebody else's computer.
+		return "not on fleet hardware (privacy: local)"
+	}
+	if !m.ZDREnforceable() {
+		return "neither local nor a zero-retention-enforceable endpoint (privacy: zdr)"
+	}
+	return ""
+}
+
+// privacyRefusedError is returned when a role or chain has candidates, but the
+// privacy tier excluded every one of them, and none of the exclusions was
+// about health.
+//
+// It is a distinct type — not a roleUnavailableError with different words —
+// because the two demand opposite reactions and the HTTP edge must be able to
+// tell them apart. A 503 says "nothing can serve this RIGHT NOW; retry, or fail
+// over to another seat". Forge's ensemble classifier does exactly that with
+// every 5xx. A policy refusal can never succeed on retry, and reporting it as
+// transient would have a panel retrying a refused seat and then describing it
+// as "will retry" instead of "refused by privacy policy". So it is a 403: the
+// caller's own policy, not the fleet's health, is what blocked the request.
+type privacyRefusedError struct {
+	// Subject is the role or chain name the caller asked for.
+	Subject string
+	Tier    privacyTier
+	// Excluded lists every candidate and why, mirroring the per-candidate
+	// reasons roleUnavailableError carries, so the caller can see what would
+	// have served under a looser tier.
+	Excluded []string
+}
+
+func (e *privacyRefusedError) Error() string {
+	return fmt.Sprintf("%q has no candidate that satisfies privacy tier %q: %s",
+		e.Subject, e.Tier.String(), strings.Join(e.Excluded, "; "))
 }
 
 // applyPrivacy enforces a retention tolerance on one outbound request. It
@@ -146,16 +205,14 @@ func (rt *Router) applyPrivacy(bodyMap map[string]any, res resolveResult, tier p
 	if !ok {
 		return fmt.Sprintf("%s, but %q is not a known model", source, res.ModelID)
 	}
+	// For a role or chain the walk has already applied privacyGate, so this
+	// cannot fire; it is what makes a DIRECTLY NAMED model honour the tier,
+	// since a bare name goes through no candidate walk at all.
+	if why := privacyGate(m, tier); why != "" {
+		return fmt.Sprintf("%s, but %q is %s", source, res.ModelID, why)
+	}
 	if m.IsLocal() {
 		return ""
-	}
-	if tier == tierLocal {
-		// No directive can make a cloud endpoint local. Refuse outright —
-		// a ZDR-enforceable seat is still somebody else's computer.
-		return fmt.Sprintf("%s, but %q is not on fleet hardware", source, res.ModelID)
-	}
-	if !m.ZDREnforceable() {
-		return fmt.Sprintf("%s, but %q is neither local nor an endpoint the router can hold to zero data retention", source, res.ModelID)
 	}
 	if err := setZDRDirective(bodyMap); err != nil {
 		return fmt.Sprintf("%s, but the directive could not be attached: %v", source, err)
@@ -195,17 +252,25 @@ func setZDRDirective(bodyMap map[string]any) error {
 // exactly what 403 means. A 503 would invite a retry, and retrying will not
 // help — the answer will be the same until the config or the tolerance
 // changes.
-func writePrivacyRefusal(w http.ResponseWriter, tier privacyTier, reason string) {
+//
+// excluded, when non-empty, is the per-candidate list from a
+// privacyRefusedError, carried as a structured field beside the prose so a
+// program can read which seats were passed over and why without parsing the
+// message.
+func writePrivacyRefusal(w http.ResponseWriter, tier privacyTier, reason string, excluded []string) {
 	if t := tier.String(); t != "" {
 		w.Header().Set(PrivacyHeader, t)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{
-			"message": "router refused: " + reason,
-			"type":    "privacy_policy_violation",
-			"code":    "privacy_tier_unavailable",
-		},
-	})
+	errObj := map[string]any{
+		"message": "router refused: " + reason,
+		"type":    "privacy_policy_violation",
+		"code":    "privacy_tier_unavailable",
+	}
+	if len(excluded) > 0 {
+		errObj["privacy_tier"] = tier.String()
+		errObj["excluded_candidates"] = excluded
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": errObj})
 }

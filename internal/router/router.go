@@ -273,12 +273,15 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			// ("timeout"/"connect"/"transport"), empty when the upstream
 			// answered with a status line (whatever it was) or was never tried.
 			upstreamClass string
-			// privacyTolerance names the retention posture enforced on this
-			// request ("zdr"), for the reqlog row. Declared up here rather
-			// than beside zdrWanted because the deferred record closes over
-			// it, and a refused request must log the tolerance that refused
-			// it — that row is the evidence the refusal happened.
+			// privacyTolerance names the tier enforced on this request, for the
+			// reqlog row. Declared up here because the deferred record closes
+			// over it, and a refused request must log the tier that refused it
+			// — that row is the evidence the refusal happened.
 			privacyTolerance string
+			// privacyRefused marks a request the tier turned away, so reqlog
+			// and metrics can count it as a refusal rather than an error or
+			// an outage.
+			privacyRefused bool
 		)
 
 		defer func() {
@@ -317,6 +320,12 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				}
 			}
 			lr.PrivacyTolerance = privacyTolerance
+			if privacyRefused {
+				// Distinct from every upstream class: nothing was sent, so
+				// this must not count against any model's failure rate, and
+				// it must not fold into the 5xx error rate on the dashboard.
+				lr.ErrorClass = errorClassPrivacyRefused
+			}
 			var usage usageStats
 			switch {
 			case cap.jsonBody != nil:
@@ -364,9 +373,37 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// included — an agent loop's last message says nothing about its size.
 		promptTokens := estimatePromptTokens(body)
 
-		res, err := rt.resolveModel(model, forceDirect, promptTokens)
+		// The caller's privacy tier is read BEFORE resolution: it filters
+		// which candidates a role may consider, so a role listing a cloud
+		// seat first still serves a `local` request from a local seat lower
+		// down. A malformed value is refused here, before any seat is chosen.
+		callerTier, privSource, privRefuse := parsePrivacyHeader(r)
+		if privRefuse != "" {
+			errMsg = privRefuse
+			privacyRefused = true
+			rt.metrics.ObservePrivacyRefusal("invalid", "")
+			writePrivacyRefusal(rec, tierNone, privRefuse, nil)
+			return
+		}
+
+		res, err := rt.resolveModel(model, forceDirect, promptTokens, callerTier)
 		if err != nil {
 			errMsg = err.Error()
+			// The privacy tier excluded every candidate and none was merely
+			// down. 403, not 503: the caller's policy did this, no retry can
+			// change it, and a retry-on-5xx client must not treat it as an
+			// outage. The reasons ride in the body so the caller can see what
+			// a looser tier would have reached.
+			var privErr *privacyRefusedError
+			if errors.As(err, &privErr) {
+				privacyTolerance = privErr.Tier.String()
+				privacyRefused = true
+				rt.logger.WarnContext(r.Context(), "refusing on privacy tier: no compliant candidate",
+					"subject", privErr.Subject, "tier", privErr.Tier.String(), "excluded", privErr.Excluded)
+				rt.metrics.ObservePrivacyRefusal(privErr.Tier.String(), privErr.Subject)
+				writePrivacyRefusal(rec, privErr.Tier, errMsg, privErr.Excluded)
+				return
+			}
 			// A role that resolved to nothing is a fleet-state problem, not a
 			// client mistake: 503 with the per-candidate reasons, so callers
 			// can tell "that name doesn't exist" from "everything that serves
@@ -413,31 +450,32 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		// Forward, advancing along the role's preference order if an upstream
 		// fails to answer at all. Only role-resolved requests fail over:
 		// naming a model is a statement about that model.
-		// Re-evaluated on every attempt, not hoisted: failover reassigns res
-		// to a different candidate, and a tolerance that held for the first
-		// seat says nothing about the second. Load-time validation makes a
-		// role's own candidates safe, but the caller-supplied header can
-		// tighten beyond any role — including on a directly named model,
-		// which has no role contract behind it at all.
-		privTier, privSource, privRefuse := rt.privacyRequirement(r, res)
+		// The tier the walk was held to (role ∨ caller) for a role or chain;
+		// for a directly named model there was no walk, so it is the caller's.
+		privTier := res.PrivacyTier
+		if privTier == tierNone {
+			privTier = callerTier
+		}
 		privacyTolerance = privTier.String()
-		if privRefuse != "" {
-			// A malformed requirement is refused before anything is sent,
-			// whatever seat was resolved.
-			errMsg = privRefuse
-			writePrivacyRefusal(rec, tierNone, privRefuse)
-			return
+		if privTier != tierNone && privSource == "" {
+			privSource = "role " + res.Role + " requires " + string(config.LocalityLocalOrZDR)
 		}
 
 		for attempt := 0; ; attempt++ {
 			bodyMap["model"] = res.BackendModel
+			// Re-applied on every attempt: this puts the ZDR directive on the
+			// wire for the seat actually being tried, and — for a directly
+			// named model, which went through no candidate walk — it is the
+			// only place the caller's tier is enforced at all.
 			if privTier != tierNone {
 				if refusal := rt.applyPrivacy(bodyMap, res, privTier, privSource); refusal != "" {
 					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
 						"model", model, "resolved_via", res.ModelID, "role", res.Role,
 						"tier", privTier.String(), "reason", refusal)
 					errMsg = refusal
-					writePrivacyRefusal(rec, privTier, refusal)
+					privacyRefused = true
+					rt.metrics.ObservePrivacyRefusal(privTier.String(), coalesce(res.Role, res.Chain))
+					writePrivacyRefusal(rec, privTier, refusal, nil)
 					return
 				}
 				rec.Header().Set(PrivacyHeader, privTier.String())
@@ -735,7 +773,7 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		e := entry{ID: name, Object: "model", OwnedBy: "role", Role: true}
-		if res, err := rt.resolveRole(name, name, false, 0); err == nil {
+		if res, err := rt.resolveRole(name, name, false, 0, tierNone); err == nil {
 			e.APIClass = res.APIClass
 		} else if len(rt.roles[name].Candidates) > 0 {
 			// Nothing available right now: still advertise the role (it will

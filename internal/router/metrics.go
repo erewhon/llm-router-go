@@ -19,15 +19,16 @@ import (
 // client-supplied alias/string — and by keeping the duration histogram
 // label-free except for path + api_class.
 type routerMetrics struct {
-	reg            *prometheus.Registry
-	requests       *prometheus.CounterVec
-	duration       *prometheus.HistogramVec
-	tokens         *prometheus.CounterVec
-	modelAvailable *prometheus.GaugeVec
-	roleTarget     *prometheus.GaugeVec
-	failovers      *prometheus.CounterVec
-	upstream       *prometheus.CounterVec
-	handler        http.Handler
+	reg             *prometheus.Registry
+	requests        *prometheus.CounterVec
+	duration        *prometheus.HistogramVec
+	tokens          *prometheus.CounterVec
+	modelAvailable  *prometheus.GaugeVec
+	roleTarget      *prometheus.GaugeVec
+	failovers       *prometheus.CounterVec
+	upstream        *prometheus.CounterVec
+	privacyRefusals *prometheus.CounterVec
+	handler         http.Handler
 }
 
 // newRouterMetrics builds a fresh Prometheus registry, registers Go + process
@@ -114,17 +115,38 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 	}, []string{"model", "api_base", "outcome"})
 	reg.MustRegister(upstream)
 
+	// Privacy refusals get their own counter rather than living inside the
+	// 403s of router_requests_total: they are policy outcomes, not errors,
+	// and the dashboard question is "how often does a tier turn a request
+	// away, and for which role" — which the status label cannot answer.
+	// tier is local/zdr, or "invalid" for a malformed header; subject is
+	// the role or chain, "" for a directly named model.
+	privacyRefusals := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "router_privacy_refusals_total",
+		Help: "Requests refused because no candidate satisfied the X-Router-Privacy tier.",
+	}, []string{"tier", "subject"})
+	reg.MustRegister(privacyRefusals)
+
 	return &routerMetrics{
-		reg:            reg,
-		requests:       requests,
-		duration:       duration,
-		tokens:         tokens,
-		modelAvailable: modelAvailable,
-		roleTarget:     roleTarget,
-		failovers:      failovers,
-		upstream:       upstream,
-		handler:        promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
+		reg:             reg,
+		requests:        requests,
+		duration:        duration,
+		tokens:          tokens,
+		modelAvailable:  modelAvailable,
+		roleTarget:      roleTarget,
+		failovers:       failovers,
+		upstream:        upstream,
+		privacyRefusals: privacyRefusals,
+		handler:         promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}),
 	}
+}
+
+// ObservePrivacyRefusal counts one request turned away by the privacy tier.
+func (m *routerMetrics) ObservePrivacyRefusal(tier, subject string) {
+	if m == nil {
+		return
+	}
+	m.privacyRefusals.WithLabelValues(tier, subject).Inc()
 }
 
 // ObserveFailover records a mid-request move from one role candidate to the
@@ -288,7 +310,10 @@ func (m *routerMetrics) Observe(rec reqlog.Record) {
 	// when an upstream was actually tried: UpstreamStatus > 0 means it
 	// answered, a non-empty ErrorClass with status 0 means transport failure.
 	// Requests rejected before forwarding (400/404/503) contribute nothing.
-	if rec.BackendURL != "" && (rec.UpstreamStatus > 0 || rec.ErrorClass != "") {
+	// A privacy refusal never reached an upstream, so it must not be scored
+	// against one — even when a seat had been resolved before the refusal.
+	if rec.BackendURL != "" && rec.ErrorClass != errorClassPrivacyRefused &&
+		(rec.UpstreamStatus > 0 || rec.ErrorClass != "") {
 		m.ObserveUpstream(model, rec.BackendURL, rec.ErrorClass)
 	}
 	if rec.PromptTokens != nil {

@@ -59,6 +59,13 @@ type resolveResult struct {
 	// named model or chain (naming a model bypasses roles) and the
 	// introspection endpoints, which resolve with no request in hand.
 	PromptTokens int
+	// PrivacyTier is the tier the walk was held to — the stricter of the
+	// role's declared tolerance and the caller's header — carried so the
+	// failover walk gates its candidates the same way the first pass did, and
+	// so the response header and reqlog report what was actually enforced.
+	// tierNone for a directly named model, whose only tier is the caller's,
+	// applied at dispatch.
+	PrivacyTier privacyTier
 	// Downshift names the candidate the context envelope passed over, when
 	// the role landed somewhere other than its first choice because of size.
 	// Empty otherwise. Surfaced as X-Router-Downshift: because the soft gate
@@ -95,7 +102,7 @@ type resolveResult struct {
 // disable that gate — which every caller without a request body in hand
 // should do, and which is also the right value for endpoints where roles
 // carry no size-dependent quality difference.
-func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int) (resolveResult, error) {
+func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int, caller privacyTier) (resolveResult, error) {
 	if rt.registry == nil {
 		return resolveResult{}, fmt.Errorf("router: nil registry")
 	}
@@ -107,18 +114,18 @@ func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int)
 
 	if id, m, ok := rt.lookupConcrete(want); ok {
 		if len(m.Fallbacks) > 0 {
-			return rt.resolveChain(id, m, model, forceDirect)
+			return rt.resolveChain(id, m, model, forceDirect, caller)
 		}
 		return rt.buildResult(id, m, "", model, forceDirect, "")
 	}
 	if _, isRole := rt.roles[want]; isRole {
-		return rt.resolveRole(want, model, forceDirect, promptTokens)
+		return rt.resolveRole(want, model, forceDirect, promptTokens, caller)
 	}
 	if id, m, alias, ok := rt.lookupAlias(want); ok {
 		if len(m.Fallbacks) > 0 {
 			// Alias of a chain entry resolves the chain. Per-alias overrides
 			// don't apply — chain members carry their own routing config.
-			return rt.resolveChain(id, m, model, forceDirect)
+			return rt.resolveChain(id, m, model, forceDirect, caller)
 		}
 		return rt.buildResult(id, m, alias, model, forceDirect, "")
 	}
@@ -126,7 +133,7 @@ func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int)
 	// tool-proxy model — forward <base> and pass the suffix to the tool proxy
 	// as X-Egress. Only for chat (tool-proxy) requests, never forceDirect ones.
 	if !forceDirect {
-		if res, ok := rt.resolveEgressAlias(want, model, promptTokens); ok {
+		if res, ok := rt.resolveEgressAlias(want, model, promptTokens, caller); ok {
 			return res, nil
 		}
 	}
@@ -166,10 +173,10 @@ func (rt *Router) lookupAlias(want string) (string, config.ModelDefinition, stri
 // "nemotron-3-super-se", wins over a shorter accidental match), accepting the
 // first base that routes through the tool proxy; the remainder is the egress
 // spec. Returns ok=false if no resolvable tool-proxy base is found.
-func (rt *Router) resolveEgressAlias(want, original string, promptTokens int) (resolveResult, bool) {
+func (rt *Router) resolveEgressAlias(want, original string, promptTokens int, caller privacyTier) (resolveResult, bool) {
 	for i := strings.LastIndex(want, "-"); i > 0; i = strings.LastIndex(want[:i], "-") {
 		base, egress := want[:i], want[i+1:]
-		res, err := rt.resolveEgressBase(base, original, egress, promptTokens)
+		res, err := rt.resolveEgressBase(base, original, egress, promptTokens, caller)
 		if err != nil || !res.ViaToolProxy {
 			continue // base isn't tool-proxy-routed; an egress suffix is meaningless
 		}
@@ -181,12 +188,12 @@ func (rt *Router) resolveEgressAlias(want, original string, promptTokens int) (r
 // resolveEgressBase resolves the base half of a "<base>-<egress>" name using
 // the same precedence as resolveModel, so "research-se" works whether
 // "research" is a model, an alias, or a role.
-func (rt *Router) resolveEgressBase(base, original, egress string, promptTokens int) (resolveResult, error) {
+func (rt *Router) resolveEgressBase(base, original, egress string, promptTokens int, caller privacyTier) (resolveResult, error) {
 	if id, m, ok := rt.lookupConcrete(base); ok {
 		return rt.buildResult(id, m, "", original, false, egress)
 	}
 	if _, isRole := rt.roles[base]; isRole {
-		res, err := rt.resolveRole(base, original, false, promptTokens)
+		res, err := rt.resolveRole(base, original, false, promptTokens, caller)
 		if err != nil {
 			return resolveResult{}, err
 		}
@@ -218,7 +225,7 @@ func (e *chainUnavailableError) Error() string {
 // A non-virtual entry is its own first candidate; the fallbacks follow in
 // declared order. The untried tail lands in Remaining so the failover retry
 // can advance without re-resolving.
-func (rt *Router) resolveChain(id string, m config.ModelDefinition, original string, forceDirect bool) (resolveResult, error) {
+func (rt *Router) resolveChain(id string, m config.ModelDefinition, original string, forceDirect bool, caller privacyTier) (resolveResult, error) {
 	// Chain is stamped per entry (not just on the result) so the failover
 	// walk in nextRoleCandidate labels each hop from the entry itself — the
 	// same shape role resolution produces when it expands a chain candidate.
@@ -231,10 +238,19 @@ func (rt *Router) resolveChain(id string, m config.ModelDefinition, original str
 	}
 
 	reasons := make([]string, 0, len(order))
+	excluded := make([]string, 0) // privacy-tier exclusions; see resolveRole
 	for i, cand := range order {
 		cm, known := rt.active[cand.ModelID]
 		if !known {
 			reasons = append(reasons, fmt.Sprintf("%s: not routable in this mode", cand.ModelID))
+			continue
+		}
+		// A chain is only as private as the member that serves, and which one
+		// serves is decided by whichever is up — so the caller's tier filters
+		// every member, and the failover walk (nextRoleCandidate) does the
+		// same with res.PrivacyTier.
+		if why := privacyGate(cm, caller); why != "" {
+			excluded = append(excluded, fmt.Sprintf("%s: %s", cand.ModelID, why))
 			continue
 		}
 		if !rt.avail.Routable(cand.ModelID) {
@@ -248,9 +264,13 @@ func (rt *Router) resolveChain(id string, m config.ModelDefinition, original str
 		}
 		res.Chain = cand.Chain
 		res.Remaining = order[i+1:]
+		res.PrivacyTier = caller
 		return res, nil
 	}
-	return resolveResult{}, &chainUnavailableError{Chain: id, Reasons: reasons}
+	if len(excluded) > 0 && len(reasons) == 0 {
+		return resolveResult{}, &privacyRefusedError{Subject: id, Tier: caller, Excluded: excluded}
+	}
+	return resolveResult{}, &chainUnavailableError{Chain: id, Reasons: append(reasons, excluded...)}
 }
 
 // buildResult assembles the forwarding decision for a matched model.

@@ -97,7 +97,7 @@ func TestNoEnvelopeMeansOnlyTheDeclaredWindowGates(t *testing.T) {
 	rt := newEnvelopeRouter(t)
 
 	for _, promptTokens := range []int{0, 1000, 100_000, 130_000} {
-		res, err := rt.resolveModel("tiny", false, promptTokens)
+		res, err := rt.resolveModel("tiny", false, promptTokens, tierNone)
 		if err != nil {
 			t.Fatalf("resolve tiny at %d tokens: %v", promptTokens, err)
 		}
@@ -118,7 +118,7 @@ func TestSoftGateSkipsCandidateAndBinds(t *testing.T) {
 
 	// Inside the envelope: Lightning wins, as it should — this is exactly the
 	// short-context advantage the gate exists to preserve.
-	res, err := rt.resolveModel("thinker", false, 4000)
+	res, err := rt.resolveModel("thinker", false, 4000, tierNone)
 	if err != nil {
 		t.Fatalf("resolve thinker (short): %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSoftGateSkipsCandidateAndBinds(t *testing.T) {
 	}
 
 	// Past it: skipped exactly like an unavailable candidate.
-	res, err = rt.resolveModel("thinker", false, 64_000)
+	res, err = rt.resolveModel("thinker", false, 64_000, tierNone)
 	if err != nil {
 		t.Fatalf("resolve thinker (long): %v", err)
 	}
@@ -150,7 +150,7 @@ func TestHardGateRefusesAtTheRouter(t *testing.T) {
 
 	// 200k exceeds gpt-oss's 131k window and Lightning's 16k envelope, so the
 	// role empties out rather than dispatching something that cannot fit.
-	_, err := rt.resolveModel("thinker", false, 200_000)
+	_, err := rt.resolveModel("thinker", false, 200_000, tierNone)
 	var roleErr *roleUnavailableError
 	if !errors.As(err, &roleErr) {
 		t.Fatalf("err = %v, want roleUnavailableError", err)
@@ -164,7 +164,7 @@ func TestHardGateRefusesAtTheRouter(t *testing.T) {
 func TestGateReasonIsReadable(t *testing.T) {
 	rt := newEnvelopeRouter(t)
 
-	_, err := rt.resolveModel("narrow", false, 74_000)
+	_, err := rt.resolveModel("narrow", false, 74_000, tierNone)
 	var roleErr *roleUnavailableError
 	if !errors.As(err, &roleErr) {
 		t.Fatalf("err = %v, want roleUnavailableError", err)
@@ -181,7 +181,7 @@ func TestGateReasonIsReadable(t *testing.T) {
 func TestAllGatedWithOnEmptyError(t *testing.T) {
 	rt := newEnvelopeRouter(t)
 
-	_, err := rt.resolveModel("narrow", false, 74_000)
+	_, err := rt.resolveModel("narrow", false, 74_000, tierNone)
 	var roleErr *roleUnavailableError
 	if !errors.As(err, &roleErr) {
 		t.Fatalf("err = %v, want roleUnavailableError", err)
@@ -196,7 +196,7 @@ func TestAllGatedWithOnEmptyOverflowReachesTheCloud(t *testing.T) {
 	// short-envelope, so a long prompt legitimately reaches the overflow list.
 	rt := newEnvelopeRouter(t)
 
-	res, err := rt.resolveModel("spill", false, 74_000)
+	res, err := rt.resolveModel("spill", false, 74_000, tierNone)
 	if err != nil {
 		t.Fatalf("resolve spill: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestDirectlyNamedModelIsNeverGated(t *testing.T) {
 	// envelope must not touch it — the escape hatch the binding gate relies on.
 	rt := newEnvelopeRouter(t)
 
-	res, err := rt.resolveModel("lightning", false, 200_000)
+	res, err := rt.resolveModel("lightning", false, 200_000, tierNone)
 	if err != nil {
 		t.Fatalf("resolve lightning directly: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestFailoverWalkRespectsTheEnvelope(t *testing.T) {
 
 	// Resolve "narrow" at a size gemma passes but lightning does not, then
 	// confirm the tail offers nothing gated.
-	res, err := rt.resolveModel("narrow", false, 20_000)
+	res, err := rt.resolveModel("narrow", false, 20_000, tierNone)
 	if err != nil {
 		t.Fatalf("resolve narrow: %v", err)
 	}

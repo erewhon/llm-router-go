@@ -99,9 +99,30 @@ Rules worth knowing before wiring a script's `--privacy` flag to it:
   `locality: local_or_zdr`, sending `any` still gets the ZDR directive; sending
   `local` gets the stricter `local`. The stricter of the role's and the caller's
   tier always governs.
-- **A refusal is 403 `privacy_tier_unavailable` and the upstream is never
-  called.** Retrying will not help; the answer changes only if the tier or the
-  routing does.
+- **The tier is a filter on the role's candidate walk, not a verdict on its
+  first choice.** A role listing an OpenRouter seat ahead of a local one still
+  serves a `local` request — from the local one. Overflow entries are filtered
+  too, so `X-Router-Overflow: true` cannot happen under `local`.
+- **Three distinct answers when a role comes up short**, because they demand
+  different reactions:
+
+  | status | meaning | retry? |
+  | --- | --- | --- |
+  | `403` `privacy_tier_unavailable` | candidates exist, the tier excluded every one, none was merely down | never — your policy did this |
+  | `503` | a compliant candidate exists but is down right now | yes |
+  | `503` (mixed) | some excluded by policy, the compliant rest down — the exclusions are still listed | yes |
+  | `404` | the name does not exist | no |
+
+  A 403 body carries `excluded_candidates`, one reason per seat (`or/glm:
+  not on fleet hardware (privacy: local)`), so a program can see what a looser
+  tier would have reached. The upstream is never called for a 403.
+- **Omitting the header is `any`.** Nothing is enforced and nothing is echoed;
+  a response `X-Router-Privacy` header only appears when a tier actually
+  applied (the caller's, or a `local_or_zdr` role's `zdr`).
+- Refusals are their own outcome, not errors: `error_class = privacy_refused`
+  in reqlog, and `router_privacy_refusals_total{tier,subject}` in metrics —
+  they never count against a model's upstream failure rate, since nothing was
+  sent.
 - **An unrecognised value is refused, not ignored** — `locl`, `eu-only`,
   `unrestricted` all 403 on every seat. A typo must never be served as though it
   were a real posture. Values are case- and whitespace-insensitive.

@@ -66,6 +66,16 @@ roles:
   anywhere:
     require: {locality: any}
     candidates: [zen-seat]
+
+  cloud-only:
+    require: {locality: any}
+    candidates: [or-seat, zen-seat]
+
+  local-then-cloud-overflow:
+    require: {locality: local}
+    candidates: [local-seat]
+    on_empty: overflow
+    overflow: [or-seat]
 `
 
 func newPrivacyRouter(t *testing.T, upstreamURL string) *Router {
@@ -199,7 +209,7 @@ func TestCallerHeaderOnAnUnenforceableSeatIsRefused(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"zen-seat", "zero data retention", "privacy_tier_unavailable"} {
+	for _, want := range []string{"zen-seat", "zero-retention-enforceable", "privacy_tier_unavailable"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refusal body missing %q: %s", want, body)
 		}
@@ -532,7 +542,7 @@ func TestReqlogRecordsTheToleranceOnARefusal(t *testing.T) {
 	if got.Status != http.StatusForbidden {
 		t.Errorf("Status = %d, want 403", got.Status)
 	}
-	if !strings.Contains(got.Error, "zero data retention") {
+	if !strings.Contains(got.Error, "zero-retention-enforceable") {
 		t.Errorf("Error should say why it was refused: %q", got.Error)
 	}
 }
@@ -822,15 +832,24 @@ func TestAnyCannotLoosenARolesTolerance(t *testing.T) {
 }
 
 func TestStricterOfRoleAndCallerWins(t *testing.T) {
-	// "private" (local_or_zdr) resolves to or-seat first. The role alone would
-	// serve it with a ZDR directive; the caller asking for "local" is
-	// stricter, so the stricter tier governs and the cloud seat is refused.
-	rec, _, called := sendWithPrivacy(t, "private", PrivacyLocal)
-	if called {
-		t.Fatal("upstream called — the caller's stricter tier was ignored in favour of the role's")
+	// "private" (local_or_zdr) lists or-seat FIRST and local-seat second.
+	// The caller asking for "local" is stricter than the role's zdr, so the
+	// stricter tier governs — and it governs as a FILTER on the walk, not a
+	// verdict on the first choice: the walk passes or-seat and serves from
+	// local-seat. Before 2026-09-11 this refused with 403 even though a
+	// compliant candidate was one step down the order.
+	rec, got, called := sendWithPrivacy(t, "private", PrivacyLocal)
+	if !called || rec.Code != http.StatusOK {
+		t.Fatalf("status = %d called = %v, want 200 served from the local candidate (body: %s)", rec.Code, called, rec.Body.String())
 	}
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	if h := rec.Header().Get("X-Router-Resolved"); h != "local-seat" {
+		t.Errorf("X-Router-Resolved = %q, want local-seat — the walk should have skipped or-seat", h)
+	}
+	if _, present := got["provider"]; present {
+		t.Errorf("provider block sent to a local backend: %#v", got["provider"])
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != PrivacyLocal {
+		t.Errorf("%s = %q, want %q (the stricter, caller's tier)", PrivacyHeader, h, PrivacyLocal)
 	}
 }
 
@@ -883,5 +902,209 @@ func TestReqlogRecordsTheLocalTier(t *testing.T) {
 	}
 	if recs[1].Status != http.StatusForbidden {
 		t.Errorf("or-seat under local: Status = %d, want 403 recorded", recs[1].Status)
+	}
+}
+
+// --- the three answers when a tier leaves a role short ---------------------
+//
+// 403 policy refusal: candidates exist, the tier excluded every one, none was
+//     merely down. A retry can never help; the caller's policy did this.
+// 503 availability miss: a compliant candidate exists but is down right now.
+// 503 mixed: some excluded by policy, the compliant rest down — still worth a
+//     retry, and the policy exclusions ride along so the caller sees what a
+//     looser tier would have reached.
+
+func sendWithPrivacyAvail(t *testing.T, model, privacy string, down ...string) (*httptest.ResponseRecorder, bool) {
+	t.Helper()
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	reg, err := config.LoadBytes([]byte(privacyRegistryYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	dm := map[string]bool{}
+	for _, d := range down {
+		dm[d] = true
+	}
+	rt := New(reg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMode("default"), WithFlushInterval(0),
+		WithTransport(&transportRedirect{to: upstream.URL, rt: http.DefaultTransport}),
+		WithAvailability(downAvail{down: dm}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	if privacy != "" {
+		req.Header.Set(PrivacyHeader, privacy)
+	}
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+	return rec, called
+}
+
+func TestPolicyRefusalIs403WithEveryExclusionListed(t *testing.T) {
+	rec, called := sendWithPrivacyAvail(t, "cloud-only", PrivacyLocal)
+	if called {
+		t.Fatal("upstream called — nothing in cloud-only satisfies `local`")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code     string   `json:"code"`
+			Tier     string   `json:"privacy_tier"`
+			Excluded []string `json:"excluded_candidates"`
+			Message  string   `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v: %s", err, rec.Body.String())
+	}
+	if body.Error.Code != "privacy_tier_unavailable" || body.Error.Tier != PrivacyLocal {
+		t.Errorf("code/tier = %q/%q, want privacy_tier_unavailable/local", body.Error.Code, body.Error.Tier)
+	}
+	if len(body.Error.Excluded) != 2 {
+		t.Fatalf("excluded_candidates = %v, want both or-seat and zen-seat with reasons", body.Error.Excluded)
+	}
+	for _, want := range []string{"or-seat: not on fleet hardware", "zen-seat: not on fleet hardware"} {
+		if !strings.Contains(strings.Join(body.Error.Excluded, "\n"), want) {
+			t.Errorf("excluded_candidates missing %q: %v", want, body.Error.Excluded)
+		}
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != PrivacyLocal {
+		t.Errorf("%s on the refusal = %q, want %q", PrivacyHeader, h, PrivacyLocal)
+	}
+}
+
+func TestAvailabilityMissStays503(t *testing.T) {
+	// private-local-first under `local`: local-seat is compliant but DOWN.
+	// That is a fleet-state problem a retry may fix — 503, not 403.
+	rec, called := sendWithPrivacyAvail(t, "private-local-first", PrivacyLocal, "local-seat")
+	if called {
+		t.Fatal("upstream called")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// The policy exclusion is still listed, after the availability reason.
+	if !strings.Contains(body, "local-seat:") || !strings.Contains(body, "or-seat: not on fleet hardware") {
+		t.Errorf("503 should list the down compliant seat AND the policy-excluded one: %s", body)
+	}
+}
+
+func TestMixedMissIs503ListingPolicyExclusions(t *testing.T) {
+	// cloud-only has no local seat, so under `local` with nothing down it is
+	// a pure policy refusal (403, tested above). "private" has one of each:
+	// or-seat excluded by policy, local-seat down → mixed → 503.
+	rec, _ := sendWithPrivacyAvail(t, "private", PrivacyLocal, "local-seat")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a mixed miss (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "or-seat: not on fleet hardware") {
+		t.Errorf("mixed 503 should still name the policy-excluded candidate: %s", rec.Body.String())
+	}
+}
+
+func TestOverflowIsSuppressedUnderLocal(t *testing.T) {
+	// The role's own locality: local exempts its overflow by design — with no
+	// caller tier, a down local-seat overflows to or-seat and says so. The
+	// CALLER's `local` is not exempt: same situation, the overflow is
+	// filtered, and the answer is 503 (compliant seat merely down), never an
+	// overflowed 200.
+	rec, called := sendWithPrivacyAvail(t, "local-then-cloud-overflow", "", "local-seat")
+	if rec.Code != http.StatusOK || !called || rec.Header().Get("X-Router-Overflow") != "true" {
+		t.Fatalf("no caller tier: status=%d called=%v overflow=%q, want an overflowed 200",
+			rec.Code, called, rec.Header().Get("X-Router-Overflow"))
+	}
+	rec, called = sendWithPrivacyAvail(t, "local-then-cloud-overflow", PrivacyLocal, "local-seat")
+	if called {
+		t.Fatal("upstream called — a `local` request reached the cloud overflow")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Router-Overflow") != "" {
+		t.Error("X-Router-Overflow set under `local` — must be impossible")
+	}
+	// And under `zdr` the or/ overflow IS compliant, so it serves.
+	rec, called = sendWithPrivacyAvail(t, "local-then-cloud-overflow", PrivacyZDR, "local-seat")
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("zdr: status = %d called = %v, want the or-seat overflow to serve", rec.Code, called)
+	}
+}
+
+func TestAbsentHeaderIsAnyAndIsNotEchoed(t *testing.T) {
+	// Omission is permissive and nothing is enforced, so nothing is echoed.
+	// Documented in the README as the default.
+	rec, called := sendWithPrivacyAvail(t, "cloud-only", "")
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d called = %v, want 200", rec.Code, called)
+	}
+	if h := rec.Header().Get(PrivacyHeader); h != "" {
+		t.Errorf("%s = %q on a request that sent none, want empty", PrivacyHeader, h)
+	}
+}
+
+func TestChainFailoverSkipsANonCompliantMember(t *testing.T) {
+	// mixed-chain is [or-seat, zen-seat]. Under `zdr`, or-seat is compliant
+	// and zen-seat is not. When or-seat is DOWN the chain must not fail over
+	// to zen-seat: the result is a 503 naming or-seat down and zen-seat
+	// excluded — not a quiet answer from a non-ZDR provider.
+	rec, called := sendWithPrivacyAvail(t, "mixed-chain", PrivacyZDR, "or-seat")
+	if called {
+		t.Fatal("upstream called — the chain failed over to a non-compliant member")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "or-seat:") || !strings.Contains(body, "zen-seat: neither local nor") {
+		t.Errorf("503 should name or-seat down and zen-seat excluded: %s", body)
+	}
+	// And with nothing down, the chain serves from or-seat with the directive.
+	rec, called = sendWithPrivacyAvail(t, "mixed-chain", PrivacyZDR)
+	if rec.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d called = %v, want 200 from or-seat", rec.Code, called)
+	}
+	// Under `local` the chain has NO compliant member: pure policy → 403.
+	rec, _ = sendWithPrivacyAvail(t, "mixed-chain", PrivacyLocal)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("local: status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPolicyRefusalIsRecordedAsRefusedNotAsAnError(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	reg, err := config.LoadBytes([]byte(privacyRegistryYAML))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	rt := New(reg, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithMode("default"), WithFlushInterval(0), WithSink(sink))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"cloud-only","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(PrivacyHeader, PrivacyLocal)
+	rt.Handler().ServeHTTP(httptest.NewRecorder(), req)
+
+	recs := sink.Records()
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.Status != http.StatusForbidden || r.PrivacyTolerance != PrivacyLocal {
+		t.Errorf("Status/PrivacyTolerance = %d/%q, want 403/local", r.Status, r.PrivacyTolerance)
+	}
+	if r.ErrorClass != errorClassPrivacyRefused {
+		t.Errorf("ErrorClass = %q, want %q — a refusal must be queryable as its own outcome", r.ErrorClass, errorClassPrivacyRefused)
+	}
+	if isUpstreamFailure(r.ErrorClass) {
+		t.Error("privacy_refused counted as an upstream failure — nothing was sent")
 	}
 }

@@ -83,7 +83,7 @@ func (rt *Router) roleBindings() []roleBinding {
 		// promptTokens 0: this reports where a role points, not where it would
 		// point for some hypothetical request. A caller whose prompt trips an
 		// envelope reads that in the 503's reasons, not here.
-		res, err := rt.resolveRole(name, name, false, 0)
+		res, err := rt.resolveRole(name, name, false, 0, tierNone)
 		if err != nil {
 			var roleErr *roleUnavailableError
 			if errors.As(err, &roleErr) {

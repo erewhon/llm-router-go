@@ -112,14 +112,20 @@ func (rt *Router) expandChains(order []roleCandidate) []roleCandidate {
 // order and takes the first entry the tracker reports routable, recording the
 // untried tail so a mid-flight upstream failure can advance to the next one
 // without re-resolving from scratch.
-func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTokens int) (resolveResult, error) {
+func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTokens int, caller privacyTier) (resolveResult, error) {
 	rd, ok := rt.roles[name]
 	if !ok {
 		return resolveResult{}, fmt.Errorf("router: unknown role %q", name)
 	}
+	tier := effectiveTier(rd, caller)
 
 	order := rt.expandChains(roleOrder(rd))
 	reasons := make([]string, 0, len(order))
+	// excluded is the privacy tier's own list, kept apart from reasons so a
+	// total miss can be classified: policy-only is a 403 the caller cannot
+	// retry out of; anything in reasons means a compliant candidate existed
+	// and was merely down or too small, which is a 503.
+	excluded := make([]string, 0)
 	// gatedOut remembers the first candidate the envelope skipped, so a
 	// result that lands further down the order can name what it passed over.
 	gatedOut := ""
@@ -129,6 +135,16 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 		if !known {
 			// RolesForMode already filtered these out; a survivor here means
 			// the registry changed under us. Skip rather than 500.
+			continue
+		}
+		// Policy first — before health — so the classification above is
+		// exact, and because "excluded by your privacy tier" is the more
+		// useful thing to say about a candidate whatever its health. This
+		// filters OVERFLOW entries too: a role's overflow is exempt from the
+		// role's own locality by design, but never from the caller's tier,
+		// so X-Router-Overflow: true cannot happen under `local`.
+		if why := privacyGate(m, tier); why != "" {
+			excluded = append(excluded, fmt.Sprintf("%s: %s", cand.ModelID, why))
 			continue
 		}
 		if !rt.avail.Routable(cand.ModelID) {
@@ -157,11 +173,23 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 		res.Remaining = order[i+1:]
 		res.PromptTokens = promptTokens
 		res.Downshift = gatedOut
+		res.PrivacyTier = tier
 		return res, nil
 	}
 
-	// Nothing available. A role that declined to declare an overflow list is
-	// saying "I would rather fail than pretend", so say so plainly.
+	// Nothing served. Two different failures, two different answers:
+	//   - every candidate was excluded by the privacy tier and none was
+	//     merely down → 403, the caller's policy did this and a retry cannot
+	//     change it;
+	//   - a compliant candidate existed but could not serve right now → 503
+	//     with every reason, the policy exclusions included so the caller can
+	//     see what a looser tier would have reached.
+	if len(excluded) > 0 && len(reasons) == 0 {
+		return resolveResult{}, &privacyRefusedError{Subject: name, Tier: tier, Excluded: excluded}
+	}
+	reasons = append(reasons, excluded...)
+	// A role that declined to declare an overflow list is saying "I would
+	// rather fail than pretend", so say so plainly.
 	if rd.OnEmpty == config.OnEmptyError && len(rd.Overflow) == 0 {
 		reasons = append(reasons, fmt.Sprintf("role is on_empty=%s (no overflow configured)", config.OnEmptyError))
 	}
@@ -175,6 +203,11 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 	for i, cand := range res.Remaining {
 		m, known := rt.active[cand.ModelID]
 		if !known || !rt.avail.Routable(cand.ModelID) {
+			continue
+		}
+		// Same tier as the first pass. This is what keeps a zen/ member of a
+		// chain from taking over when its or/ sibling 5xxs under `zdr`.
+		if privacyGate(m, res.PrivacyTier) != "" {
 			continue
 		}
 		// Gate the failover walk with the same estimate the first pass used.
@@ -196,6 +229,7 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 		next.Remaining = res.Remaining[i+1:]
 		next.PromptTokens = res.PromptTokens
 		next.Downshift = res.Downshift
+		next.PrivacyTier = res.PrivacyTier
 		return next, true
 	}
 	return resolveResult{}, false

@@ -110,12 +110,19 @@ func errorClassOf(transportClass string, upstreamStatus int, envelope bool) stri
 	}
 }
 
+// errorClassPrivacyRefused marks a request the privacy tier turned away
+// before any upstream was tried. It lives in the same column as the upstream
+// classes so one query covers every non-success outcome, but it is not one of
+// them: nothing was sent.
+const errorClassPrivacyRefused = "privacy_refused"
+
 // isUpstreamFailure reports whether an error class counts toward a model's
 // upstream failure rate. client_error (4xx) is excluded: it is almost always
 // the caller's request at fault (bad params, context overflow), and counting
 // it would make a healthy endpoint look degraded under a misbehaving client.
+// privacy_refused is excluded because no upstream was involved at all.
 func isUpstreamFailure(class string) bool {
-	return class != "" && class != "client_error"
+	return class != "" && class != "client_error" && class != errorClassPrivacyRefused
 }
 
 // ---------------------------------------------------------------------------

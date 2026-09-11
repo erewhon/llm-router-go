@@ -88,7 +88,7 @@ func TestResolveModel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := rt.resolveModel(tc.model, false, 0)
+			res, err := rt.resolveModel(tc.model, false, 0, tierNone)
 			if err != nil {
 				t.Fatalf("resolveModel(%q): %v", tc.model, err)
 			}
@@ -114,7 +114,7 @@ func TestResolveModel(t *testing.T) {
 func TestResolveModel_Errors(t *testing.T) {
 	rt := newTestRouter(t, nil)
 	for _, model := range []string{"", "nonexistent", "ghost-disabled"} {
-		if _, err := rt.resolveModel(model, false, 0); err == nil {
+		if _, err := rt.resolveModel(model, false, 0, tierNone); err == nil {
 			t.Errorf("resolveModel(%q) = nil error, want error", model)
 		}
 	}
@@ -122,11 +122,11 @@ func TestResolveModel_Errors(t *testing.T) {
 
 func TestResolveModel_ModeExcludesOtherMode(t *testing.T) {
 	rt := newTestRouter(t, nil, WithMode("default"))
-	if _, err := rt.resolveModel("big-only", false, 0); err == nil {
+	if _, err := rt.resolveModel("big-only", false, 0, tierNone); err == nil {
 		t.Errorf("mode=default: resolveModel(big-only) should fail (mode:big excluded)")
 	}
 	// A normal untagged model still resolves under mode=default.
-	if _, err := rt.resolveModel("coder", false, 0); err != nil {
+	if _, err := rt.resolveModel("coder", false, 0, tierNone); err != nil {
 		t.Errorf("mode=default: resolveModel(coder) failed: %v", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestResolveModel_ForceDirectBypassesToolProxy(t *testing.T) {
 	rt := newTestRouter(t, nil)
 
 	// chat-style routing: research -> nemotron via the tool proxy with model_id.
-	chat, err := rt.resolveModel("research", false, 0)
+	chat, err := rt.resolveModel("research", false, 0, tierNone)
 	if err != nil {
 		t.Fatalf("chat resolve: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestResolveModel_ForceDirectBypassesToolProxy(t *testing.T) {
 
 	// forceDirect=true: same model, but straight to the node backend with the
 	// bare hf_repo — exactly what /v1/completions should produce.
-	direct, err := rt.resolveModel("research", true, 0)
+	direct, err := rt.resolveModel("research", true, 0, tierNone)
 	if err != nil {
 		t.Fatalf("forceDirect resolve: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestResolveModel_APIClassSurfaced(t *testing.T) {
 		{"qwen3-reranker", config.APIClassRerank},
 		{"coder", config.APIClassChat}, // default
 	} {
-		res, err := rt.resolveModel(tc.model, true, 0)
+		res, err := rt.resolveModel(tc.model, true, 0, tierNone)
 		if err != nil {
 			t.Fatalf("resolveModel(%q): %v", tc.model, err)
 		}
