@@ -28,6 +28,12 @@ const (
 	// operator can tell a loading engine from a powered-down node, and so a
 	// role's reasons name what is actually happening.
 	Warming Availability = "warming"
+	// Absent means skip: the base this entry routes to answered its listing
+	// and the entry's served name was not in it — a port reassigned to a
+	// different model, or a provider that retired the id. Distinct from
+	// Unavailable so the dashboard and a role's reasons say "drift", not
+	// "down": the node is fine, the config is wrong.
+	Absent Availability = "absent"
 	// Unknown means nothing has been observed yet. Treated as available by
 	// Routable — a router that has just started must not refuse everything for
 	// its first poll interval.
@@ -49,6 +55,9 @@ const (
 	// SourceProbe is the generation probe: the listing is up but the seat has
 	// not yet produced a token.
 	SourceProbe Source = "probe"
+	// SourceInventory is the live-listing check: the base answered and the
+	// served name was not in its list.
+	SourceInventory Source = "inventory"
 )
 
 // WarmingInfo is the probe-side detail attached to a Warming status.
@@ -79,6 +88,9 @@ type Status struct {
 	ExpectedDown bool `json:"expected_down,omitempty"`
 	// Warming carries the probe detail while State is Warming.
 	Warming *WarmingInfo `json:"warming,omitempty"`
+	// Discovered marks an entry the inventory adopted from a provider's
+	// listing rather than one written in models.yaml.
+	Discovered bool `json:"discovered,omitempty"`
 }
 
 // NodeStatus is the public view of one node's reachability.
@@ -140,6 +152,19 @@ type Config struct {
 	// Getenv resolves a node-pinned external's api_key for its probe. nil
 	// means os.Getenv.
 	Getenv func(string) string
+
+	// InventoryInterval is how often each upstream base's /v1/models is
+	// refreshed. Zero means DefaultInventoryInterval.
+	InventoryInterval time.Duration
+	// InventoryTimeout bounds one listing fetch. Zero means
+	// DefaultInventoryTimeout.
+	InventoryTimeout time.Duration
+	// DisableInventory turns the live-listing check and discovery off: no
+	// entry is ever absent, nothing is ever adopted — the pre-inventory
+	// behaviour.
+	DisableInventory bool
+	// List overrides the listing fetcher (tests). nil means FetchListing.
+	List ListFunc
 }
 
 // modelState is the tracker's per-model bookkeeping.
@@ -167,6 +192,11 @@ type modelState struct {
 	probeNextAt  time.Time
 	warmingSince time.Time
 
+	// inventory: absent is set when the entry's base answered its listing
+	// without the served name; absentReason says what it listed instead.
+	absent       bool
+	absentReason string
+
 	// last publicly-visible verdict, for Since bookkeeping
 	lastState Availability
 	since     time.Time
@@ -180,6 +210,7 @@ type Tracker struct {
 	probe    ProbeFunc
 	genProbe GenProbeFunc
 	getenv   func(string) string
+	list     ListFunc
 
 	mu     sync.RWMutex
 	models map[string]*modelState
@@ -187,6 +218,15 @@ type Tracker struct {
 	// polled flips true after the first completed round, so Routable can
 	// fail open before then.
 	polled bool
+
+	// inventory (see inventory.go): one entry per distinct upstream root,
+	// the adopted entries, and the names a discovered id may never shadow.
+	// invWG tracks in-flight fetches so tests and RefreshInventory can wait
+	// for a round.
+	inv        map[string]*baseInventory
+	discovered map[string]*discoveredEntry
+	reserved   map[string]bool
+	invWG      sync.WaitGroup
 }
 
 // NewTracker builds a Tracker. It does not start polling; call Run.
@@ -221,16 +261,28 @@ func NewTracker(cfg Config) *Tracker {
 	if cfg.Getenv == nil {
 		cfg.Getenv = os.Getenv
 	}
-	return &Tracker{
+	if cfg.InventoryInterval <= 0 {
+		cfg.InventoryInterval = DefaultInventoryInterval
+	}
+	if cfg.InventoryTimeout <= 0 {
+		cfg.InventoryTimeout = DefaultInventoryTimeout
+	}
+	if cfg.List == nil {
+		cfg.List = FetchListing
+	}
+	t := &Tracker{
 		cfg:      cfg,
 		logger:   cfg.Logger,
 		now:      cfg.Now,
 		probe:    cfg.Probe,
 		genProbe: cfg.GenerationProbe,
 		getenv:   cfg.Getenv,
+		list:     cfg.List,
 		models:   map[string]*modelState{},
 		nodes:    map[string]NodeSnapshot{},
 	}
+	t.buildInventory()
+	return t
 }
 
 // SetOnPoll installs the after-each-poll callback. Separate from Config so a
@@ -260,8 +312,9 @@ func (t *Tracker) Run(ctx context.Context) {
 
 // PollOnce probes every node concurrently, folds the result into per-model
 // availability, then runs whatever generation probes are due against the
-// seats the listing says are up. Exported so tests (and an operator-triggered
-// refresh) can step the tracker deterministically.
+// seats the listing says are up, and kicks off whatever listing fetches are
+// due (those complete on their own; see startInventory). Exported so tests
+// (and an operator-triggered refresh) can step the tracker deterministically.
 func (t *Tracker) PollOnce(ctx context.Context) {
 	reg := t.cfg.Registry
 	if reg == nil {
@@ -290,7 +343,13 @@ func (t *Tracker) PollOnce(ctx context.Context) {
 		t.applyObservation(id, ok, reason)
 	}
 	due := t.dueProbesLocked()
+	invDue := t.dueInventoryLocked()
 	t.mu.Unlock()
+
+	// Listing fetches are fire-and-forget from the round's point of view:
+	// each applies itself when it lands, so a provider that takes the whole
+	// timeout delays only its own base.
+	t.startInventory(ctx, invDue)
 
 	// Generation probes run outside the lock — each may take up to
 	// ProbeTimeout — and concurrently, so one cold seat bounds the round at
@@ -661,9 +720,16 @@ func (t *Tracker) stateLocked(modelID string) (Availability, Source, string) {
 		return Available, SourcePassive, "circuit breaker half-open"
 	}
 
-	switch st.pollState {
-	case Unavailable:
+	if st.pollState == Unavailable {
 		return Unavailable, SourcePoll, st.pollReason
+	}
+	// The listing check sits below the node poll — a powered-down node is
+	// the more fundamental fact — and above warming: a seat serving the
+	// wrong model will never "warm up" into the right one.
+	if st.absent {
+		return Absent, SourceInventory, st.absentReason
+	}
+	switch st.pollState {
 	case Available:
 		if st.probe && !st.confirmed {
 			return Warming, SourceProbe, warmingReason(st)
@@ -686,10 +752,11 @@ func warmingReason(st *modelState) string {
 
 // Routable is the routing predicate: Unknown counts as routable so a
 // just-started router never refuses traffic it has no evidence against;
-// Warming does not — that is the whole point of the probe.
+// Warming does not — that is the whole point of the probe — and neither does
+// Absent, a seat that would answer for a different model than the one named.
 func (t *Tracker) Routable(modelID string) bool {
 	state, _, _ := t.State(modelID)
-	return state != Unavailable && state != Warming
+	return state != Unavailable && state != Warming && state != Absent
 }
 
 // Reason returns a short human-readable explanation for a model's current
@@ -702,14 +769,18 @@ func (t *Tracker) Reason(modelID string) string {
 	return fmt.Sprintf("%s (%s: %s)", state, source, reason)
 }
 
-// Snapshot returns every known model's status, sorted by model id.
+// Snapshot returns every known model's status — registry entries and
+// discovered ones — sorted by model id.
 func (t *Tracker) Snapshot() []Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	reg := t.cfg.Registry
-	ids := make([]string, 0, len(reg.Models))
+	ids := make([]string, 0, len(reg.Models)+len(t.discovered))
 	for id := range reg.Models {
+		ids = append(ids, id)
+	}
+	for id := range t.discovered {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -717,7 +788,10 @@ func (t *Tracker) Snapshot() []Status {
 	out := make([]Status, 0, len(ids))
 	for _, id := range ids {
 		state, source, reason := t.stateLocked(id)
-		m := reg.Models[id]
+		m, discovered := reg.Models[id], false
+		if e, ok := t.discovered[id]; ok {
+			m, discovered = e.def, true
+		}
 		st := t.models[id]
 		since := time.Time{}
 		var warming *WarmingInfo
@@ -745,6 +819,7 @@ func (t *Tracker) Snapshot() []Status {
 			Since:        since,
 			ExpectedDown: t.nodeExpectedDownLocked(m.Node),
 			Warming:      warming,
+			Discovered:   discovered,
 		})
 	}
 	return out

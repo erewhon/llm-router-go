@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 
+	"github.com/erewhon/llm-router-go/internal/config"
 	"github.com/erewhon/llm-router-go/internal/health"
 )
 
@@ -19,6 +21,85 @@ import (
 type availabilityReporter interface {
 	Snapshot() []health.Status
 	NodeStatuses() []health.NodeStatus
+}
+
+// discoverySource is the inventory half: the entries the tracker adopted from
+// providers' live listings. A tracker implements it; the alwaysRoutable stub
+// does not, so a router without tracking has exactly the static catalogue.
+type discoverySource interface {
+	Discovered() map[string]config.ModelDefinition
+}
+
+// inventoryReporter exposes the per-base listing state for /health,
+// /v1/availability and the dashboard.
+type inventoryReporter interface {
+	Inventory(withListed bool) []health.BaseInventory
+}
+
+// stateReporter is how the listing endpoints ask "is this entry absent" —
+// the one verdict that removes an entry from /v1/models and the well-known
+// rather than merely marking it unroutable.
+type stateReporter interface {
+	State(modelID string) (health.Availability, health.Source, string)
+}
+
+// discoveredModels returns the adopted entries, or nil without a tracker.
+// The tracker hands back a fresh copy each call, so callers may keep it.
+func (rt *Router) discoveredModels() map[string]config.ModelDefinition {
+	if src, ok := rt.avail.(discoverySource); ok {
+		return src.Discovered()
+	}
+	return nil
+}
+
+// lookupModel finds an entry by registry id: the static active set first —
+// a hand-written entry always wins — then the discovered set.
+func (rt *Router) lookupModel(id string) (config.ModelDefinition, bool) {
+	if m, ok := rt.active[id]; ok {
+		return m, true
+	}
+	if m, ok := rt.discoveredModels()[id]; ok {
+		return m, true
+	}
+	return config.ModelDefinition{}, false
+}
+
+// catalog is every entry a caller can name right now: the mode-filtered
+// registry plus whatever discovery adopted. Ids are returned sorted so the
+// listings stay diff-stable across deploys.
+func (rt *Router) catalog() (map[string]config.ModelDefinition, []string) {
+	disc := rt.discoveredModels()
+	out := make(map[string]config.ModelDefinition, len(rt.active)+len(disc))
+	for id, m := range disc {
+		out[id] = m
+	}
+	for id, m := range rt.active {
+		out[id] = m // static wins
+	}
+	ids := make([]string, 0, len(out))
+	for id := range out {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return out, ids
+}
+
+// absent reports whether the tracker has marked an entry absent from its
+// base's live listing. False without a tracker.
+func (rt *Router) absent(id string) bool {
+	if rep, ok := rt.avail.(stateReporter); ok {
+		state, _, _ := rep.State(id)
+		return state == health.Absent
+	}
+	return false
+}
+
+// inventory returns the per-base listing state, or nil without a tracker.
+func (rt *Router) inventory(withListed bool) []health.BaseInventory {
+	if rep, ok := rt.avail.(inventoryReporter); ok {
+		return rep.Inventory(withListed)
+	}
+	return nil
 }
 
 // roleBinding describes where a role is pointing and what else it could use.
@@ -46,6 +127,9 @@ type availabilityResponse struct {
 	Models []health.Status     `json:"models,omitempty"`
 	Nodes  []health.NodeStatus `json:"nodes,omitempty"`
 	Roles  []roleBinding       `json:"roles"`
+	// Inventory is what each upstream base lists right now — the evidence
+	// behind every absent verdict and every discovered entry above.
+	Inventory []health.BaseInventory `json:"inventory,omitempty"`
 	// Tracking is false when availability tracking is disabled, in which case
 	// every model reads as routable and roles always pick their first
 	// candidate. Consumers use this to avoid over-trusting the payload.
@@ -61,6 +145,7 @@ func (rt *Router) handleAvailability(w http.ResponseWriter, r *http.Request) {
 		resp.Tracking = true
 		resp.Models = rep.Snapshot()
 		resp.Nodes = rep.NodeStatuses()
+		resp.Inventory = rt.inventory(true)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -111,8 +196,9 @@ func (rt *Router) PublishAvailabilityMetrics() {
 	}); ok {
 		rt.pressure.setLoads(src.SeatLoads())
 	}
-	models := make(map[string]bool, len(rt.active))
-	for id := range rt.active {
+	cat, _ := rt.catalog()
+	models := make(map[string]bool, len(cat))
+	for id := range cat {
 		models[id] = rt.avail.Routable(id)
 	}
 	targets := make(map[string]string, len(rt.roles))

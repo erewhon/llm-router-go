@@ -36,7 +36,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"time"
 
@@ -314,6 +313,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				lr.Role = resolved.Role
 				lr.RoleOverflowed = resolved.Overflowed
 				lr.CandidatePressure = resolved.CandidatePressure
+				lr.Discovered = resolved.Discovered
 				lr.FailoverFrom = failoverFrom
 				// Upstream outcome of the final attempt. Envelope detection is
 				// JSON-body-only by design: a 2xx JSON body carrying a
@@ -579,7 +579,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 // isLocalSeat reports whether a resolved model is pinned to fleet hardware —
 // the seats whose 503s mean "still loading" rather than "provider trouble".
 func (rt *Router) isLocalSeat(id string) bool {
-	m, ok := rt.registry.Models[id]
+	m, ok := rt.lookupModel(id)
 	return ok && m.IsLocal()
 }
 
@@ -756,6 +756,11 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 		// Clients can route to it exactly like a model name; the difference is
 		// that what answers may change as the fleet powers up and down.
 		Role bool `json:"role,omitempty"`
+		// Discovered marks an entry the live inventory adopted from a
+		// provider's listing: routable by name, priced from the provider when
+		// it says, in no role or chain. It may disappear when the provider
+		// drops it, where a models.yaml entry only disappears on a deploy.
+		Discovered bool `json:"discovered,omitempty"`
 	}
 	type response struct {
 		Object string  `json:"object"`
@@ -767,30 +772,35 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 	// than the well-known) see every routable name. Aliases share the
 	// canonical model's backend and api_class — they're routing handles,
 	// not separate models.
+	cat, ids := rt.catalog()
 	out := response{Object: "list"}
-	seen := make(map[string]struct{}, len(rt.active)*2)
+	seen := make(map[string]struct{}, len(cat)*2)
 	add := func(id string, m config.ModelDefinition) {
 		if _, dup := seen[id]; dup {
 			return
 		}
 		seen[id] = struct{}{}
 		out.Data = append(out.Data, entry{
-			ID:       id,
-			Object:   "model",
-			OwnedBy:  string(m.Backend),
-			APIClass: m.APIClass,
+			ID:         id,
+			Object:     "model",
+			OwnedBy:    string(m.Backend),
+			APIClass:   m.APIClass,
+			Discovered: m.IsDiscovered(),
 		})
 	}
 	// Stable order: walk canonical IDs alphabetically, emit canonical
 	// before its aliases. Tests assert on presence not order, but stable
 	// ordering keeps diffs across deploys reviewable.
-	ids := make([]string, 0, len(rt.active))
-	for id := range rt.active {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	//
+	// An entry the inventory found absent from its base — the port serves a
+	// different model, the provider retired the id — is left out with its
+	// aliases: advertising it would be advertising something that cannot
+	// answer under that name. It returns the moment the listing does.
 	for _, id := range ids {
-		m := rt.active[id]
+		if rt.absent(id) {
+			continue
+		}
+		m := cat[id]
 		add(id, m)
 		for _, a := range m.Aliases {
 			add(a, m)
@@ -852,12 +862,24 @@ func (rt *Router) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// /v1/availability.
 	if rep, ok := rt.avail.(availabilityReporter); ok {
 		counts := map[string]int{}
+		discovered := 0
 		for _, s := range rep.Snapshot() {
-			if _, active := rt.active[s.Model]; active {
+			if s.Discovered {
+				discovered++
+			}
+			if _, active := rt.active[s.Model]; active || s.Discovered {
 				counts[string(s.State)]++
 			}
 		}
 		body["availability"] = counts
+		body["discovered"] = discovered
+		// Per-base listing state without the id lists (an OpenRouter
+		// listing is several hundred ids); the full lists are on
+		// /v1/availability. A base's age and error are what a monitor
+		// wants: "the Zen listing is 3 hours stale" is actionable.
+		if inv := rt.inventory(false); inv != nil {
+			body["inventory"] = inv
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)

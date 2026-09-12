@@ -263,6 +263,13 @@ type ModelHealth struct {
 	// off for media classes, the Anthropic passthrough, and nodeless
 	// externals. Set explicitly to override in either direction.
 	GenerationProbe *bool `yaml:"generation_probe,omitempty"`
+	// Inventory decides whether the live-inventory poll checks this
+	// placement's own /v1/models listing for its served name. Default (nil):
+	// on for chat, embeddings and rerank entries — the classes whose engines
+	// and providers list what they serve; off for media classes and the
+	// Anthropic passthrough. Set false to exempt an entry whose backend
+	// lists under a name the registry cannot predict.
+	Inventory *bool `yaml:"inventory,omitempty"`
 }
 
 // BackendModelName is the name the engine behind a direct (non-tool-proxy)
@@ -519,6 +526,12 @@ type ModelRegistry struct {
 	// (pressure balancing today). Absent means every default applies.
 	Router RouterConfig `yaml:"router,omitempty"`
 
+	// Discovery lists the providers whose live listings the router adopts
+	// ids from, and under what policy. Absent means no discovery: the
+	// inventory still checks every hand-written entry against its base, it
+	// just never adds anything. See discovery.go.
+	Discovery []DiscoverySource `yaml:"discovery,omitempty"`
+
 	// ToolProxyAddr is the address tool_proxy models are routed to. Not read
 	// from YAML — set programmatically (router --tool-proxy-url flag). Empty
 	// falls back to DefaultToolProxyAddr.
@@ -636,6 +649,9 @@ func (r *ModelRegistry) Validate() error {
 		if err := validateRole(name, &role, r); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := r.validateDiscovery(); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

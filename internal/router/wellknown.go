@@ -131,8 +131,16 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 	}
 
 	models := map[string]wellKnownModel{}
-	for id, m := range rt.active {
+	cat, ids := rt.catalog()
+	for _, id := range ids {
+		m := cat[id]
 		if m.APIClass != config.APIClassChat {
+			continue
+		}
+		// Same rule as /v1/models: an entry absent from its base's live
+		// listing is not advertised. OpenCode caches this document, so a
+		// stale entry here outlives the drift by a whole session.
+		if rt.absent(id) {
 			continue
 		}
 		// Emit cost when the registry prices the model — including an explicit

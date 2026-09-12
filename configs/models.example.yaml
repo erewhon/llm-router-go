@@ -140,3 +140,35 @@ models:
     api_base: https://api.anthropic.com  # the passthrough target
     api_class: anthropic
     capabilities: [text, tool_calling, vision]
+
+# ============================================================================
+# discovery: — adopt ids from a provider's live /v1/models (optional)
+#
+# Without this block the router still fetches every upstream's listing on its
+# own interval and marks a hand-written entry `absent` when its served name is
+# missing (not routable, not advertised, returns when the listing does). With
+# it, ids the provider lists that you never wrote down become routable under
+# the prefix: `zen/claude-opus-5`, `or/deepseek/deepseek-v4-pro`. They are
+# listed and priced from the provider's metadata, never joined to a role or
+# chain, and retired two polls after the provider drops them. A hand-written
+# entry for the same provider id at the same base — under any name, enabled
+# or not — always wins.
+#
+# `adopt: all` suits a small, curated catalogue; a large one (OpenRouter lists
+# hundreds) wants an allowlist of globs (`*` matches anything, slashes
+# included; `?` one character; `[0-9]` a class). `exclude:` vetoes within the
+# allowlist — batch tiers, previews, dated snapshots.
+# ============================================================================
+discovery:
+  - api_base: https://opencode.ai/zen/v1
+    prefix: zen/
+    api_key: OPENCODE_ZEN_API_KEY        # same convention as a model's api_key
+    adopt: all
+    tags: [zen]
+    context_length: 131072               # Zen's listing carries no limits
+  - api_base: https://openrouter.ai/api/v1
+    prefix: or/
+    api_key: OPENROUTER_API_KEY
+    adopt: ["anthropic/claude-*", "deepseek/*", "z-ai/glm-5*", "moonshotai/kimi-*"]
+    exclude: ["*:batch", "*-exp", "*-0[0-9][0-9][0-9]"]   # batch tiers, previews, dated snapshots
+    tags: [openrouter]

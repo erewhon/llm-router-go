@@ -77,11 +77,12 @@ func newProbeTracker(t *testing.T, fleet *fakeFleet, gp GenProbeFunc, clock *tim
 		hostToNode[n.Host] = name
 	}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           fleet.probe(hostToNode),
-		GenerationProbe: gp,
-		Now:             func() time.Time { return *clock },
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            fleet.probe(hostToNode),
+		GenerationProbe:  gp,
+		Now:              func() time.Time { return *clock },
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return tr, reg
 }
@@ -188,11 +189,12 @@ models:
 	}
 	fleet := &fakeFleet{states: map[string]map[string]string{"hypatia": {"seat": StateRunning}}}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           fleet.probe(map[string]string{"hypatia.local": "hypatia"}),
-		GenerationProbe: gp.probe,
-		Now:             func() time.Time { return clock },
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            fleet.probe(map[string]string{"hypatia.local": "hypatia"}),
+		GenerationProbe:  gp.probe,
+		Now:              func() time.Time { return clock },
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	tr.PollOnce(context.Background())
 	if len(gp.targets) != 1 {
@@ -372,6 +374,7 @@ func TestDisableGenerationProbeRestoresListingBehaviour(t *testing.T) {
 		hostToNode[n.Host] = name
 	}
 	tr := NewTracker(Config{
+		DisableInventory:       true,
 		Registry:               reg,
 		Probe:                  warmingFleet().probe(hostToNode),
 		GenerationProbe:        gp.probe,
@@ -426,12 +429,13 @@ func TestProbeFilterKeepsOutOfModeSeatsOut(t *testing.T) {
 		hostToNode[n.Host] = name
 	}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           warmingFleet().probe(hostToNode),
-		GenerationProbe: gp.probe,
-		ProbeFilter:     func(string) bool { return false },
-		Now:             func() time.Time { return clock },
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            warmingFleet().probe(hostToNode),
+		GenerationProbe:  gp.probe,
+		ProbeFilter:      func(string) bool { return false },
+		Now:              func() time.Time { return clock },
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	tr.PollOnce(context.Background())
 	if len(gp.targets) != 0 || !tr.Routable("qwen3.6-hypatia") {
@@ -562,12 +566,13 @@ func TestProbeTimeoutIsWarmingNotHang(t *testing.T) {
 		hostToNode[n.Host] = name
 	}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           warmingFleet().probe(hostToNode),
-		GenerationProbe: gp,
-		ProbeTimeout:    20 * time.Millisecond,
-		Now:             func() time.Time { return clock },
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            warmingFleet().probe(hostToNode),
+		GenerationProbe:  gp,
+		ProbeTimeout:     20 * time.Millisecond,
+		Now:              func() time.Time { return clock },
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	start := time.Now()
 	tr.PollOnce(context.Background())

@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS router_requests (
     failover_from     TEXT,
     error             TEXT,
     upstream_status   SMALLINT,
-    error_class       TEXT
+    error_class       TEXT,
+    discovered        BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -89,6 +90,9 @@ CREATE INDEX IF NOT EXISTS router_requests_privacy_tolerance_idx ON router_reque
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS upstream_cost_usd DOUBLE PRECISION;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS cached_prompt_tokens INTEGER;
 ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS candidate_pressure INTEGER;
+-- discovered marks an entry the live inventory adopted from a provider's
+-- listing rather than one written in models.yaml.
+ALTER TABLE router_requests ADD COLUMN IF NOT EXISTS discovered BOOLEAN NOT NULL DEFAULT FALSE;
 `
 
 const insertSQL = `
@@ -99,9 +103,9 @@ INSERT INTO router_requests
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
    principal, token_id, upstream_provider, privacy_tolerance,
-   upstream_cost_usd, cached_prompt_tokens, candidate_pressure)
+   upstream_cost_usd, cached_prompt_tokens, candidate_pressure, discovered)
 VALUES
-  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+  ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
 `
 
 // PostgresSink writes records asynchronously to a Postgres database. Log() is
@@ -207,7 +211,7 @@ func (s *PostgresSink) insert(rec Record) {
 		nullIfEmpty(rec.Principal), nullIfEmpty(rec.TokenID),
 		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
 		rec.UpstreamCostUSD, rec.CachedPromptTokens,
-		rec.CandidatePressure,
+		rec.CandidatePressure, rec.Discovered,
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)

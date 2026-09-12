@@ -77,6 +77,11 @@ func run(args []string) int {
 		breakerCooldown = fs.Duration("breaker-cooldown", health.DefaultBreakerCooldown, "how long an open circuit breaker waits before admitting a probe request")
 		genProbe        = fs.Bool("generation-probe", true, "a fleet seat is routable only after one minimal generation succeeds against its backend, not merely when its listing is up (per-model override: health.generation_probe)")
 		genProbeTimeout = fs.Duration("generation-probe-timeout", health.DefaultProbeTimeout, "how long one generation probe may take before the seat is still considered warming")
+		// Live inventory: each upstream base's /v1/models, on its own
+		// interval. Drift (a hand-written entry the base no longer lists) is
+		// marked absent; ids a `discovery:` source adopts become routable.
+		inventory         = fs.Bool("inventory", true, "poll every upstream base's /v1/models: an entry the base no longer lists is marked absent and dropped from /v1/models; ids adopted under models.yaml `discovery:` become routable (per-model override: health.inventory)")
+		inventoryInterval = fs.Duration("inventory-interval", health.DefaultInventoryInterval, "how often each upstream base's listing is refreshed")
 
 		// /.well-known/opencode (3b.iv). Empty -wellknown-provider-id disables.
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
@@ -143,6 +148,7 @@ func run(args []string) int {
 		validateModes  = fs.String("validate-mode", "default,big", "with --validate: comma-separated modes to lint")
 		validateStrict = fs.Bool("validate-strict", false, "with --validate: treat every lint warning as a failure")
 		validateBlock  = fs.String("validate-block", "", "with --validate: comma-separated lint codes promoted to failures (e.g. enabled-port-collision)")
+		validateLive   = fs.Bool("validate-live", false, "with --validate: also fetch every upstream base's /v1/models and report hand-written entries the provider no longer lists (not-listed), unreachable bases, and ids a discovery source would adopt (discovered-model, informational)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -164,6 +170,7 @@ func run(args []string) int {
 			modes:  parseModes(*validateModes),
 			strict: *validateStrict,
 			block:  parseBlockList(*validateBlock),
+			live:   *validateLive,
 			stdout: os.Stdout,
 			stderr: os.Stderr,
 		})
@@ -292,6 +299,8 @@ func run(args []string) int {
 			BreakerCooldown:        *breakerCooldown,
 			DisableGenerationProbe: !*genProbe,
 			ProbeTimeout:           *genProbeTimeout,
+			DisableInventory:       !*inventory,
+			InventoryInterval:      *inventoryInterval,
 			ProbeFilter:            func(id string) bool { _, ok := active[id]; return ok },
 			Logger:                 logger.With("subsys", "availability"),
 		})
@@ -425,7 +434,8 @@ func run(args []string) int {
 		logger.Info("availability tracking started",
 			"interval", healthInterval.String(), "down_after", *healthDownAfter,
 			"breaker_trip", *breakerTrip, "breaker_cooldown", breakerCooldown.String(),
-			"generation_probe", *genProbe, "generation_probe_timeout", genProbeTimeout.String())
+			"generation_probe", *genProbe, "generation_probe_timeout", genProbeTimeout.String(),
+			"inventory", *inventory, "inventory_interval", inventoryInterval.String())
 	} else {
 		logger.Warn("availability tracking disabled; roles will always pick their first candidate")
 	}

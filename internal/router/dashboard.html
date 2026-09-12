@@ -1020,6 +1020,40 @@ function render(data) {
     html += `</div>`;
   }
 
+  // Live inventory — what each upstream base says it serves right now. The
+  // evidence behind every "absent" row above and every discovered entry in
+  // the table: a base card names what is missing and what was adopted.
+  const inventory = data.inventory || [];
+  if (inventory.length) {
+    const absentTotal = inventory.reduce((n, b) => n + (b.absent || []).length, 0);
+    const discTotal = inventory.reduce((n, b) => n + (b.discovered || []).length, 0);
+    const staleTotal = inventory.filter(b => b.error).length;
+    html += `<div class="section-title">Live inventory <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(${inventory.length} bases &middot; ${discTotal} discovered &middot; ${absentTotal} absent${staleTotal ? ` &middot; ${staleTotal} unreachable` : ''})</span></div><div class="roles">`;
+    for (const b of inventory) {
+      const absent = b.absent || [], disc = b.discovered || [];
+      const cls = absent.length ? ' role-down' : (b.error ? ' role-overflow' : '');
+      let age;
+      if (b.age_s == null) age = 'never fetched';
+      else if (b.age_s < 90) age = `${Math.round(b.age_s)}s ago`;
+      else if (b.age_s < 5400) age = `${Math.round(b.age_s / 60)}m ago`;
+      else age = `${(b.age_s / 3600).toFixed(1)}h ago`;
+      html += `<div class="role-card${cls}">
+        <div class="role-name" style="font-size:0.8rem;word-break:break-all">${b.base}</div>
+        <div class="role-target">${b.ids} listed &middot; ${(b.members || []).length} registered &middot; ${age}${b.stale ? ' <span class="badge badge-off">stale</span>' : ''}</div>`;
+      if (b.error) html += `<div class="role-desc" style="color:var(--red)">${b.error}</div>`;
+      if (absent.length) {
+        html += `<div class="role-desc">absent (registered here, not in the listing)</div><div class="role-chain">` +
+          absent.map(id => `<span class="role-hop role-hop-down">${id}</span>`).join('') + `</div>`;
+      }
+      if (disc.length) {
+        html += `<div class="role-desc">discovered (adopted from the listing)</div><div class="role-chain">` +
+          disc.map(id => `<span class="role-hop role-hop-active">${id}</span>`).join('') + `</div>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+
   // Nodes
   html += `<div class="section-title">Nodes</div><div class="node-grid">`;
   for (const [name, n] of Object.entries(nodes)) {
@@ -1187,7 +1221,7 @@ function render(data) {
   // two identical chips. Providers (openrouter/zen/go), chain and paid are
   // tags in models.yaml, so they filter with the same machinery.
   const chipCounts = {};
-  const showTags = ['tts','stt','image_gen','image_edit','music_gen','fim','gui_agent','embedding','reranker','thinking','chain','paid','openrouter','zen','go'];
+  const showTags = ['tts','stt','image_gen','image_edit','music_gen','fim','gui_agent','embedding','reranker','thinking','chain','paid','openrouter','zen','go','discovered'];
   for (const m of models) {
     if (m.enabled === false) continue;
     const seen = new Set();
@@ -1250,6 +1284,13 @@ function render(data) {
     if (isRouterModel(m)) {
       statusClass = 'health-healthy';
       statusLabel = 'router';
+    } else if (m.availability === 'absent') {
+      // The base answered its /v1/models and this entry's served name was
+      // not in it: the port serves a different model, or the provider
+      // retired the id. Not routable, not advertised — the node is fine,
+      // the registry is wrong.
+      statusClass = 'health-error';
+      statusLabel = 'absent';
     } else if (m.availability === 'warming') {
       // Listed by the agent, but the router's generation probe has not
       // succeeded yet: the router will not send traffic here.

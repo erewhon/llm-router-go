@@ -134,6 +134,65 @@ Rules worth knowing before wiring a script's `--privacy` flag to it:
 still somebody else's computer. Use `local` for anything that must not leave the
 fleet at all.
 
+### Live inventory and discovery
+
+`/v1/models` and the OpenCode well-known are rendered from what each upstream
+**says it serves right now**, not from `models.yaml` alone. On its own interval
+(60 s, `--inventory-interval`) the router fetches `/v1/models` from every
+distinct upstream base — each local seat's engine, each external `api_base` —
+concurrently, with a 5 s timeout per fetch, off the request path. Two things
+come out of a listing:
+
+- **Drift.** A hand-written entry whose served name (`hf_repo`) is not in its
+  base's live listing is marked `absent`: not routable, dropped from
+  `/v1/models` and the well-known with its aliases, and shown on the dashboard
+  with the reason (`"Qwen/Qwen3.5-122B" is not in the live listing at
+  http://archimedes:5391 (it serves: Qwen/Qwen3-Coder-Next-FP8)`). Roles and
+  chains skip it and say so in their 503; it returns the moment the listing
+  does. A base whose fetch fails keeps its last-known listing — stale is better
+  than empty — and the age and error are visible on `/health` under
+  `inventory`.
+- **Discovery.** Providers named in a `discovery:` block have their listings
+  adopted under a prefix, by policy:
+
+  ```yaml
+  discovery:
+    - api_base: https://opencode.ai/zen/v1     # Zen: adopt everything
+      prefix: zen/
+      api_key: OPENCODE_ZEN_API_KEY
+      adopt: all
+      tags: [zen]
+    - api_base: https://openrouter.ai/api/v1   # OpenRouter: allowlist only
+      prefix: or/
+      api_key: OPENROUTER_API_KEY
+      adopt: ["anthropic/claude-*", "deepseek/*", "z-ai/glm-5*"]
+      exclude: ["*:batch", "*-exp"]            # vetoes within the allowlist; * crosses slashes
+      tags: [openrouter]
+  ```
+
+  A discovered id becomes a virtual external entry `<prefix><id>` — routable
+  directly by name, listed with `"discovered": true`, priced and sized from the
+  provider's metadata when it offers any (OpenRouter does; Zen does not, so a
+  source can set `context_length` / `max_output_tokens` defaults) — and is
+  **never joined to a role or chain**: seat decisions stay explicit in
+  `models.yaml`. A hand-written entry always wins over discovery of the same
+  id, and so does one that already routes to the same provider id at that base
+  under a different name (`or/claude-opus-5` for `anthropic/claude-opus-5`),
+  enabled or not. A discovered id the provider stops listing is retired after
+  two consecutive misses. Every privacy tier and token scope applies to a
+  discovered entry exactly as to a hand-written external — a `models:local`
+  token cannot reach one — and reqlog rows served by one carry `discovered =
+  true`.
+
+Per-entry opt-out: `health: {inventory: false}` (default on for chat,
+embeddings and rerank entries; media classes and the Anthropic passthrough are
+never checked). Fleet-wide: `--inventory=false`. Before a config push,
+`--validate --validate-live` fetches every listing once and reports
+`not-listed` (a hand-written entry the provider no longer serves),
+`inventory-unreachable`, and — informational, never promoted to a failure —
+`discovered-model` for each id a source would adopt that nobody has written
+down, i.e. the candidates worth promoting into a chain or role.
+
 ### Anthropic gateway (measurement tap)
 
 With an `api_class: anthropic` entry in `models.yaml` (see Scenario 8 in the

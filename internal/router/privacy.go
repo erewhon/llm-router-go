@@ -201,7 +201,7 @@ func (e *privacyRefusedError) Error() string {
 //     best-effort answer from a retaining seat is worse off than one who got
 //     an error, because they do not know to stop.
 func (rt *Router) applyPrivacy(bodyMap map[string]any, res resolveResult, tier privacyTier, source string) string {
-	m, ok := rt.registry.Models[res.ModelID]
+	m, ok := rt.lookupModel(res.ModelID)
 	if !ok {
 		return fmt.Sprintf("%s, but %q is not a known model", source, res.ModelID)
 	}

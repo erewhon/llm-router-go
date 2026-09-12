@@ -39,6 +39,10 @@ const (
 	// already nondeterministic or wrong. Still advisory — still cannot stop
 	// a boot — but callers should treat it as a failure by default.
 	SevError Severity = "error"
+	// SevInfo is a finding with nothing to fix: something the operator may
+	// want to act on (a discovered model worth promoting), never something
+	// wrong. --validate-strict does not promote it.
+	SevInfo Severity = "info"
 )
 
 // Diagnostic is one lint finding.
@@ -61,6 +65,19 @@ const (
 	LintDupHFRepo               = "dup-hf-repo"
 	LintRoleEmptyInMode         = "role-empty-in-mode"
 	LintRouteCategoryUnresolved = "route-category-unresolvable"
+
+	// Live-inventory codes, emitted only by --validate-live (health.LiveCheck),
+	// which fetches every upstream's /v1/models. Listed here with the static
+	// codes so the CLI contract has one place to read.
+	//
+	// inventory-unreachable: a base's listing could not be fetched.
+	// not-listed: a hand-written entry's served name is missing from its
+	//   base's live listing; the running router marks it absent.
+	// discovered-model (info): a discovery source lists an id its adopt
+	//   policy accepts and no models.yaml entry claims.
+	LintInventoryUnreachable = "inventory-unreachable"
+	LintNotListed            = "not-listed"
+	LintDiscoveredModel      = "discovered-model"
 )
 
 // ToolProxyRouteCategories mirrors the categories the tool proxy's auto-router

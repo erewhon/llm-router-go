@@ -59,6 +59,13 @@ ExecStart=/usr/local/bin/llm-router-go \
 # are the access boundary. --dashboard-public-url only sets the copy-paste base
 # URL shown in the dashboard's Connection card.
 
+# Live inventory is on by default (no flag needed): every upstream base's
+# /v1/models is fetched every 60 s; an entry the base no longer lists is
+# marked absent and dropped from /v1/models, and ids adopted under models.yaml
+# `discovery:` become routable. `--inventory=false` turns it off,
+# `--inventory-interval` retunes it; `--validate --validate-live` previews
+# what it would conclude before a config push.
+
 # --pat-dsn turns on per-user personal access tokens, stored in the SHARED
 # Postgres — the same one reqlog writes to, reached through the same
 # ${ROUTER_PG_DSN}. One store for every router in the fleet: a token minted

@@ -67,11 +67,12 @@ func newTestTracker(t *testing.T, fleet *fakeFleet, now func() time.Time) (*Trac
 		now = time.Now
 	}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           fleet.probe(hostToNode),
-		GenerationProbe: probeOK,
-		Now:             now,
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            fleet.probe(hostToNode),
+		GenerationProbe:  probeOK,
+		Now:              now,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return tr, reg
 }
@@ -277,10 +278,11 @@ models:
 	}
 	fleet := &fakeFleet{down: map[string]bool{"b": true}}
 	tr := NewTracker(Config{
-		Registry:        reg,
-		Probe:           fleet.probe(map[string]string{"a.local": "a", "b.local": "b"}),
-		GenerationProbe: probeOK,
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DisableInventory: true,
+		Registry:         reg,
+		Probe:            fleet.probe(map[string]string{"a.local": "a", "b.local": "b"}),
+		GenerationProbe:  probeOK,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	ctx := context.Background()
 	tr.PollOnce(ctx)

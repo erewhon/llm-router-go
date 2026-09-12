@@ -8,7 +8,10 @@
 //     powered-down node, which is the dominant case;
 //   - a passive circuit breaker fed by real proxy failures — catches a model
 //     the agent believes is running but which is wedged;
-//   - hysteresis on both, so a single dropped packet never reassigns a role.
+//   - hysteresis on both, so a single dropped packet never reassigns a role;
+//   - a generation probe (genprobe.go) between "listed" and "routable", and a
+//     live-listing check (inventory.go) that marks an entry absent when its
+//     base serves something else and adopts what a `discovery:` source lists.
 //
 // The probe half of this file is the shared implementation the router's
 // dashboard also uses, so there is one prober in the binary rather than two

@@ -294,8 +294,9 @@ type dashModel struct {
 	Health       string   `json:"health"`
 	AgentState   *string  `json:"agent_state"`
 	// Availability is the tracker's routing verdict ("available", "warming",
-	// "unavailable", "unknown") when tracking is on, else empty. It is what
-	// the router actually acts on; agent_state is what the node agent says.
+	// "absent", "unavailable", "unknown") when tracking is on, else empty. It
+	// is what the router actually acts on; agent_state is what the node agent
+	// says.
 	Availability       string   `json:"availability,omitempty"`
 	AvailabilityReason string   `json:"availability_reason,omitempty"`
 	RequestsRunning    int      `json:"requests_running"`
@@ -308,6 +309,18 @@ type dashModel struct {
 	// because either one alone invites the wrong reading. Zero means unset.
 	ContextLength    int `json:"context_length"`
 	EffectiveContext int `json:"effective_context"`
+	// Discovered marks an entry the live inventory adopted from a provider's
+	// listing; it has no models.yaml entry behind it.
+	Discovered bool `json:"discovered,omitempty"`
+}
+
+// dashCatalogEntry is one row of the dashboard's model list: every registry
+// entry (mode-filtered or not — the dashboard shows the whole file) plus
+// every discovered one.
+type dashCatalogEntry struct {
+	id         string
+	m          config.ModelDefinition
+	discovered bool
 }
 
 func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +341,19 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	entries := make([]dashCatalogEntry, 0, len(ids))
+	for _, id := range ids {
+		entries = append(entries, dashCatalogEntry{id: id, m: rt.registry.Models[id]})
+	}
+	disc := rt.discoveredModels()
+	discIDs := make([]string, 0, len(disc))
+	for id := range disc {
+		discIDs = append(discIDs, id)
+	}
+	sort.Strings(discIDs)
+	for _, id := range discIDs {
+		entries = append(entries, dashCatalogEntry{id: id, m: disc[id], discovered: true})
+	}
 
 	verdicts := map[string]health.Status{}
 	if rep, ok := rt.avail.(availabilityReporter); ok {
@@ -336,9 +362,9 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	models := make([]dashModel, 0, len(ids))
-	for _, id := range ids {
-		m := rt.registry.Models[id]
+	models := make([]dashModel, 0, len(entries))
+	for _, e := range entries {
+		id, m := e.id, e.m
 
 		var nodes []string
 		var head *string
@@ -380,7 +406,10 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		}
 
 		reqs := agentReqs[id]
-		apiBase, _ := rt.registry.APIBase(id, nil)
+		apiBase := m.APIBase
+		if apiBase == "" {
+			apiBase, _ = rt.registry.APIBase(id, nil)
+		}
 
 		// tok/s: prefer the router's own per-response measurement (uniform
 		// across backends, incl. Atlas whose Prometheus counter can't be
@@ -419,6 +448,7 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 			// resolves it, so the dashboard and /.well-known never disagree.
 			ContextLength:    rt.wellKnownContext(m, 0),
 			EffectiveContext: m.EffectiveContext,
+			Discovered:       e.discovered,
 		})
 	}
 
@@ -448,6 +478,10 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		// the Roles card wants to render in the same frame as the node states
 		// it explains.
 		"roles": rt.roleBindings(),
+		// Live inventory: per-base listing state, the evidence behind every
+		// absent verdict and every discovered row above. Without the id
+		// lists — the card shows counts and names what is absent/adopted.
+		"inventory": rt.inventory(false),
 	})
 }
 

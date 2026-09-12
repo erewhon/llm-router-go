@@ -79,6 +79,9 @@ type resolveResult struct {
 	// CandidatePressure is the chosen seat's pressure score, for reqlog. Nil
 	// unless the role balanced and the chosen seat is a plain candidate.
 	CandidatePressure *int
+	// Discovered marks a target the live inventory adopted from a provider's
+	// listing rather than one written in models.yaml. Carried to reqlog.
+	Discovered bool
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in
@@ -148,7 +151,9 @@ func (rt *Router) resolveModel(model string, forceDirect bool, promptTokens int,
 }
 
 // lookupConcrete matches a name that identifies exactly one model: the registry
-// key, or its hf_repo (bare or with "#suffix").
+// key, or its hf_repo (bare or with "#suffix"). A discovered entry matches on
+// its prefixed id only — never on the bare provider id, which two sources
+// could both list — and only after every static match has been tried.
 func (rt *Router) lookupConcrete(want string) (string, config.ModelDefinition, bool) {
 	if m, ok := rt.active[want]; ok {
 		return want, m, true
@@ -158,6 +163,9 @@ func (rt *Router) lookupConcrete(want string) (string, config.ModelDefinition, b
 		if hfBase == want || m.HFRepo == want {
 			return id, m, true
 		}
+	}
+	if m, ok := rt.discoveredModels()[want]; ok {
+		return want, m, true
 	}
 	return "", config.ModelDefinition{}, false
 }
@@ -297,9 +305,16 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 		}
 	}
 
-	base, err := rt.registry.APIBase(id, override)
-	if err != nil {
-		return resolveResult{}, fmt.Errorf("router: resolve %q: %w", id, err)
+	// An entry with its own api_base routes there regardless of what the
+	// registry knows about it — which is what lets a discovered entry, absent
+	// from the registry, resolve at all. Same rule registry.APIBase applies
+	// to hand-written externals.
+	base := m.APIBase
+	if base == "" {
+		var err error
+		if base, err = rt.registry.APIBase(id, override); err != nil {
+			return resolveResult{}, fmt.Errorf("router: resolve %q: %w", id, err)
+		}
 	}
 	root := strings.TrimSuffix(base, "/v1")
 
@@ -335,6 +350,7 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 		ViaToolProxy: viaToolProxy,
 		APIClass:     m.APIClass,
 		Egress:       egress,
+		Discovered:   m.IsDiscovered(),
 	}, nil
 }
 

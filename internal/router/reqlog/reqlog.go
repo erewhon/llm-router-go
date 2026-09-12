@@ -122,6 +122,12 @@ type Record struct {
 	// "this request required zero retention AND was served by Amazon
 	// Bedrock" is a statement someone can audit a quarter later.
 	PrivacyTolerance string
+	// Discovered marks a request served by an entry the live inventory
+	// adopted from a provider's listing rather than one written in
+	// models.yaml. Such an entry has no pinned pricing, no aliases and sits
+	// in no role, so "how much of the paid traffic went to models nobody
+	// vetted" is this column grouped by ResolvedVia.
+	Discovered bool
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log
