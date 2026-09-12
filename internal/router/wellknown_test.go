@@ -128,7 +128,6 @@ func TestWellKnown_EmitsAliasesForChatModelsOnly(t *testing.T) {
 		ProviderID:   "llm",
 		ProviderName: "Test Router",
 		BaseURL:      "https://example.test/v1",
-		APIKey:       "sk-test",
 	}))
 	rec := getWellKnown(t, rt)
 	if rec.Code != http.StatusOK {
@@ -155,7 +154,7 @@ func TestWellKnown_EmitsAliasesForChatModelsOnly(t *testing.T) {
 	if llm.NPM != "@ai-sdk/openai-compatible" || llm.Name != "Test Router" {
 		t.Errorf("provider scalar fields wrong: npm=%q name=%q", llm.NPM, llm.Name)
 	}
-	if llm.Options.BaseURL != "https://example.test/v1" || llm.Options.APIKey != "sk-test" {
+	if llm.Options.BaseURL != "https://example.test/v1" || llm.Options.APIKey != "" {
 		t.Errorf("options wrong: %+v", llm.Options)
 	}
 
@@ -200,15 +199,16 @@ func TestWellKnown_ModeFiltersExcludeOtherModes(t *testing.T) {
 	}
 }
 
-func TestWellKnown_AuthBlock(t *testing.T) {
+func TestWellKnown_AuthBlockPrintsSetupInstructions(t *testing.T) {
 	// 2026-06-06 regression: `opencode providers login` crashed with
 	// `undefined is not an object (evaluating 'u.auth.command')` because
-	// the doc emitted no top-level `auth` block. Lock in the shape.
+	// the doc emitted no top-level `auth` block. Lock in the shape — and,
+	// since 2026-09-11, the command teaches rather than hands out a key.
 	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
 		ProviderID:   "llm",
 		ProviderName: "LLM",
 		BaseURL:      "https://example.test/v1",
-		APIKey:       "sk-secret",
+		SetupURL:     "https://dash.example.test",
 		AuthEnv:      "CUSTOM_ENV",
 	}))
 	rec := getWellKnown(t, rt)
@@ -216,20 +216,32 @@ func TestWellKnown_AuthBlock(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got, want := resp.Auth.Command, []string{"echo", "sk-secret"}; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Errorf("auth.command = %v, want %v", got, want)
-	}
 	if resp.Auth.Env != "CUSTOM_ENV" {
 		t.Errorf("auth.env = %q, want CUSTOM_ENV", resp.Auth.Env)
 	}
+	cmd := resp.Auth.Command
+	if len(cmd) < 3 || cmd[0] != "sh" || cmd[1] != "-c" {
+		t.Fatalf("auth.command = %v, want an sh -c instruction command", cmd)
+	}
+	msg := cmd[len(cmd)-1]
+	for _, want := range []string{"https://dash.example.test", "Tokens", "/connect", "Other", "provider id llm", "CUSTOM_ENV"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("setup instructions missing %q: %s", want, msg)
+		}
+	}
+	// The instructions travel as an argument, never inside the script text,
+	// so nothing from config can become shell.
+	if strings.Contains(cmd[2], "dash.example.test") {
+		t.Errorf("setup URL was interpolated into the shell script: %q", cmd[2])
+	}
 }
 
-func TestWellKnown_AuthEnvDefaultsAndCommandOmittedWithoutKey(t *testing.T) {
+func TestWellKnown_AuthEnvDefaultsAndGenericSetupWithoutURL(t *testing.T) {
 	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
 		ProviderID:   "llm",
 		ProviderName: "LLM",
 		BaseURL:      "https://example.test/v1",
-		// APIKey + AuthEnv empty
+		// SetupURL + AuthEnv empty
 	}))
 	rec := getWellKnown(t, rt)
 	var resp wellKnownResp
@@ -239,22 +251,23 @@ func TestWellKnown_AuthEnvDefaultsAndCommandOmittedWithoutKey(t *testing.T) {
 	if resp.Auth.Env != "LLM_ROUTER_API_KEY" {
 		t.Errorf("auth.env default = %q, want LLM_ROUTER_API_KEY", resp.Auth.Env)
 	}
-	if len(resp.Auth.Command) != 0 {
-		t.Errorf("auth.command should be empty when APIKey unset; got %v", resp.Auth.Command)
+	if n := len(resp.Auth.Command); n == 0 || !strings.Contains(resp.Auth.Command[n-1], "router dashboard") {
+		t.Errorf("auth.command should still carry generic instructions; got %v", resp.Auth.Command)
 	}
 }
 
-func TestWellKnown_OmitsEmptyAPIKey(t *testing.T) {
+func TestWellKnown_NeverCarriesACredential(t *testing.T) {
 	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
 		ProviderID:   "llm",
 		ProviderName: "LLM",
 		BaseURL:      "https://example.test/v1",
-		// APIKey intentionally empty
 	}))
 	rec := getWellKnown(t, rt)
 	body := rec.Body.String()
-	if strings.Contains(body, `"apiKey"`) {
-		t.Errorf("apiKey field should be omitted when empty; body:\n%s", body)
+	for _, bad := range []string{`"apiKey"`, `"echo"`, "sk-", "pat_"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("well-known must not carry a credential (%q); body:\n%s", bad, body)
+		}
 	}
 }
 

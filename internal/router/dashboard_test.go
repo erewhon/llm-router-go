@@ -181,20 +181,33 @@ func TestDashboard_ServesHTMLWithSubstitutions(t *testing.T) {
 	rt := newTestRouter(t, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rt.DashboardHandler(DashboardConfig{APIBase: "https://llm.example"}).ServeHTTP(rec, req)
+	rt.DashboardHandler(DashboardConfig{
+		APIBase:    "https://llm.example",
+		ProviderID: "llm",
+		SetupHint:  SetupInstructions("llm", "https://dash.example", "LLM_ROUTER_API_KEY"),
+	}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "%%API_BASE%%") || strings.Contains(body, "%%API_KEY%%") {
-		t.Errorf("template placeholders not substituted")
+	for _, ph := range []string{"%%API_BASE%%", "%%API_KEY%%", "%%PROVIDER_ID%%", "%%SETUP_HINT%%"} {
+		if strings.Contains(body, ph) {
+			t.Errorf("template placeholder %s not substituted", ph)
+		}
 	}
 	if !strings.Contains(body, "https://llm.example") {
 		t.Errorf("API base not substituted into HTML")
 	}
-	// Empty APIKey falls back to the neutral placeholder, not a real key.
-	if !strings.Contains(body, "&lt;api-key&gt;") && !strings.Contains(body, "<api-key>") {
-		t.Errorf("expected the <api-key> placeholder in the served HTML")
+	// No key is ever rendered: the Connection card points at the Tokens
+	// dialog, and the curl example carries a neutral pat_ hint.
+	if !strings.Contains(body, "pat_") || !strings.Contains(body, "openTokens()") {
+		t.Errorf("expected PAT instructions in the served HTML")
+	}
+	if strings.Contains(body, "<api-key>") || strings.Contains(body, "sk-") {
+		t.Errorf("served HTML must not carry a key or the old placeholder")
+	}
+	if !strings.Contains(body, "const providerId = 'llm'") {
+		t.Errorf("provider id not substituted for the OpenCode /connect line")
 	}
 }

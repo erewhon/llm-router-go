@@ -914,6 +914,7 @@ function render(data) {
   // operational view sits at the top of the page.
   let lowerHtml = '';
   const publicUrl = '%%API_BASE%%';
+  const providerId = '%%PROVIDER_ID%%';
   lowerHtml += `
     <div class="section-title">Connection</div>
     <div class="nodes">
@@ -924,9 +925,11 @@ function render(data) {
           <button class="copy-btn" onclick="copyText('${publicUrl}', this)">copy</button>
         </div>
         <div class="node-detail" style="margin-top:0.5rem">
-          <strong>API Key:</strong> <span class="api-base">%%API_KEY%%</span>
-          <button class="copy-btn" onclick="copyText('%%API_KEY%%', this)">copy</button>
+          <strong>API Key:</strong> <span>your personal access token — click <a href="#" onclick="openTokens();return false" style="color:var(--accent)">&#128273; Tokens</a> to mint one</span>
         </div>
+        ${providerId ? `<div class="node-detail" style="margin-top:0.5rem">
+          <strong>OpenCode:</strong> <span>run <span class="api-base">/connect</span> (or <span class="api-base">opencode auth login</span>), choose <em>Other</em>, provider id <span class="api-base">${providerId}</span>, paste the token</span>
+        </div>` : ''}
         <div class="node-detail" style="margin-top:0.5rem">
           <strong>Model:</strong> <span>use the model ID or any alias from the table below</span>
         </div>
@@ -1404,7 +1407,7 @@ function renderTokens(reveal, err) {
     h += `<div class="tok-reveal">
       <div><strong>New token “${escHtml(reveal.label)}” — copy it now.</strong> Only its hash is stored, so it cannot be shown again.</div>
       <div class="tok-secret"><code id="tokSecret">${escHtml(reveal.token)}</code><button class="copy-btn" onclick="copyText(document.getElementById('tokSecret').textContent, this)">copy</button></div>
-      <div class="tok-hint" style="margin:0.5rem 0 0">Use it as the API key at <code>%%API_BASE%%/v1</code>.</div>
+      <div class="tok-hint" style="margin:0.5rem 0 0">Use it as the API key at <code>%%API_BASE%%/v1</code>. OpenCode: <code>/connect</code> → Other → provider id <code>${escHtml('%%PROVIDER_ID%%' || 'llm')}</code> → paste.</div>
     </div>`;
   }
   h += `<form class="tok-form" onsubmit="mintToken(event)">

@@ -51,7 +51,15 @@ var dashboardHTMLTemplate string
 // The remaining fields wire token self-service; see dashboard_tokens.go.
 type DashboardConfig struct {
 	APIBase string
-	APIKey  string
+	// APIKey is a display hint only. Empty (the norm since the well-known
+	// stopped carrying a key) shows PAT instructions instead of a value.
+	APIKey string
+	// ProviderID is the OpenCode provider id the well-known serves ("llm"),
+	// so the Connection card can spell out the /connect step. Empty hides it.
+	ProviderID string
+	// SetupHint is the same instruction text the well-known's auth command
+	// prints, so both surfaces teach identical steps.
+	SetupHint string
 	// Tokens is the PAT store self-service mints into. Nil disables the
 	// /api/tokens routes (they answer 404-shaped 503s, not silence).
 	Tokens *auth.Store
@@ -71,12 +79,15 @@ type DashboardConfig struct {
 // DashboardHandler returns the http.Handler for the dashboard listener. The
 // HTML is substituted once here and captured in the root handler's closure.
 func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
-	if cfg.APIKey == "" {
-		cfg.APIKey = "<api-key>"
+	keyHint := cfg.APIKey
+	if keyHint == "" {
+		keyHint = "pat_…"
 	}
 	html := strings.NewReplacer(
 		"%%API_BASE%%", cfg.APIBase,
-		"%%API_KEY%%", cfg.APIKey,
+		"%%API_KEY%%", keyHint,
+		"%%PROVIDER_ID%%", cfg.ProviderID,
+		"%%SETUP_HINT%%", cfg.SetupHint,
 	).Replace(dashboardHTMLTemplate)
 
 	mux := http.NewServeMux()

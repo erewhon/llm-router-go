@@ -29,9 +29,17 @@ type WellKnownConfig struct {
 	// BaseURL is the OpenAI-compatible URL OpenCode will POST to (the
 	// router's public URL, e.g. https://llm.bcc.sh/v1).
 	BaseURL string
-	// APIKey is the bearer OpenCode should send. Omitted from JSON when
-	// empty so OpenCode can prompt or fall back to its own auth flow.
-	APIKey string
+	// SetupURL is where a person mints a personal access token (the
+	// dashboard's Tokens dialog, e.g. https://llm-dashboard.bcc.sh). It is
+	// printed by the auth command below. Empty falls back to generic wording.
+	//
+	// The document never carries a credential. Until 2026-09-11 it shipped a
+	// shared key (`echo <key>` as the auth command, plus options.apiKey),
+	// which meant every OpenCode install that bootstrapped here authenticated
+	// as legacy:<fingerprint> forever, and the legacy burn-down could never
+	// reach zero. Now that anyone with SSO can mint their own PAT, the
+	// bootstrap hands out instructions instead.
+	SetupURL string
 	// AuthEnv is the env-var name OpenCode sets to the fetched secret
 	// (the "env" field inside the top-level `auth` block). Empty defaults
 	// to "LLM_ROUTER_API_KEY".
@@ -59,7 +67,10 @@ type wellKnownDoc struct {
 
 type wellKnownAuth struct {
 	// Command opencode runs to fetch the secret. Conventionally
-	// ["echo", "<key>"] when the key is materialized server-side.
+	// ["echo", "<key>"] when a key is materialized server-side; here it is
+	// a command that prints how to get a personal token and exits non-zero,
+	// so `opencode providers login` shows the instructions rather than
+	// silently storing nothing.
 	Command []string `json:"command"`
 	// Env is the env var name opencode sets to the fetched secret.
 	Env string `json:"env"`
@@ -79,7 +90,9 @@ type wellKnownPrv struct {
 
 type wellKnownPrvOpts struct {
 	BaseURL string `json:"baseURL"`
-	APIKey  string `json:"apiKey,omitempty"`
+	// No apiKey, deliberately: see WellKnownConfig.SetupURL. OpenCode reads
+	// the key from its own auth store (`/connect` → Other → this provider
+	// id) or from the auth.env variable.
 }
 
 type wellKnownModel struct {
@@ -189,14 +202,10 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 	if authEnv == "" {
 		authEnv = "LLM_ROUTER_API_KEY"
 	}
-	var authCmd []string
-	if cfg.APIKey != "" {
-		authCmd = []string{"echo", cfg.APIKey}
-	}
 
 	return wellKnownDoc{
 		Auth: wellKnownAuth{
-			Command: authCmd,
+			Command: setupCommand(cfg, authEnv),
 			Env:     authEnv,
 		},
 		Config: wellKnownConfig{
@@ -207,13 +216,37 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 					Name: cfg.ProviderName,
 					Options: wellKnownPrvOpts{
 						BaseURL: cfg.BaseURL,
-						APIKey:  cfg.APIKey,
 					},
 					Models: models,
 				},
 			},
 		},
 	}
+}
+
+// SetupInstructions is the human text explaining how to get a credential for
+// the well-known provider. Shared by the auth command and the dashboard so
+// the two surfaces teach the same steps.
+func SetupInstructions(providerID, setupURL, authEnv string) string {
+	where := "from the router dashboard (Tokens)"
+	if setupURL != "" {
+		where = "at " + setupURL + " (Tokens)"
+	}
+	if providerID == "" {
+		providerID = "llm"
+	}
+	return "This provider needs a personal access token. Mint one " + where +
+		", then in OpenCode run /connect (or: opencode auth login), choose Other, enter provider id " +
+		providerID + ", and paste the token. Scripts can export " + authEnv + " instead."
+}
+
+// setupCommand builds the auth command: print the instructions to stderr and
+// fail, so a tool that runs it surfaces the text instead of an empty secret.
+// The message is passed as an argument, never interpolated into the script,
+// so no value from config can change what the shell executes.
+func setupCommand(cfg WellKnownConfig, authEnv string) []string {
+	return []string{"sh", "-c", `printf '%s\n' "$1" >&2; exit 1`, "opencode-setup",
+		SetupInstructions(cfg.ProviderID, cfg.SetupURL, authEnv)}
 }
 
 // handleWellKnown serves GET /.well-known/opencode. 404 when the endpoint is

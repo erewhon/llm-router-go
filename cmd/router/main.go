@@ -82,7 +82,10 @@ func run(args []string) int {
 		wellKnownProviderID   = fs.String("wellknown-provider-id", "", `provider key under "provider" in /.well-known/opencode (e.g. "llm"); empty disables the endpoint`)
 		wellKnownProviderName = fs.String("wellknown-provider-name", "LLM Router", "human label OpenCode shows for the provider")
 		wellKnownBaseURL      = fs.String("wellknown-base-url", "", "public OpenAI-compatible URL OpenCode hits (e.g. https://llm.bcc.sh/v1)")
-		wellKnownAPIKey       = fs.String("wellknown-api-key", "", "bearer OpenCode should send; empty omits the apiKey field")
+		// No --wellknown-api-key any more (removed 2026-09-11): the document
+		// never carries a credential. People mint a PAT on the dashboard and
+		// `/connect` it in OpenCode; the auth command prints those steps.
+		wellKnownSetupURL = fs.String("wellknown-setup-url", "", "where a person mints a personal access token, printed by the well-known's setup instructions (e.g. https://llm-dashboard.bcc.sh)")
 
 		// API key auth. Empty list disables auth — anyone reachable can call
 		// /v1/*. /health, /metrics, /.well-known/opencode are always exempt.
@@ -198,10 +201,8 @@ func run(args []string) int {
 	// Env-var fallback for secrets. Standard pattern: systemd ships them
 	// via EnvironmentFile so they don't appear in /proc/PID/cmdline. Flags
 	// still win if set, so dev/test runs are unaffected.
-	if *wellKnownAPIKey == "" {
-		if v := os.Getenv("WELLKNOWN_API_KEY"); v != "" {
-			*wellKnownAPIKey = v
-		}
+	if os.Getenv("WELLKNOWN_API_KEY") != "" {
+		logger.Warn("WELLKNOWN_API_KEY is set but no longer read: /.well-known/opencode stopped carrying a shared key on 2026-09-11; remove it from proxy.env")
 	}
 	if *toolProxyURL == "" {
 		*toolProxyURL = os.Getenv("ROUTER_TOOL_PROXY_URL")
@@ -218,7 +219,7 @@ func run(args []string) int {
 			ProviderID:   *wellKnownProviderID,
 			ProviderName: *wellKnownProviderName,
 			BaseURL:      *wellKnownBaseURL,
-			APIKey:       *wellKnownAPIKey,
+			SetupURL:     *wellKnownSetupURL,
 		}),
 	}
 	// Request logging. Precedence: --reqlog=off disables entirely; otherwise
@@ -428,6 +429,8 @@ func run(args []string) int {
 		dashHandler := httpx.Chain(
 			rt.DashboardHandler(router.DashboardConfig{
 				APIBase:        apiBase,
+				ProviderID:     *wellKnownProviderID,
+				SetupHint:      router.SetupInstructions(*wellKnownProviderID, *wellKnownSetupURL, "LLM_ROUTER_API_KEY"),
 				Tokens:         patStore,
 				AuthSecret:     secret,
 				IdentityHeader: *dashIDHeader,
