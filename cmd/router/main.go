@@ -127,6 +127,11 @@ func run(args []string) int {
 		dashOwners     = fs.String("dashboard-owners", "", "comma-separated principals allowed to mint unrestricted (models:*) tokens from the dashboard; everyone else is capped at models:local. Empty falls back to $DASHBOARD_OWNERS")
 		dashIDHeader   = fs.String("dashboard-identity-header", "X-Auth-Request-Email", "request header carrying the proxy-verified principal")
 
+		// Anthropic passthrough attribution: the operator's map from an
+		// upstream credential's fingerprint (the 8 hex chars after
+		// "anthropic:" in reqlog) to a person.
+		anthropicKeyPrincipals = fs.String("anthropic-key-principals", "", "comma-separated <fingerprint>=<principal> pairs mapping Anthropic credential fingerprints to people for /v1/messages attribution. Empty falls back to $ANTHROPIC_KEY_PRINCIPALS")
+
 		showVer = fs.Bool("version", false, "print version and exit")
 
 		// --validate: check --models-yaml and exit without serving. See
@@ -368,17 +373,38 @@ func run(args []string) int {
 		logger.Info("shared-key auth enabled", "keys", len(authKeys), "source", apiKeysFrom,
 			"note", "legacy shared keys are attributed as legacy:<fingerprint> in reqlog")
 	}
-	// /health, /metrics, /.well-known/opencode are always exempt; the Anthropic
-	// passthrough is too — it carries the caller's own credentials, which the
-	// router forwards untouched rather than gating behind its front-door bearer.
-	authExempt := append([]string{"/health", "/metrics", "/.well-known/opencode"}, router.AnthropicPaths...)
+	// /health, /metrics, /.well-known/opencode are always exempt. The Anthropic
+	// passthrough carries the caller's own credentials, which the router
+	// forwards untouched, so it is never gated — but it IS attributed (see
+	// Authenticator.attributePassthrough).
+	authExempt := []string{"/health", "/metrics", "/.well-known/opencode"}
+	keyPrincipalsSrc := *anthropicKeyPrincipals
+	if keyPrincipalsSrc == "" {
+		keyPrincipalsSrc = os.Getenv("ANTHROPIC_KEY_PRINCIPALS")
+	}
+	keyPrincipals := map[string]string{}
+	for _, pair := range splitCSV(keyPrincipalsSrc) {
+		fp, principal, ok := strings.Cut(pair, "=")
+		fp, principal = strings.TrimSpace(fp), strings.TrimSpace(principal)
+		if !ok || fp == "" || principal == "" {
+			fmt.Fprintf(os.Stderr, "fatal: --anthropic-key-principals: %q is not <fingerprint>=<principal>\n", pair)
+			return 2
+		}
+		keyPrincipals[fp] = principal
+	}
+	if len(keyPrincipals) > 0 {
+		logger.Info("anthropic passthrough attribution: fingerprint map loaded", "entries", len(keyPrincipals))
+	}
 
 	handler := httpx.Chain(
 		rt.Handler(),
 		httpx.RequestID,
 		httpx.AccessLog(logger),
 		httpx.Recover(logger),
-		router.NewAuthenticator(patStore, authKeys, authExempt, logger).Middleware(),
+		router.NewAuthenticator(patStore, authKeys, authExempt, logger).
+			Passthrough(router.AnthropicPaths...).
+			KeyPrincipals(keyPrincipals).
+			Middleware(),
 	)
 	srv := &http.Server{
 		Addr:              *addr,

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -60,6 +61,10 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 			modelIn string
 			chain   string
 			errMsg  string
+			// refusalClass / privacyTolerance are set when a token scope or
+			// privacy tier turned the request away before forwarding.
+			refusalClass     string
+			privacyTolerance string
 		)
 
 		defer func() {
@@ -78,11 +83,15 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 				PrefixHashChain: chain,
 				Error:           errMsg,
 			}
-			// Nearly always empty: the Anthropic passthrough is auth-exempt
-			// (it forwards the caller's own upstream credentials), so these
-			// requests are unattributed by design. Populated anyway so the
-			// exemption is the only reason they ever lack a principal.
+			// Attributed by the Authenticator's passthrough path: a PAT sent
+			// alongside the Anthropic credential, else a fingerprint of that
+			// credential ("anthropic:<fp>" / "anthropic-oauth:<fp>"). Empty
+			// only when the caller sent no credential at all.
 			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
+			lr.PrivacyTolerance = privacyTolerance
+			if refusalClass != "" {
+				lr.ErrorClass = refusalClass
+			}
 			u := cap.usage
 			lr.PromptTokens = u.input
 			lr.CompletionTokens = u.output
@@ -102,6 +111,35 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 			return
 		}
 		modelIn, chain = anthropicPrefixChain(body)
+
+		// The passthrough always lands on api.anthropic.com — not fleet
+		// hardware, not ZDR-enforceable. A models:local or local_or_zdr PAT
+		// sent alongside, or a caller's X-Router-Privacy header, therefore
+		// refuses here exactly as it would on the OpenAI-shaped endpoints;
+		// a fence with a gap for the busiest path is not a fence.
+		demand, refuse := privacyDemandFor(r)
+		if refuse != "" {
+			errMsg = refuse
+			refusalClass = errorClassPrivacyRefused
+			rt.metrics.ObservePrivacyRefusal("invalid", "")
+			writePrivacyRefusal(rec, tierNone, refuse, nil)
+			return
+		}
+		privacyTolerance = demand.tier.String()
+		if demand.tier != tierNone {
+			if m, ok := rt.registry.Models[modelID]; ok {
+				if why := privacyGate(m, demand.tier); why != "" {
+					errMsg = fmt.Sprintf("%s, but %q is %s", demand.source, modelID, why)
+					refusalClass = demand.errorClass()
+					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
+						"path", r.URL.Path, "resolved_via", modelID, "tier", demand.tier.String(),
+						"scope", demand.scope, "token_id", demand.tokenID, "reason", errMsg)
+					rt.metrics.ObservePrivacyRefusal(demand.tier.String(), "")
+					demand.writeRefusal(rec, demand.tier, errMsg, nil)
+					return
+				}
+			}
+		}
 
 		rt.logger.InfoContext(r.Context(), "forwarding anthropic",
 			"path", r.URL.Path, "model", modelIn, "backend_url", backendRoot)

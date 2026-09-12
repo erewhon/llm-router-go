@@ -74,6 +74,37 @@ func (i Identity) Legacy() bool { return strings.HasPrefix(i.Principal, LegacyPr
 // flat --api-keys / $ROUTER_API_KEYS shared secrets.
 const LegacyPrincipalPrefix = "legacy:"
 
+// Synthetic principals for the Anthropic passthrough, which carries the
+// caller's OWN upstream credential and no router credential. The router
+// cannot know who that is, but it can tell keys apart: a fingerprint of the
+// credential is stable per key, so usage groups by it and an operator can
+// map a fingerprint to a person (see the key-principals table in the
+// Authenticator). An x-api-key is long-lived; a Claude Code OAuth token
+// rotates on refresh, so its fingerprint fragments over time — which is
+// why the two get different prefixes: one is worth mapping, the other is
+// mostly a hint to send a PAT alongside instead.
+const (
+	AnthropicKeyPrincipalPrefix   = "anthropic:"
+	AnthropicOAuthPrincipalPrefix = "anthropic-oauth:"
+)
+
+// ReservedPrincipalPrefixes may never be minted as real principals: each
+// names a synthetic identity the router derives from a credential, and a
+// minted token in that namespace would let one impersonate the other.
+var ReservedPrincipalPrefixes = []string{
+	LegacyPrincipalPrefix, AnthropicKeyPrincipalPrefix, AnthropicOAuthPrincipalPrefix,
+}
+
+// Reserved reports whether principal falls in a synthetic namespace.
+func Reserved(principal string) bool {
+	for _, p := range ReservedPrincipalPrefixes {
+		if strings.HasPrefix(principal, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Token is one stored credential. The secret itself is never stored, and
 // never leaves Mint.
 type Token struct {
@@ -168,7 +199,37 @@ func LooksLikePAT(bearer string) bool { return strings.HasPrefix(bearer, Prefix)
 // two shared keys apart in usage reports and to confirm a specific one has
 // stopped being used, while never putting the key itself in the database.
 func LegacyIdentity(key string) Identity {
-	sum := sha256.Sum256([]byte(key))
-	fp := hex.EncodeToString(sum[:])[:8]
+	fp := Fingerprint(key)
 	return Identity{Principal: LegacyPrincipalPrefix + fp, TokenID: "legacy-" + fp}
+}
+
+// Fingerprint is the short, non-reversible id of a credential used for the
+// synthetic principals: the first 8 hex chars of its SHA-256.
+func Fingerprint(cred string) string {
+	sum := sha256.Sum256([]byte(cred))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+// AnthropicKeyIdentity attributes a passthrough request on the fingerprint of
+// its x-api-key. principalOverride, when non-empty, is the operator's mapping
+// of that fingerprint to a person; the token id keeps the fingerprint either
+// way, so the mapping is auditable from the row.
+func AnthropicKeyIdentity(apiKey, principalOverride string) Identity {
+	fp := Fingerprint(apiKey)
+	principal := AnthropicKeyPrincipalPrefix + fp
+	if principalOverride != "" {
+		principal = principalOverride
+	}
+	return Identity{Principal: principal, TokenID: "anthropic-" + fp}
+}
+
+// AnthropicOAuthIdentity attributes a passthrough request on the fingerprint
+// of its bearer (a Claude Code OAuth token). Same override rule as the key.
+func AnthropicOAuthIdentity(token, principalOverride string) Identity {
+	fp := Fingerprint(token)
+	principal := AnthropicOAuthPrincipalPrefix + fp
+	if principalOverride != "" {
+		principal = principalOverride
+	}
+	return Identity{Principal: principal, TokenID: "anthropic-oauth-" + fp}
 }

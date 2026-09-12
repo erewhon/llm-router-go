@@ -28,7 +28,18 @@ type Authenticator struct {
 	store  *auth.Store
 	keys   map[string]struct{}
 	exempt map[string]struct{}
-	logger *slog.Logger
+	// passthrough paths carry the caller's OWN upstream credential (the
+	// Anthropic Messages API) and no router credential. They are never
+	// gated — but they are attributed: a PAT sent alongside resolves to a
+	// person and is stripped before forwarding; otherwise the upstream
+	// credential's fingerprint becomes a synthetic principal. See
+	// attributePassthrough.
+	passthrough map[string]struct{}
+	// keyPrincipals maps an upstream-credential fingerprint to a person, so
+	// "anthropic:1a2b3c4d" can read "erewhon@flatland.org" once the operator
+	// has seen which key is whose.
+	keyPrincipals map[string]string
+	logger        *slog.Logger
 }
 
 // NewAuthenticator builds the middleware. store may be nil (no PATs
@@ -54,6 +65,25 @@ func NewAuthenticator(store *auth.Store, keys, exempt []string, logger *slog.Log
 	return a
 }
 
+// Passthrough marks paths whose requests are attributed but never refused
+// for lack of a router credential. Returns a for chaining.
+func (a *Authenticator) Passthrough(paths ...string) *Authenticator {
+	if a.passthrough == nil {
+		a.passthrough = make(map[string]struct{}, len(paths))
+	}
+	for _, p := range paths {
+		a.passthrough[p] = struct{}{}
+	}
+	return a
+}
+
+// KeyPrincipals installs the fingerprint → principal table for passthrough
+// attribution. Returns a for chaining.
+func (a *Authenticator) KeyPrincipals(m map[string]string) *Authenticator {
+	a.keyPrincipals = m
+	return a
+}
+
 // Enabled reports whether any credential source is configured. When nothing
 // is, the middleware is a no-op — local development stays frictionless and
 // the operator opts in, exactly as the pre-PAT behaviour did.
@@ -68,6 +98,10 @@ func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if _, ok := a.exempt[r.URL.Path]; ok {
 				next.ServeHTTP(w, r)
+				return
+			}
+			if _, ok := a.passthrough[r.URL.Path]; ok {
+				a.attributePassthrough(w, r, next)
 				return
 			}
 			const prefix = "Bearer "
@@ -106,6 +140,63 @@ func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
 		})
 	}
+}
+
+// attributePassthrough handles a path that forwards the caller's own upstream
+// credential. Nothing here can refuse a request for lacking a ROUTER
+// credential — the upstream will judge the credential it is given — but the
+// request must not stay anonymous either, since these paths are the bulk of
+// front-door traffic (13,468 of ~13,500 requests in the 24h before this was
+// written carried no principal).
+//
+// Precedence:
+//
+//  1. "Authorization: Bearer pat_…" — a router PAT sent ALONGSIDE the
+//     Anthropic x-api-key. Resolved to a real person and then STRIPPED, so
+//     the upstream never sees a credential it would reject. A bad PAT is a
+//     401: presenting one is opting in to being checked.
+//  2. x-api-key — a long-lived Anthropic key. Fingerprinted to
+//     "anthropic:<fp>", or to the operator's mapping for that fingerprint.
+//  3. "Authorization: Bearer <anything else>" — a Claude Code OAuth token.
+//     Fingerprinted to "anthropic-oauth:<fp>". Rotates on refresh, so this
+//     is the least stable of the three.
+//
+// A request with none of these carries no identity and goes upstream to be
+// refused there.
+func (a *Authenticator) attributePassthrough(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	const prefix = "Bearer "
+	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), prefix)
+	if bearer != r.Header.Get("Authorization") && auth.LooksLikePAT(bearer) {
+		id, err := a.resolve(bearer)
+		switch {
+		case errors.Is(err, auth.ErrStoreUnavailable):
+			a.logger.Error("token store unavailable — answering 503; auth cannot be verified",
+				"path", r.URL.Path, "err", err.Error(), "token_id", safeTokenID(bearer))
+			writeStoreUnavailable(w)
+			return
+		case err != nil:
+			a.logger.Info("auth rejected", "path", r.URL.Path, "reason", err.Error(), "token_id", safeTokenID(bearer))
+			writeAuthError(w, "invalid api key")
+			return
+		}
+		// The PAT is the router's business only. The upstream gets the
+		// caller's x-api-key and nothing that looks like ours.
+		r.Header.Del("Authorization")
+		next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
+		return
+	}
+	var id auth.Identity
+	switch {
+	case r.Header.Get("x-api-key") != "":
+		key := r.Header.Get("x-api-key")
+		id = auth.AnthropicKeyIdentity(key, a.keyPrincipals[auth.Fingerprint(key)])
+	case bearer != "" && bearer != r.Header.Get("Authorization"):
+		id = auth.AnthropicOAuthIdentity(bearer, a.keyPrincipals[auth.Fingerprint(bearer)])
+	default:
+		next.ServeHTTP(w, r)
+		return
+	}
+	next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), id)))
 }
 
 // resolve turns a bearer value into an identity. PAT-shaped credentials are

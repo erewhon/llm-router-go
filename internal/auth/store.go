@@ -268,11 +268,11 @@ func (s *Store) Mint(principal, label string, scopes []string, expires *time.Tim
 	if principal == "" {
 		return "", Token{}, errors.New("auth: principal required")
 	}
-	if strings.HasPrefix(principal, LegacyPrincipalPrefix) {
-		// Otherwise a minted token could impersonate the synthetic identity
-		// used for shared keys, and "legacy traffic is now zero" would stop
-		// meaning what the migration needs it to mean.
-		return "", Token{}, fmt.Errorf("auth: principal may not start with %q", LegacyPrincipalPrefix)
+	if Reserved(principal) {
+		// Otherwise a minted token could impersonate a synthetic identity
+		// (a shared key, an Anthropic credential), and "legacy traffic is
+		// now zero" would stop meaning what the migration needs it to mean.
+		return "", Token{}, fmt.Errorf("auth: principal %q is in a reserved namespace (%s)", principal, strings.Join(ReservedPrincipalPrefixes, ", "))
 	}
 	// A scope the router does not enforce must never reach the store: a
 	// token labelled with a posture nobody implements is trusted and wrong.
