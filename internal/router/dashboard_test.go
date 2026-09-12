@@ -486,3 +486,83 @@ func TestDashboard_OverviewRequestsPerMinute(t *testing.T) {
 		t.Errorf("perMinute at +200s = %d, want 0", n)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// /api/traffic — series from the request log
+// ---------------------------------------------------------------------------
+
+func trafficReq(t *testing.T, rt *Router, cfg DashboardConfig, path string, hdr map[string]string) (int, map[string]any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rt.DashboardHandler(cfg).ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func TestDashboard_Traffic(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	now := time.Now()
+	for i, m := range []string{"alpha", "alpha", "beta"} {
+		sink.Log(reqlog.Record{TS: now.Add(-time.Duration(i+1) * time.Minute), ResolvedVia: m, Principal: []string{"steven", "steven", "family"}[i], Status: 200, LatencyMS: 10})
+	}
+	sink.Log(reqlog.Record{TS: now.Add(-2 * time.Minute), ResolvedVia: "beta", Principal: "family", Status: 502, ErrorClass: "server_error", BackendURL: "http://b"})
+	rt := newTestRouter(t, nil, WithSink(sink))
+	open := DashboardConfig{}
+
+	code, out := trafficReq(t, rt, open, "/api/traffic?window=1h&by=model", nil)
+	if code != 200 || out["available"] != true || out["bucket_s"].(float64) != 60 || out["by"] != "model" {
+		t.Fatalf("1h: %d %v", code, out)
+	}
+	rows := out["rows"].([]any)
+	if len(rows) != 2 || rows[0].(map[string]any)["key"] != "alpha" && rows[0].(map[string]any)["key"] != "beta" {
+		t.Errorf("rows = %v", rows)
+	}
+	if nb := len(rows[0].(map[string]any)["buckets"].([]any)); nb < 60 || nb > 62 {
+		t.Errorf("1h buckets = %d, want ~61 one-minute buckets", nb)
+	}
+	if fails := out["failures"].([]any); len(fails) != 1 {
+		t.Errorf("failures = %v, want the one 502", fails)
+	}
+	_, out = trafficReq(t, rt, open, "/api/traffic?window=7d", nil)
+	if out["bucket_s"].(float64) != 3600 || out["window"] != "7d" {
+		t.Errorf("7d: %v", out)
+	}
+	_, out = trafficReq(t, rt, open, "/api/traffic", nil)
+	if out["window"] != "24h" || out["bucket_s"].(float64) != 900 {
+		t.Errorf("default window: %v", out)
+	}
+	if code, _ := trafficReq(t, rt, open, "/api/traffic?window=2h", nil); code != 400 {
+		t.Errorf("window=2h: %d, want 400", code)
+	}
+	if code, _ := trafficReq(t, rt, open, "/api/traffic?by=node", nil); code != 400 {
+		t.Errorf("by=node: %d, want 400", code)
+	}
+
+	// No queryable sink: available:false, same shape as /api/usage.
+	_, out = trafficReq(t, newTestRouter(t, nil), open, "/api/traffic", nil)
+	if out["available"] != false {
+		t.Errorf("NopSink: %v", out)
+	}
+
+	// Non-owner by principal: only their own row; by model: everything.
+	gated := DashboardConfig{AuthSecret: "s", Owners: []string{"owner@example"}}
+	fam := map[string]string{DashboardAuthHeader: "s", "X-Auth-Request-Email": "family"}
+	_, out = trafficReq(t, rt, gated, "/api/traffic?window=1h&by=principal", fam)
+	rows = out["rows"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["key"] != "family" {
+		t.Errorf("non-owner by principal = %v, want only family", rows)
+	}
+	_, out = trafficReq(t, rt, gated, "/api/traffic?window=1h&by=model", fam)
+	if len(out["rows"].([]any)) != 2 {
+		t.Errorf("non-owner by model should see every model row: %v", out["rows"])
+	}
+	_, out = trafficReq(t, rt, gated, "/api/traffic?window=1h&by=principal", map[string]string{DashboardAuthHeader: "s", "X-Auth-Request-Email": "owner@example"})
+	if len(out["rows"].([]any)) != 2 {
+		t.Errorf("owner by principal should see both principals: %v", out["rows"])
+	}
+}

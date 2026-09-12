@@ -170,6 +170,7 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.Handle("POST /api/chat", ident(http.HandlerFunc(rt.handleDashChat)))
 	mux.Handle("GET /api/usage", ident(http.HandlerFunc(rt.handleDashUsage)))
 	mux.Handle("GET /api/events", ident(http.HandlerFunc(rt.handleDashEvents)))
+	mux.Handle("GET /api/traffic", ident(http.HandlerFunc(rt.handleDashTraffic)))
 	mux.Handle("GET /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensList)))
 	mux.Handle("POST /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensMint)))
 	mux.Handle("DELETE /api/tokens/{id}", ident(http.HandlerFunc(rt.handleDashTokensRevoke)))
