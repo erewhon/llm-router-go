@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Router</title>
+<link rel="stylesheet" href="/static/dashboard.css">
+<script>
+  // Substituted once by DashboardHandler (see dashboard.go). Tabs read this
+  // through ctx.config; nothing else in the page is templated.
+  window.DASH_CONFIG = {
+    apiBase: "%%API_BASE%%",
+    apiKey: "%%API_KEY%%",
+    providerId: "%%PROVIDER_ID%%",
+    setupHint: "%%SETUP_HINT%%",
+  };
+</script>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <h1>LLM Router</h1>
+      <p class="subtitle">Model registry and routing status</p>
+    </div>
+    <div class="header-btns">
+      <button class="chat-open-btn" id="btnTokens" title="Personal access tokens for the front door">&#128273; Tokens</button>
+      <button class="chat-open-btn" id="btnChat">&#128172; Chat</button>
+    </div>
+  </div>
+
+  <div id="strip" class="stats"></div>
+
+  <nav class="tabs" id="tabs"></nav>
+
+  <main id="tab-root"><p class="loading">Loading&#8230;</p></main>
+
+  <!-- Dialog markup lives here so the header buttons work from every tab.
+       The Connect leaf wires lib/dialogs.js to these ids; until then the
+       buttons show a placeholder. -->
+  <dialog id="chatDialog" class="chat-dialog">
+    <div class="chat-head">
+      <strong>Quick Chat</strong>
+      <select id="chatModel" class="chat-model"></select>
+      <button class="chat-x" id="chatClose" title="Close">&#10005;</button>
+    </div>
+    <div id="chatOutput" class="chat-output"><div class="chat-placeholder">Pick a model, type a message, &#8984;/Ctrl+Enter to send. No system prompt.</div></div>
+    <div id="chatMetrics" class="chat-metrics"></div>
+    <div class="chat-inputrow">
+      <textarea id="chatInput" class="chat-input" rows="2" placeholder="Message&#8230;"></textarea>
+      <button id="chatSend" class="chat-send">Send</button>
+      <button id="chatStop" class="chat-stop" style="display:none">Stop</button>
+    </div>
+  </dialog>
+
+  <dialog id="tokDialog" class="chat-dialog">
+    <div class="chat-head">
+      <strong>Access tokens</strong>
+      <span id="tokWho" class="tok-who"></span>
+      <button class="chat-x" id="tokClose" title="Close">&#10005;</button>
+    </div>
+    <div id="tokBody" class="tok-body"><p class="chat-placeholder">Loading&#8230;</p></div>
+  </dialog>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

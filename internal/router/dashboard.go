@@ -16,9 +16,10 @@ package router
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"sort"
@@ -34,6 +35,15 @@ import (
 
 //go:embed dashboard.html
 var dashboardHTMLTemplate string
+
+// dashboardV2 is the tabbed shell (Dashboard v2): index.html plus the CSS and
+// ES modules under dashboard/. Served at /v2 and /static/ beside the legacy
+// single-file page until every section has moved into a tab, at which point
+// the "Flip /" leaf makes it the dashboard. Design: the Forge page "LLM
+// Router Dashboard: split into sections + a live Activity view".
+//
+//go:embed dashboard
+var dashboardV2 embed.FS
 
 // Node probing lives in internal/health — the dashboard and the availability
 // tracker share one prober so they can never disagree about whether a node
@@ -83,12 +93,30 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	if keyHint == "" {
 		keyHint = "pat_…"
 	}
-	html := strings.NewReplacer(
+	subst := strings.NewReplacer(
 		"%%API_BASE%%", cfg.APIBase,
 		"%%API_KEY%%", keyHint,
 		"%%PROVIDER_ID%%", cfg.ProviderID,
 		"%%SETUP_HINT%%", cfg.SetupHint,
-	).Replace(dashboardHTMLTemplate)
+	)
+	html := subst.Replace(dashboardHTMLTemplate)
+
+	// The v2 shell gets the same four substitutions, once, into its
+	// window.DASH_CONFIG block. The setup hint is multi-line prose and lands
+	// inside a JS string literal, so it is JSON-escaped first; the other
+	// three are URLs and ids and go in as they are, exactly as the legacy
+	// page has always done.
+	v2html := ""
+	if raw, err := dashboardV2.ReadFile("dashboard/index.html"); err == nil {
+		hint, _ := json.Marshal(cfg.SetupHint)
+		v2html = strings.NewReplacer(
+			"\"%%SETUP_HINT%%\"", string(hint),
+			"%%API_BASE%%", cfg.APIBase,
+			"%%API_KEY%%", keyHint,
+			"%%PROVIDER_ID%%", cfg.ProviderID,
+		).Replace(string(raw))
+	}
+	staticFS, _ := fs.Sub(dashboardV2, "dashboard")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +126,34 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, html)
+	})
+	mux.HandleFunc("GET /v2", func(w http.ResponseWriter, r *http.Request) {
+		if v2html == "" {
+			http.Error(w, "dashboard v2 shell not embedded", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = io.WriteString(w, v2html)
+	})
+	// Static assets straight from the embedded tree. The binary IS the
+	// version, so no-cache: a deploy must never serve yesterday's app.js
+	// against today's /api shapes. index.html is not served here (it needs
+	// the substitutions), and FileServerFS's own directory listings are
+	// suppressed by the index check below.
+	static := http.StripPrefix("/static/", http.FileServerFS(staticFS))
+	mux.HandleFunc("GET /static/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		p := r.PathValue("path")
+		if p == "" || strings.HasSuffix(p, "/") || p == "index.html" {
+			http.NotFound(w, r)
+			return
+		}
+		if st, err := fs.Stat(staticFS, p); err != nil || st.IsDir() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		static.ServeHTTP(w, r)
 	})
 	// Browsers auto-request /favicon.ico; 204 keeps it out of the console.
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) {

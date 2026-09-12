@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,5 +210,129 @@ func TestDashboard_ServesHTMLWithSubstitutions(t *testing.T) {
 	}
 	if !strings.Contains(body, "const providerId = 'llm'") {
 		t.Errorf("provider id not substituted for the OpenCode /connect line")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard v2 shell: /v2 + /static/ (the legacy / stays until the flip)
+// ---------------------------------------------------------------------------
+
+func dashV2(t *testing.T, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rt := newTestRouter(t, nil)
+	rec := httptest.NewRecorder()
+	rt.DashboardHandler(DashboardConfig{
+		APIBase:    "https://llm.example",
+		ProviderID: "llm",
+		SetupHint:  "line one\n\"quoted\" line two",
+	}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+func TestDashboardV2_ShellSubstitutedAndModular(t *testing.T) {
+	rec := dashV2(t, "/v2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("content-type = %q", ct)
+	}
+	body := rec.Body.String()
+	for _, ph := range []string{"%%API_BASE%%", "%%API_KEY%%", "%%PROVIDER_ID%%", "%%SETUP_HINT%%"} {
+		if strings.Contains(body, ph) {
+			t.Errorf("placeholder %s not substituted", ph)
+		}
+	}
+	for _, want := range []string{
+		`apiBase: "https://llm.example"`,
+		`providerId: "llm"`,
+		`apiKey: "pat_…"`,
+		// The multi-line hint lands as one JSON string literal.
+		`setupHint: "line one\n\"quoted\" line two"`,
+		`type="module" src="/static/app.js"`,
+		`href="/static/dashboard.css"`,
+		`id="tab-root"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
+	}
+	if strings.Contains(body, "sk-") {
+		t.Errorf("shell must not carry a key")
+	}
+}
+
+func TestDashboardV2_StaticServing(t *testing.T) {
+	cases := []struct {
+		path   string
+		status int
+		ct     string
+		body   string
+	}{
+		{"/static/app.js", 200, "text/javascript", "export function parseHash"},
+		{"/static/dashboard.css", 200, "text/css", ".tabs a.active"},
+		{"/static/lib/fmt.js", 200, "text/javascript", "export function escHtml"},
+		{"/static/lib/api.js", 200, "text/javascript", "sse("},
+		{"/static/tabs/activity.js", 200, "text/javascript", `id: "activity"`},
+		{"/static/tabs/fleet.js", 200, "text/javascript", `id: "fleet"`},
+		{"/static/tabs/catalog.js", 200, "text/javascript", `id: "catalog"`},
+		{"/static/tabs/traffic.js", 200, "text/javascript", `id: "traffic"`},
+		{"/static/tabs/connect.js", 200, "text/javascript", `id: "connect"`},
+		{"/static/nope.js", 404, "", ""},
+		{"/static/index.html", 404, "", ""},
+		{"/static/", 404, "", ""},
+		{"/static/lib/", 404, "", ""},
+		{"/static/lib", 404, "", ""},
+	}
+	for _, tc := range cases {
+		rec := dashV2(t, tc.path)
+		if rec.Code != tc.status {
+			t.Errorf("%s: status = %d, want %d", tc.path, rec.Code, tc.status)
+			continue
+		}
+		if tc.status != 200 {
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, tc.ct) {
+			t.Errorf("%s: content-type = %q, want %s", tc.path, ct, tc.ct)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Errorf("%s: cache-control = %q", tc.path, cc)
+		}
+		if !strings.Contains(rec.Body.String(), tc.body) {
+			t.Errorf("%s: body missing %q", tc.path, tc.body)
+		}
+	}
+	// Path traversal: the mux cleans the path (a 301 to the cleaned form or a
+	// 404), and nothing outside the embedded tree is reachable either way.
+	rec := dashV2(t, "/static/../dashboard.go")
+	if rec.Code == 200 {
+		t.Errorf("traversal must not serve a file: %d", rec.Code)
+	}
+}
+
+// Every file under the embedded tree is reachable through /static/ — a new
+// module that is not served is the most likely way to break the shell.
+func TestDashboardV2_EveryEmbeddedFileServed(t *testing.T) {
+	sub, err := fs.Sub(dashboardV2, "dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	err = fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || p == "index.html" {
+			return err
+		}
+		n++
+		if rec := dashV2(t, "/static/"+p); rec.Code != 200 {
+			t.Errorf("/static/%s: %d", p, rec.Code)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 8 {
+		t.Errorf("expected at least 8 embedded assets, walked %d", n)
 	}
 }
