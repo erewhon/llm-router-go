@@ -94,7 +94,7 @@ Useful flags (all optional):
 | `-addr :4010` | Listen address (default `:4015`). |
 | `-api-keys sk-abc,sk-def` | Require a bearer token on `/v1/*`. Omit to allow any local caller (also settable via `$ROUTER_API_KEYS`). |
 | `-log-format text` | Human-readable logs instead of JSON. |
-| `-mode big` | Filter to models tagged `mode:big` (plus untagged). |
+| `-mode <tag>` | Filter to models tagged `mode:<tag>` (plus untagged). |
 | `-version` | Print version and exit. |
 
 The Postgres request log and tool proxy stay off unless you pass

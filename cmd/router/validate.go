@@ -79,7 +79,7 @@ type modeReport struct {
 // live /v1/models WITHOUT reimplementing the mode-tag rule. That rule lives in
 // ModelsForMode/RolesForMode and nowhere else; a shell or Python
 // reimplementation would drift, and the first symptom would be false failures
-// for every mode:big entry (the router units bake --mode=default).
+// for every entry tagged with another mode (the router units bake --mode=default).
 type expectedSet struct {
 	Models []string `json:"models"` // ids + aliases, i.e. every routable name
 	Roles  []string `json:"roles"`

@@ -145,7 +145,7 @@ func run(args []string) int {
 		// config by watching production fail to come back.
 		validate       = fs.Bool("validate", false, "validate --models-yaml and exit; does not serve")
 		validateFormat = fs.String("validate-format", "text", "with --validate: output format, text or json")
-		validateModes  = fs.String("validate-mode", "default,big", "with --validate: comma-separated modes to lint")
+		validateModes  = fs.String("validate-mode", "default", "with --validate: comma-separated modes to lint (every mode:<tag> the file uses, plus default)")
 		validateStrict = fs.Bool("validate-strict", false, "with --validate: treat every lint warning as a failure")
 		validateBlock  = fs.String("validate-block", "", "with --validate: comma-separated lint codes promoted to failures (e.g. enabled-port-collision)")
 		validateLive   = fs.Bool("validate-live", false, "with --validate: also fetch every upstream base's /v1/models and report hand-written entries the provider no longer lists (not-listed), unreachable bases, and ids a discovery source would adopt (discovered-model, informational)")
