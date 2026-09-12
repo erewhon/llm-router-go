@@ -7,6 +7,7 @@
 // a live Activity view".
 import { api } from "/static/lib/api.js";
 import * as fmt from "/static/lib/fmt.js";
+import * as dialogs from "/static/lib/dialogs.js"; // installs window.dashDialogs + binds the dialogs
 import activity from "/static/tabs/activity.js";
 import fleet from "/static/tabs/fleet.js";
 import catalog from "/static/tabs/catalog.js";
@@ -69,8 +70,7 @@ export function parseHash() {
 function renderNav(activeId) {
   const nav = document.getElementById("tabs");
   nav.innerHTML = TABS.map(
-    (t) =>
-      `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
+    (t) => `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
   ).join("");
 }
 
@@ -106,25 +106,9 @@ window.addEventListener("hashchange", () => {
   switchTo(id, current !== null && current.id === id);
 });
 
-// Header buttons: lib/dialogs.js (Connect leaf) installs window.dashDialogs.
-function dialogButton(btnId, fnName, what) {
-  document.getElementById(btnId).addEventListener("click", () => {
-    const d = window.dashDialogs;
-    if (d && typeof d[fnName] === "function") return d[fnName]();
-    alert(`${what} is on the Connect tab — not wired into the new shell yet.`);
-  });
-}
-dialogButton("btnTokens", "openTokens", "Tokens");
-dialogButton("btnChat", "openChat", "Chat");
-for (const [btn, fn] of [
-  ["chatClose", "closeChat"],
-  ["tokClose", "closeTokens"],
-  ["chatSend", "sendChat"],
-  ["chatStop", "stopChat"],
-]) {
-  const el = document.getElementById(btn);
-  if (el) el.addEventListener("click", () => window.dashDialogs?.[fn]?.());
-}
+// Header buttons open the dialogs from every tab.
+document.getElementById("btnTokens").addEventListener("click", () => dialogs.openTokens());
+document.getElementById("btnChat").addEventListener("click", () => dialogs.openChat());
 
 // Header strip: until /api/overview lands (its own leaf) derive the strip
 // from /api/models so the shell is useful on day one.
@@ -140,18 +124,13 @@ async function refreshStrip() {
     const discovered = models.filter((m) => m.discovered).length;
     const roles = d.roles || [];
     const bound = roles.filter((r) => r.available).length;
-    const tile = (v, label, cls = "") =>
-      `<div class="stat"><div class="stat-value ${cls}">${v}</div><div class="stat-label">${label}</div></div>`;
+    const tile = (v, label, cls = "") => `<div class="stat"><div class="stat-value ${cls}">${v}</div><div class="stat-label">${label}</div></div>`;
     let modelsV = `${up}<span style="color:var(--text-dim);font-size:0.8rem">/${enabled.length}</span>`;
     if (warming) modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${warming} warming</span>`;
     if (absent) modelsV += ` <span style="color:var(--red);font-size:0.8rem">${absent} absent</span>`;
     el.innerHTML =
       tile(modelsV, "models up") +
-      tile(
-        `${bound}<span style="color:var(--text-dim);font-size:0.8rem">/${roles.length}</span>`,
-        "roles bound",
-        bound < roles.length ? "" : "",
-      ) +
+      tile(`${bound}<span style="color:var(--text-dim);font-size:0.8rem">/${roles.length}</span>`, "roles bound", bound < roles.length ? "" : "") +
       (discovered ? tile(discovered, "discovered") : "") +
       tile(d.node_count ?? "?", "nodes");
   } catch (e) {

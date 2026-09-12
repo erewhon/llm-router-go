@@ -2,10 +2,7 @@
 // from the legacy single-file dashboard (2026-09-12); behaviour unchanged.
 
 export function escHtml(s) {
-  return String(s ?? "").replace(
-    /[&<>"']/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
-  );
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 export function fmtAgoIso(iso) {
@@ -155,8 +152,7 @@ export function modelType(m) {
       badge: "badge-stt",
     };
   if (tags.includes("tts")) return { label: "tts", badge: "badge-tts" };
-  if (tags.includes("image_gen") || tags.includes("image_edit"))
-    return { label: "image", badge: "badge-image" };
+  if (tags.includes("image_gen") || tags.includes("image_edit")) return { label: "image", badge: "badge-image" };
   if (tags.includes("music_gen")) return { label: "music", badge: "badge-music" };
   if (tags.includes("gui_agent")) return { label: "gui-agent", badge: "badge-router" };
   return { label: engineLabel(m), badge: "badge-backend" };
@@ -176,16 +172,7 @@ export function isCloudModel(m) {
 export function chatCapable(m) {
   const tags = m.tags || [];
   if (m.enabled === false) return false;
-  for (const t of [
-    "embedding",
-    "reranker",
-    "stt",
-    "tts",
-    "image_gen",
-    "image_edit",
-    "music_gen",
-    "gui_agent",
-  ]) {
+  for (const t of ["embedding", "reranker", "stt", "tts", "image_gen", "image_edit", "music_gen"]) {
     if (tags.includes(t)) return false;
   }
   return true;
