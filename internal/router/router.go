@@ -86,6 +86,9 @@ type Router struct {
 	// reqRate counts requests over the last minute for the dashboard's
 	// header strip. Never nil.
 	reqRate *reqRateWindow
+	// events is the started/finished feed behind the dashboard's Activity
+	// view (events.go). Never nil.
+	events *Broker
 }
 
 // Option configures a Router at construction time.
@@ -189,6 +192,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		upstreamStats: newUpstreamTracker(),
 		avail:         alwaysRoutable{},
 		reqRate:       newReqRateWindow(),
+		events:        newBroker(DefaultEventRing),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -355,6 +359,19 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			rt.sink.Log(lr)
 			rt.metrics.Observe(lr)
 			rt.reqRate.hit(time.Now())
+			ev := Event{
+				Type: EventFinished, RequestID: lr.RequestID, TS: time.Now(),
+				Principal: lr.Principal, Model: lr.Model, Stream: lr.Stream,
+				Status: lr.Status, LatencyMS: lr.LatencyMS,
+				PromptTokens: lr.PromptTokens, CompletionTokens: lr.CompletionTokens,
+				FailoverFrom: lr.FailoverFrom, Overflowed: lr.RoleOverflowed,
+				PrivacyTolerance: lr.PrivacyTolerance, ErrorClass: lr.ErrorClass,
+				UpstreamProvider: lr.UpstreamProvider,
+			}
+			if resolved != nil {
+				rt.eventPlacement(&ev, *resolved)
+			}
+			rt.events.Publish(ev)
 		}()
 
 		body, err := io.ReadAll(r.Body)
@@ -455,6 +472,17 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				"model", model, "got", string(res.APIClass), "want", string(requireClass), "path", r.URL.Path)
 			http.Error(rec, errMsg, http.StatusBadRequest)
 			return
+		}
+
+		// Live feed: the request has a target now. Stream is read from the
+		// body rather than the response (which has not started).
+		{
+			stream, _ := bodyMap["stream"].(bool)
+			principal, _ := auth.PrincipalFromContext(r.Context())
+			ev := Event{Type: EventStarted, RequestID: httpx.RequestIDFromContext(r.Context()), TS: time.Now(),
+				Principal: principal, Model: model, Stream: stream}
+			rt.eventPlacement(&ev, res)
+			rt.events.Publish(ev)
 		}
 
 		// E2: a "<model>-<egress>" alias resolves to a tool-proxy model plus an
@@ -574,6 +602,14 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			failoverFrom = res.ModelID
 			res = next
 			resolved = &res
+			{
+				stream, _ := bodyMap["stream"].(bool)
+				principal, _ := auth.PrincipalFromContext(r.Context())
+				ev := Event{Type: EventStarted, RequestID: httpx.RequestIDFromContext(r.Context()), TS: time.Now(),
+					Principal: principal, Model: model, Stream: stream, FailoverFrom: failoverFrom}
+				rt.eventPlacement(&ev, res)
+				rt.events.Publish(ev)
+			}
 			// A retry starts a fresh response: drop whatever the failed attempt
 			// left in the capture so usage isn't attributed to the wrong model.
 			*cap = responseCapture{}
