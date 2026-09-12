@@ -99,8 +99,11 @@ function switchTo(id, force = false) {
 }
 
 window.addEventListener("hashchange", () => {
+  // Same tab, different query (#catalog?node=x while on Catalog): re-mount so
+  // the tab re-reads its state from the hash. Tabs write their own state
+  // with history.replaceState, which fires no hashchange, so no loop.
   const { id } = parseHash();
-  switchTo(id);
+  switchTo(id, current !== null && current.id === id);
 });
 
 // Header buttons: lib/dialogs.js (Connect leaf) installs window.dashDialogs.
