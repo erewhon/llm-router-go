@@ -197,24 +197,31 @@ func TestDashboard_ServesHTMLWithSubstitutions(t *testing.T) {
 			t.Errorf("template placeholder %s not substituted", ph)
 		}
 	}
-	if !strings.Contains(body, "https://llm.example") {
-		t.Errorf("API base not substituted into HTML")
+	// The shell carries the config for the tabs; the Connect tab renders the
+	// PAT instructions from it at runtime.
+	for _, want := range []string{`apiBase: "https://llm.example"`, `providerId: "llm"`, `apiKey: "pat_…"`, `type="module" src="/static/app.js"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
 	}
-	// No key is ever rendered: the Connection card points at the Tokens
-	// dialog, and the curl example carries a neutral pat_ hint.
-	if !strings.Contains(body, "pat_") || !strings.Contains(body, "openTokens()") {
-		t.Errorf("expected PAT instructions in the served HTML")
+	if !strings.Contains(body, "dash.example") {
+		t.Errorf("expected the setup hint (with its setup URL) in the served HTML")
 	}
 	if strings.Contains(body, "<api-key>") || strings.Contains(body, "sk-") {
 		t.Errorf("served HTML must not carry a key or the old placeholder")
 	}
-	if !strings.Contains(body, "const providerId = 'llm'") {
-		t.Errorf("provider id not substituted for the OpenCode /connect line")
+}
+
+// /v2 was the shell's address during the move; it now redirects home.
+func TestDashboard_V2Redirects(t *testing.T) {
+	rec := dashV2(t, "/v2")
+	if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/" {
+		t.Errorf("GET /v2 = %d %q, want 301 to /", rec.Code, rec.Header().Get("Location"))
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard v2 shell: /v2 + /static/ (the legacy / stays until the flip)
+// Dashboard shell: / + /static/
 // ---------------------------------------------------------------------------
 
 func dashV2(t *testing.T, path string) *httptest.ResponseRecorder {
@@ -230,7 +237,7 @@ func dashV2(t *testing.T, path string) *httptest.ResponseRecorder {
 }
 
 func TestDashboardV2_ShellSubstitutedAndModular(t *testing.T) {
-	rec := dashV2(t, "/v2")
+	rec := dashV2(t, "/")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}

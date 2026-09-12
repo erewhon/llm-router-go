@@ -15,7 +15,9 @@ import traffic from "/static/tabs/traffic.js";
 import connect from "/static/tabs/connect.js";
 
 const TABS = [activity, fleet, catalog, traffic, connect];
-const DEFAULT_TAB = "activity";
+// Fleet until the Activity view lands (its leaf makes #activity the default):
+// an empty placeholder is the wrong first thing to see behind the front door.
+const DEFAULT_TAB = "fleet";
 
 // poll(fn, ms): run fn now and every ms while the owning tab is mounted and
 // the page is visible. Returns a stop function. Every tab's unmount must
@@ -70,7 +72,8 @@ export function parseHash() {
 function renderNav(activeId) {
   const nav = document.getElementById("tabs");
   nav.innerHTML = TABS.map(
-    (t) => `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
+    (t) =>
+      `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
   ).join("");
 }
 
@@ -124,13 +127,18 @@ async function refreshStrip() {
     const discovered = models.filter((m) => m.discovered).length;
     const roles = d.roles || [];
     const bound = roles.filter((r) => r.available).length;
-    const tile = (v, label, cls = "") => `<div class="stat"><div class="stat-value ${cls}">${v}</div><div class="stat-label">${label}</div></div>`;
+    const tile = (v, label, cls = "") =>
+      `<div class="stat"><div class="stat-value ${cls}">${v}</div><div class="stat-label">${label}</div></div>`;
     let modelsV = `${up}<span style="color:var(--text-dim);font-size:0.8rem">/${enabled.length}</span>`;
     if (warming) modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${warming} warming</span>`;
     if (absent) modelsV += ` <span style="color:var(--red);font-size:0.8rem">${absent} absent</span>`;
     el.innerHTML =
       tile(modelsV, "models up") +
-      tile(`${bound}<span style="color:var(--text-dim);font-size:0.8rem">/${roles.length}</span>`, "roles bound", bound < roles.length ? "" : "") +
+      tile(
+        `${bound}<span style="color:var(--text-dim);font-size:0.8rem">/${roles.length}</span>`,
+        "roles bound",
+        bound < roles.length ? "" : "",
+      ) +
       (discovered ? tile(discovered, "discovered") : "") +
       tile(d.node_count ?? "?", "nodes");
   } catch (e) {
