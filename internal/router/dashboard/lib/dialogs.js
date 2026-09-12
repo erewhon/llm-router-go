@@ -1,8 +1,9 @@
-// The Tokens and Chat dialogs. Their <dialog> markup lives in index.html so
-// the header buttons work from every tab; this module owns their behaviour.
-// Ported from the legacy single-file dashboard on 2026-09-12. Importing it
-// installs window.dashDialogs = {openTokens, closeTokens, openChat,
-// closeChat, sendChat, stopChat} and binds the dialogs' own buttons.
+// The Tokens section and the Chat dialog. Chat's <dialog> markup lives in
+// index.html so the header button works from every tab; Tokens render into
+// the Connect tab's #tokBody (openTokens navigates there). Ported from the
+// legacy single-file dashboard on 2026-09-12. Importing it installs
+// window.dashDialogs = {openTokens, openChat, closeChat, sendChat, stopChat}
+// and binds the controls by delegation.
 import { escHtml, fmtAgoIso, copyText, chatCapable } from "/static/lib/fmt.js";
 
 const cfg = () => window.DASH_CONFIG || {};
@@ -21,17 +22,14 @@ const SCOPE_LABEL = {
   "models:*": "unrestricted — any model, including paid providers",
 };
 
-export async function openTokens() {
-  $("tokDialog").showModal();
-  await loadTokens();
-}
-
-export function closeTokens() {
-  $("tokDialog").close();
+// openTokens takes the reader to the Tokens section of the Connect tab.
+export function openTokens() {
+  location.hash = "#connect?tokens=1";
 }
 
 export async function loadTokens(reveal) {
   const body = $("tokBody");
+  if (!body) return; // the Connect tab is not mounted
   try {
     const r = await fetch("/api/tokens", { cache: "no-store" });
     const d = await r.json().catch(() => ({}));
@@ -50,6 +48,7 @@ export async function loadTokens(reveal) {
 
 export function renderTokens(reveal, err) {
   const d = tokState;
+  if (!$("tokBody")) return;
   $("tokWho").textContent = d.principal + (d.owner ? " · owner" : "");
   const allowed = d.allowed_scopes || ["models:local"];
   const defaultScope = allowed.includes("models:local") ? "models:local" : allowed[allowed.length - 1];
@@ -143,29 +142,67 @@ export async function revokeToken(id, label) {
 // ---------------------------------------------------------------------------
 let chatAbort = null;
 
-export async function openChat() {
+// State glyph for a picker option: <option> cannot carry a coloured dot,
+// so the verdict rides as a prefix.
+function stateGlyph(m) {
+  switch (m.availability) {
+    case "warming":
+      return "◐ ";
+    case "absent":
+    case "unavailable":
+      return "✕ ";
+    default:
+      return m.agent_state === "stopped" ? "○ " : "● ";
+  }
+}
+
+// openChat({model}) opens the dialog with a grouped picker: roles first,
+// then local seats, then providers, then discovered. The picker reads the
+// catalog and the fleet itself so it works from any tab.
+export async function openChat(opts = {}) {
   const sel = $("chatModel");
   sel.innerHTML = '<option value="">(model list loading…)</option>';
   $("chatDialog").showModal();
   $("chatInput").focus();
-  // The picker reads the catalog itself so it works from any tab.
-  let models = [];
+  let models = [],
+    roles = [];
   try {
-    const d = await fetch("/api/catalog", { cache: "no-store" }).then((r) => r.json());
-    models = (d.models || []).filter(chatCapable);
+    const [c, f] = await Promise.all([
+      fetch("/api/catalog", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/fleet", { cache: "no-store" })
+        .then((r) => r.json())
+        .catch(() => ({})),
+    ]);
+    models = (c.models || []).filter(chatCapable);
+    roles = f.roles || [];
   } catch (_) {
     /* leave the placeholder */
   }
-  sel.innerHTML = models.length
-    ? models
-        .map((m) => {
-          const where = m.head_node ? " · " + m.head_node : m.backend === "external" ? " · external" : "";
-          return `<option value="${escHtml(m.id)}">${escHtml(m.id + where)}</option>`;
-        })
-        .join("")
-    : '<option value="">(no chat-capable models)</option>';
-  const prev = localStorage.getItem("chatModel");
-  if (prev && models.some((m) => m.id === prev)) sel.value = prev;
+  const group = (label, items) => (items.length ? `<optgroup label="${escHtml(label)}">${items.join("")}</optgroup>` : "");
+  const opt = (value, label) => `<option value="${escHtml(value)}">${escHtml(label)}</option>`;
+  const local = models.filter((m) => (m.nodes || []).length);
+  const providers = models.filter((m) => !(m.nodes || []).length && m.backend === "external" && !m.discovered);
+  const discovered = models.filter((m) => m.discovered);
+  const html =
+    group(
+      "roles",
+      roles.map((r) => opt(r.role, `${r.available ? "● " : "✕ "}${r.role}${r.target ? " → " + r.target : ""}`)),
+    ) +
+    group(
+      "local seats",
+      local.map((m) => opt(m.id, `${stateGlyph(m)}${m.id} · ${m.head_node || m.nodes[0]}`)),
+    ) +
+    group(
+      "providers",
+      providers.map((m) => opt(m.id, `${stateGlyph(m)}${m.id}`)),
+    ) +
+    group(
+      "discovered",
+      discovered.map((m) => opt(m.id, `${stateGlyph(m)}${m.id}`)),
+    );
+  sel.innerHTML = html || '<option value="">(no chat-capable models)</option>';
+  const want = opts.model || localStorage.getItem("chatModel");
+  if (want && sel.querySelector(`option[value="${CSS.escape(want)}"]`)) sel.value = want;
 }
 
 export function closeChat() {
@@ -319,12 +356,13 @@ function bind() {
   $("chatClose")?.addEventListener("click", closeChat);
   $("chatSend")?.addEventListener("click", sendChat);
   $("chatStop")?.addEventListener("click", stopChat);
-  $("tokClose")?.addEventListener("click", closeTokens);
-  $("tokBody")?.addEventListener("submit", (ev) => {
+  // Tokens controls are delegated on the document: the section is
+  // re-rendered by the Connect tab and by every list refresh.
+  document.addEventListener("submit", (ev) => {
     if (ev.target.id === "tokForm") mintToken(ev);
   });
-  $("tokBody")?.addEventListener("click", (ev) => {
-    const b = ev.target.closest("button[data-action]");
+  document.addEventListener("click", (ev) => {
+    const b = ev.target.closest("#tokBody button[data-action]");
     if (!b) return;
     if (b.dataset.action === "revoke") revokeToken(b.dataset.id, b.dataset.label);
     if (b.dataset.action === "copy-secret") copyText($("tokSecret").textContent, b);
@@ -338,4 +376,4 @@ function bind() {
   });
 }
 bind();
-window.dashDialogs = { openTokens, closeTokens, openChat, closeChat, sendChat, stopChat };
+window.dashDialogs = { openTokens, loadTokens, openChat, closeChat, sendChat, stopChat };

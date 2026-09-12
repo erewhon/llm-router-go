@@ -34,9 +34,8 @@
 
   <main id="tab-root"><p class="loading">Loading&#8230;</p></main>
 
-  <!-- Dialog markup lives here so the header buttons work from every tab.
-       The Connect leaf wires lib/dialogs.js to these ids; until then the
-       buttons show a placeholder. -->
+  <!-- The Chat dialog lives here so the header button works from every tab
+       (lib/dialogs.js). Tokens are a section of the Connect tab. -->
   <dialog id="chatDialog" class="chat-dialog">
     <div class="chat-head">
       <strong>Quick Chat</strong>
@@ -52,14 +51,6 @@
     </div>
   </dialog>
 
-  <dialog id="tokDialog" class="chat-dialog">
-    <div class="chat-head">
-      <strong>Access tokens</strong>
-      <span id="tokWho" class="tok-who"></span>
-      <button class="chat-x" id="tokClose" title="Close">&#10005;</button>
-    </div>
-    <div id="tokBody" class="tok-body"><p class="chat-placeholder">Loading&#8230;</p></div>
-  </dialog>
 
   <script type="module" src="/static/app.js"></script>
 </body>

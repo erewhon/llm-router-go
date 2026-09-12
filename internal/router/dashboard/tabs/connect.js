@@ -1,8 +1,8 @@
-// Connect tab — "how do I use it, as me?" The Connection quick start and
-// example, and the Apps links. Ported from the legacy render() on
-// 2026-09-12. The Tokens and Chat dialogs stay dialogs (lib/dialogs.js,
-// opened from the header buttons on every tab); Phase 4 makes Tokens a
-// section here.
+// Connect tab — "how do I use it, as me?" Connection quick start and
+// example, Access tokens (mint / list / revoke, inline since Phase 4), and
+// the Apps links. Chat stays a dialog (lib/dialogs.js) opened from the
+// header or the "try it" button. Minting a token and making a first request
+// is one screen, top to bottom.
 let root = null;
 let ctx = null;
 
@@ -32,8 +32,9 @@ function render(models) {
             : ""
         }
         <div class="node-detail" style="margin-top:0.5rem">
-          <strong>Model:</strong> <span>use the model ID or any alias from the <a href="#catalog" style="color:var(--accent)">Catalog</a></span>
+          <strong>Model:</strong> <span>use a role (<span class="api-base">coder</span>), a model ID or any alias from the <a href="#catalog" style="color:var(--accent)">Catalog</a></span>
         </div>
+        <div style="margin-top:0.7rem"><button class="chat-open-btn" data-action="try">&#128172; try it &mdash; chat with coder</button></div>
       </div>
       <div class="node-card" style="flex:3">
         <div class="node-name">Example</div>
@@ -45,6 +46,8 @@ function render(models) {
         </div>
       </div>
     </div>
+    <div class="section-title">Access tokens <span id="tokWho" class="tok-who" style="font-weight:400;font-size:0.8rem"></span></div>
+    <div class="node-card" id="tokCard"><div id="tokBody" class="tok-body"><p class="chat-placeholder">Loading&#8230;</p></div></div>
     <div class="section-title">Apps</div>
     <div class="nodes">
       <div class="node-card" style="cursor:default; display:flex; gap:1rem; flex-wrap:wrap; align-items:center; padding:0.75rem 1.25rem">
@@ -58,11 +61,17 @@ function render(models) {
 function onClick(ev) {
   const copy = ev.target.closest("[data-copy]");
   if (copy) return ctx.fmt.copyText(copy.dataset.copy, copy);
+  if (ev.target.closest('[data-action="try"]')) return window.dashDialogs?.openChat?.({ model: "coder" });
   const tok = ev.target.closest('[data-action="tokens"]');
   if (tok) {
     ev.preventDefault();
-    window.dashDialogs?.openTokens?.();
+    root.querySelector("#tokCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+}
+
+function wantsTokens() {
+  const [, qs] = (location.hash || "").replace(/^#/, "").split("?", 2);
+  return new URLSearchParams(qs || "").get("tokens") === "1";
 }
 
 export default {
@@ -73,11 +82,19 @@ export default {
     ctx = c;
     root.innerHTML = render([]);
     root.addEventListener("click", onClick);
+    const scroll = wantsTokens();
+    const tokens = () => {
+      window.dashDialogs?.loadTokens?.();
+      if (scroll) root.querySelector("#tokCard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    tokens();
     // Only the example's model name depends on the catalog; one fetch.
     ctx.api
       .get("/api/catalog")
       .then((d) => {
-        if (root) root.innerHTML = render(d.models || []);
+        if (!root) return;
+        root.innerHTML = render(d.models || []);
+        tokens();
       })
       .catch(() => {});
   },
