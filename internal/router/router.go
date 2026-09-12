@@ -83,6 +83,9 @@ type Router struct {
 	// zero data retention account-wide. Nil when unconfigured; Status() is
 	// nil-safe so /health needs no branch.
 	zdrCanary *ZDRCanary
+	// reqRate counts requests over the last minute for the dashboard's
+	// header strip. Never nil.
+	reqRate *reqRateWindow
 }
 
 // Option configures a Router at construction time.
@@ -185,6 +188,7 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		tokStats:      newTokTracker(),
 		upstreamStats: newUpstreamTracker(),
 		avail:         alwaysRoutable{},
+		reqRate:       newReqRateWindow(),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -350,6 +354,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			}
 			rt.sink.Log(lr)
 			rt.metrics.Observe(lr)
+			rt.reqRate.hit(time.Now())
 		}()
 
 		body, err := io.ReadAll(r.Body)

@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -152,6 +153,7 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("GET /api/overview", rt.handleDashOverview)
 	mux.HandleFunc("GET /api/models", rt.handleDashModels)
 	mux.HandleFunc("GET /api/node-metrics", rt.handleDashNodeMetrics)
 	mux.HandleFunc("GET /api/router-metrics", rt.handleDashRouterMetrics)
@@ -531,6 +533,92 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 		// absent verdict and every discovered row above. Without the id
 		// lists — the card shows counts and names what is absent/adopted.
 		"inventory": rt.inventory(false),
+	})
+}
+
+// reqRateWindow is a 60-slot ring of per-second request counts, so the
+// dashboard can show requests/min without a Prometheus round-trip. hit() is
+// on the request path: one lock, two integer writes.
+type reqRateWindow struct {
+	mu    sync.Mutex
+	slots [60]int
+	stamp [60]int64 // unix second each slot currently counts
+}
+
+func newReqRateWindow() *reqRateWindow { return &reqRateWindow{} }
+
+func (w *reqRateWindow) hit(now time.Time) {
+	s := now.Unix()
+	i := int(s % 60)
+	w.mu.Lock()
+	if w.stamp[i] != s {
+		w.stamp[i] = s
+		w.slots[i] = 0
+	}
+	w.slots[i]++
+	w.mu.Unlock()
+}
+
+// perMinute returns the requests seen in the last 60 s ending at now.
+func (w *reqRateWindow) perMinute(now time.Time) int {
+	s := now.Unix()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for i := 0; i < 60; i++ {
+		if s-w.stamp[i] < 60 {
+			n += w.slots[i]
+		}
+	}
+	return n
+}
+
+// handleDashOverview is the header strip: the handful of numbers every tab
+// wants, cheap enough to poll every 10 s. No identity gate — nothing here
+// names a principal.
+func (rt *Router) handleDashOverview(w http.ResponseWriter, r *http.Request) {
+	cat, _ := rt.catalog()
+	models := map[string]int{"active": len(cat), "up": len(cat), "warming": 0, "absent": 0, "unavailable": 0, "discovered": 0}
+	for _, m := range cat {
+		if m.IsDiscovered() {
+			models["discovered"]++
+		}
+	}
+	if rep, ok := rt.avail.(availabilityReporter); ok {
+		up := 0
+		for _, s := range rep.Snapshot() {
+			if _, in := cat[s.Model]; !in {
+				continue
+			}
+			switch s.State {
+			case health.Warming:
+				models["warming"]++
+			case health.Absent:
+				models["absent"]++
+			case health.Unavailable:
+				models["unavailable"]++
+			default:
+				up++
+			}
+		}
+		models["up"] = up
+	}
+	bindings := rt.roleBindings()
+	bound := 0
+	for _, b := range bindings {
+		if b.Available {
+			bound++
+		}
+	}
+	host, _ := os.Hostname()
+	writeDashJSON(w, map[string]any{
+		"version":          rt.version,
+		"uptime_s":         time.Since(rt.started).Seconds(),
+		"mode":             rt.mode,
+		"replica":          host,
+		"models":           models,
+		"roles":            map[string]int{"total": len(bindings), "bound": bound},
+		"requests_per_min": rt.reqRate.perMinute(time.Now()),
 	})
 }
 

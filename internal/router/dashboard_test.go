@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/erewhon/llm-router-go/internal/health"
 	"github.com/erewhon/llm-router-go/internal/router/reqlog"
 )
 
@@ -341,5 +343,95 @@ func TestDashboardV2_EveryEmbeddedFileServed(t *testing.T) {
 	}
 	if n < 8 {
 		t.Errorf("expected at least 8 embedded assets, walked %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /api/overview — the header strip
+// ---------------------------------------------------------------------------
+
+// stubReporter is an availability with a canned per-model verdict, for the
+// tally tests: it implements the reporter half the dashboard reads.
+type stubReporter struct {
+	states map[string]health.Availability
+}
+
+func (s stubReporter) Routable(id string) bool {
+	st := s.states[id]
+	return st != health.Unavailable && st != health.Warming && st != health.Absent
+}
+func (s stubReporter) Reason(id string) string           { return string(s.states[id]) }
+func (s stubReporter) ReportFailure(string, error)       {}
+func (s stubReporter) ReportSuccess(string)              {}
+func (s stubReporter) NodeStatuses() []health.NodeStatus { return nil }
+func (s stubReporter) Snapshot() []health.Status {
+	var out []health.Status
+	for id, st := range s.states {
+		out = append(out, health.Status{Model: id, State: st})
+	}
+	return out
+}
+
+func TestDashboard_OverviewWithoutTracker(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	out := getDashJSON(t, rt, "/api/overview")
+	models := out["models"].(map[string]any)
+	if int(models["active"].(float64)) != len(rt.active) || int(models["up"].(float64)) != len(rt.active) {
+		t.Errorf("active/up = %v/%v, want %d/%d", models["active"], models["up"], len(rt.active), len(rt.active))
+	}
+	for _, k := range []string{"warming", "absent", "unavailable", "discovered"} {
+		if models[k].(float64) != 0 {
+			t.Errorf("%s = %v, want 0 without a tracker", k, models[k])
+		}
+	}
+	roles := out["roles"].(map[string]any)
+	if int(roles["total"].(float64)) != len(rt.RoleNames()) {
+		t.Errorf("roles.total = %v, want %d", roles["total"], len(rt.RoleNames()))
+	}
+	if out["version"] != "dev" || out["replica"] == "" || out["uptime_s"].(float64) < 0 {
+		t.Errorf("identity fields: %v %v %v", out["version"], out["replica"], out["uptime_s"])
+	}
+}
+
+func TestDashboard_OverviewTalliesTrackerVerdicts(t *testing.T) {
+	rt := newTestRouter(t, nil, WithAvailability(stubReporter{states: map[string]health.Availability{
+		"nemotron-3-super": health.Available,
+		"qwen36-hypatia":   health.Warming,
+		"zen-glm":          health.Absent,
+		"zen-lit":          health.Unavailable,
+		"not-in-catalog":   health.Absent, // ignored: not an active model
+	}}))
+	out := getDashJSON(t, rt, "/api/overview")
+	models := out["models"].(map[string]any)
+	want := map[string]int{"warming": 1, "absent": 1, "unavailable": 1, "up": 1}
+	for k, v := range want {
+		if int(models[k].(float64)) != v {
+			t.Errorf("%s = %v, want %d", k, models[k], v)
+		}
+	}
+}
+
+func TestDashboard_OverviewRequestsPerMinute(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	for i := 0; i < 3; i++ {
+		postChat(t, rt, `{"model":"no-such-model","messages":[]}`) // 404s still count as requests
+	}
+	out := getDashJSON(t, rt, "/api/overview")
+	if got := int(out["requests_per_min"].(float64)); got < 3 {
+		t.Errorf("requests_per_min = %d, want >= 3", got)
+	}
+	// The window forgets: slots older than 60 s do not count.
+	w := newReqRateWindow()
+	base := time.Unix(1_000_000, 0)
+	w.hit(base)
+	w.hit(base.Add(30 * time.Second))
+	if n := w.perMinute(base.Add(59 * time.Second)); n != 2 {
+		t.Errorf("perMinute at +59s = %d, want 2", n)
+	}
+	if n := w.perMinute(base.Add(61 * time.Second)); n != 1 {
+		t.Errorf("perMinute at +61s = %d, want 1 (first hit aged out)", n)
+	}
+	if n := w.perMinute(base.Add(200 * time.Second)); n != 0 {
+		t.Errorf("perMinute at +200s = %d, want 0", n)
 	}
 }

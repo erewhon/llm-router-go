@@ -113,34 +113,33 @@ window.addEventListener("hashchange", () => {
 document.getElementById("btnTokens").addEventListener("click", () => dialogs.openTokens());
 document.getElementById("btnChat").addEventListener("click", () => dialogs.openChat());
 
-// Header strip: until /api/overview lands (its own leaf) derive the strip
-// from /api/models so the shell is useful on day one.
+// Header strip from /api/overview every 10 s, regardless of tab: the one
+// poll that is not per-tab.
 async function refreshStrip() {
   const el = document.getElementById("strip");
   try {
-    const d = await api.get("/api/models");
-    const models = d.models || [];
-    const enabled = models.filter((m) => m.enabled !== false);
-    const up = enabled.filter((m) => (m.availability ? m.availability === "available" : true)).length;
-    const warming = enabled.filter((m) => m.availability === "warming").length;
-    const absent = enabled.filter((m) => m.availability === "absent").length;
-    const discovered = models.filter((m) => m.discovered).length;
-    const roles = d.roles || [];
-    const bound = roles.filter((r) => r.available).length;
-    const tile = (v, label, cls = "") =>
-      `<div class="stat"><div class="stat-value ${cls}">${v}</div><div class="stat-label">${label}</div></div>`;
-    let modelsV = `${up}<span style="color:var(--text-dim);font-size:0.8rem">/${enabled.length}</span>`;
-    if (warming) modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${warming} warming</span>`;
-    if (absent) modelsV += ` <span style="color:var(--red);font-size:0.8rem">${absent} absent</span>`;
+    const d = await api.get("/api/overview");
+    const m = d.models || {};
+    const r = d.roles || {};
+    const dim = (s) => `<span style="color:var(--text-dim);font-size:0.8rem">${s}</span>`;
+    const tile = (v, label) =>
+      `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
+    let modelsV = `${m.up ?? "?"}${dim(`/${m.active ?? "?"}`)}`;
+    if (m.warming)
+      modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${m.warming} warming</span>`;
+    if (m.absent) modelsV += ` <span style="color:var(--red);font-size:0.8rem">${m.absent} absent</span>`;
+    if (m.unavailable)
+      modelsV += ` <span style="color:var(--text-dim);font-size:0.8rem">${m.unavailable} down</span>`;
+    const rolesV = `<span${r.bound < r.total ? ' style="color:var(--red)"' : ""}>${r.bound ?? "?"}</span>${dim(`/${r.total ?? "?"}`)}`;
     el.innerHTML =
       tile(modelsV, "models up") +
+      tile(rolesV, "roles bound") +
+      (m.discovered ? tile(m.discovered, "discovered") : "") +
+      tile(d.requests_per_min ?? 0, "req / min") +
       tile(
-        `${bound}<span style="color:var(--text-dim);font-size:0.8rem">/${roles.length}</span>`,
-        "roles bound",
-        bound < roles.length ? "" : "",
-      ) +
-      (discovered ? tile(discovered, "discovered") : "") +
-      tile(d.node_count ?? "?", "nodes");
+        `${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(d.replica || "")} · up ${fmt.fmtUptime(d.uptime_s)}`)}`,
+        "router",
+      );
   } catch (e) {
     el.innerHTML = `<div class="stat"><div class="stat-value" style="color:var(--red)">—</div><div class="stat-label">${fmt.escHtml(String(e))}</div></div>`;
   }
@@ -148,6 +147,6 @@ async function refreshStrip() {
 refreshStrip();
 setInterval(() => {
   if (document.visibilityState === "visible") refreshStrip();
-}, 30000);
+}, 10000);
 
 switchTo(parseHash().id);
