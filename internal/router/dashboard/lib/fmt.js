@@ -177,3 +177,61 @@ export function chatCapable(m) {
   }
   return true;
 }
+
+// barChartSvg draws stacked bars: series = [{key, values: [n...], color}],
+// one bar per index. Returns SVG markup sized to the container width; the
+// caller wraps it. valueFmt formats the axis maximum. Palette cycles through
+// the dashboard's accent colours so the same key keeps its colour across
+// the three charts on a tab (pass the same series order).
+export const SERIES_COLORS = [
+  "#6c8cff",
+  "#4ade80",
+  "#fbbf24",
+  "#fb923c",
+  "#f87171",
+  "#a78bfa",
+  "#34d399",
+  "#f472b6",
+  "#60a5fa",
+  "#facc15",
+  "#c084fc",
+  "#2dd4bf",
+  "#8b8fa3",
+];
+
+export function barChartSvg(series, opts = {}) {
+  const w = opts.width || 900,
+    h = opts.height || 140,
+    pad = { l: 44, r: 8, t: 8, b: 18 };
+  const n = Math.max(...series.map((s) => s.values.length), 0);
+  if (!n)
+    return `<svg width="100%" viewBox="0 0 ${w} ${h}"><text x="${w / 2}" y="${h / 2}" text-anchor="middle" fill="var(--text-dim)" font-size="12">no data</text></svg>`;
+  const totals = Array.from({ length: n }, (_, i) => series.reduce((a, s) => a + (s.values[i] || 0), 0));
+  const max = Math.max(1, ...totals);
+  const iw = w - pad.l - pad.r,
+    ih = h - pad.t - pad.b;
+  const bw = Math.max(1, iw / n - 1);
+  let out = `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block">`;
+  // gridlines + axis labels
+  for (const f of [0.5, 1]) {
+    const y = pad.t + ih - ih * f;
+    out += `<line x1="${pad.l}" y1="${y}" x2="${w - pad.r}" y2="${y}" stroke="var(--border)" stroke-width="1"/><text x="${pad.l - 4}" y="${y + 4}" text-anchor="end" fill="var(--text-dim)" font-size="10">${(opts.valueFmt || String)(max * f)}</text>`;
+  }
+  for (let i = 0; i < n; i++) {
+    let y = pad.t + ih;
+    for (const s of series) {
+      const v = s.values[i] || 0;
+      if (v <= 0) continue;
+      const bh = (ih * v) / max;
+      y -= bh;
+      out += `<rect x="${pad.l + (i * iw) / n}" y="${y}" width="${bw}" height="${bh}" fill="${s.color}"><title>${escHtml(s.key)}: ${v}</title></rect>`;
+    }
+  }
+  if (opts.labels) {
+    const step = Math.ceil(n / 6);
+    for (let i = 0; i < n; i += step) {
+      out += `<text x="${pad.l + (i * iw) / n}" y="${h - 4}" fill="var(--text-dim)" font-size="10">${escHtml(opts.labels[i] || "")}</text>`;
+    }
+  }
+  return out + `</svg>`;
+}
