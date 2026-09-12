@@ -130,11 +130,13 @@ export function placeEvent(topo, e) {
   const router = e.role || (e.chain ? "direct" : "direct");
   if (e.node) return { router, node: e.node, seat: e.resolved_via };
   const m = topo.modelById[e.resolved_via];
-  if (m && m.api_base) return { router, provider: providerKey(m.api_base) };
+  // An external lands on its model row inside the provider card, exactly as
+  // a local request lands on its seat; the card is only the fallback.
+  if (m && m.api_base) return { router, provider: providerKey(m.api_base), seat: m.id };
   if (e.provider) {
     // Fall back to a host match when the id is unknown (a retired discovered id).
     const p = topo.providers.find((p) => p.key.startsWith(e.provider));
-    return { router, provider: p ? p.key : e.provider };
+    return { router, provider: p ? p.key : e.provider, seat: e.resolved_via };
   }
   return { router };
 }
@@ -274,14 +276,20 @@ function layoutStatic() {
   g += `<text x="${COL.provider + PROV_W / 2}" y="22" class="act-col" text-anchor="middle">providers</text>`;
   for (const p of provBoxes) {
     const x = COL.provider;
-    positions[`provider:${p.key}`] = { x: x + PROV_W / 2, y: p.y + 20 };
+    positions[`provider:${p.key}`] = { x: x + 20, y: p.y + 16 };
     g += `<g class="act-provider" data-provider="${esc(p.key)}"><rect x="${x}" y="${p.y}" width="${PROV_W}" height="${p.h}" rx="8"/><text x="${x + 12}" y="${p.y + 20}" class="act-node-name">${esc(p.key)}</text><text x="${x + 12}" y="${p.y + 38}" class="act-dim">${p.models.length} models${p.discovered ? ` · ${p.discovered} discovered` : ""}</text>`;
     p.models.slice(0, 8).forEach((m, i) => {
       const yy = p.y + 58 + i * 14;
       positions[`seat:${m.id}`] = { x: x + 20, y: yy - 4 };
       g += `<g class="act-seat" data-seat="${esc(m.id)}"><circle cx="${x + 20}" cy="${yy - 4}" r="3" style="fill:${verdictColor(m)}"/><text x="${x + 30}" y="${yy}" class="act-seat-name">${esc(m.id)}</text></g>`;
     });
-    if (p.models.length > 8) g += `<text x="${x + 30}" y="${p.y + 58 + 8 * 14}" class="act-dim">+${p.models.length - 8} more</text>`;
+    if (p.models.length > 8) {
+      // Models past the fold share the "+N more" row as their target so a
+      // request to one of them still lands inside the card at a model line.
+      const yy = p.y + 58 + 8 * 14;
+      for (const m of p.models.slice(8)) positions[`seat:${m.id}`] = { x: x + 20, y: yy - 4 };
+      g += `<text x="${x + 30}" y="${yy}" class="act-dim">+${p.models.length - 8} more</text>`;
+    }
     g += `</g>`;
   }
   staticG.innerHTML = g;
@@ -291,7 +299,7 @@ function layoutStatic() {
 function targetPos(e) {
   const pl = placeEvent(topo, e);
   const seat = pl.seat && positions[`seat:${pl.seat}`];
-  if (seat) return { pos: seat, kind: "seat", crosses: false };
+  if (seat) return { pos: seat, kind: "seat", crosses: !!pl.provider };
   if (pl.node && positions[`node:${pl.node}`]) return { pos: positions[`node:${pl.node}`], kind: "node", crosses: false };
   if (pl.provider && positions[`provider:${pl.provider}`]) return { pos: positions[`provider:${pl.provider}`], kind: "provider", crosses: true };
   return { pos: { x: COL.node - 40, y: 40 }, kind: "unknown", crosses: false };
@@ -408,7 +416,9 @@ function frame(now) {
   if (!dynG) return;
   let out = "";
   for (const [id, d] of dots) {
-    const age = now - d.t0;
+    // A dot started between a frame's timestamp and its callback has t0 in
+    // this frame's future; clamp so the path index never goes negative.
+    const age = Math.max(0, now - d.t0);
     const segs = d.path.length - 1;
     const total = segs * HOP_MS;
     const color = d.error ? "var(--red)" : d.overflow || d.crosses ? "var(--yellow)" : "var(--accent)";
