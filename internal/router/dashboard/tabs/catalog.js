@@ -30,6 +30,9 @@ let ctx = null;
 let data = null;
 let lastStateKey = "";
 const filters = { node: null, caps: new Set(), hidden: false, cloud: false };
+let openModel = null; // the drawer's model id, mirrored into #catalog?model=
+let fleetRoles = null; // /api/fleet roles, fetched when a drawer opens
+let lastFocus = null;
 
 function readHash() {
   const [, qs] = (location.hash || "").replace(/^#/, "").split("?", 2);
@@ -38,6 +41,7 @@ function readHash() {
   filters.caps = new Set((q.get("cap") || "").split(",").filter(Boolean));
   filters.hidden = q.get("hidden") === "1";
   filters.cloud = q.get("cloud") === "1";
+  openModel = q.get("model") || null;
 }
 function writeHash() {
   const q = new URLSearchParams();
@@ -45,6 +49,7 @@ function writeHash() {
   if (filters.caps.size) q.set("cap", [...filters.caps].join(","));
   if (filters.hidden) q.set("hidden", "1");
   if (filters.cloud) q.set("cloud", "1");
+  if (openModel) q.set("model", openModel);
   const s = q.toString();
   history.replaceState(null, "", `#catalog${s ? "?" + s : ""}`);
 }
@@ -140,7 +145,7 @@ function rowFor(m) {
     .join("");
   const mt = modelType(m);
   const title = m.availability_reason ? ` title="${escHtml(m.availability_reason)}"` : "";
-  return `<tr data-model="${escHtml(m.id)}"${isHidden ? ' class="disabled"' : ""}${!visible ? ' style="display:none"' : ""}>
+  return `<tr data-model="${escHtml(m.id)}" tabindex="0" class="cat-row${isHidden ? " disabled" : ""}${openModel === m.id ? " cat-row-open" : ""}"${!visible ? ' style="display:none"' : ""}>
       <td class="model-cell"><div class="model-id">${escHtml(m.id)}</div><div class="model-info">${infoRows}</div></td>
       <td><span class="badge ${mt.badge}">${escHtml(mt.label)}</span></td>
       <td>${nodeStr}</td>
@@ -151,6 +156,104 @@ function rowFor(m) {
       <td><span style="white-space:nowrap"${title}><span class="health-dot ${statusClass}"></span>${escHtml(statusLabel)}</span>${healthExtra}</td>
       <td><span class="api-base">${escHtml(m.api_base)}</span></td>
     </tr>`;
+}
+
+// ---------------------------------------------------------------------------
+// Detail drawer: everything the registry and the tracker know about one entry.
+// ---------------------------------------------------------------------------
+
+function referencesTo(id) {
+  // Chains whose fallbacks include it, and roles whose candidates/overflow do.
+  const chains = (data?.models || []).filter((m) => (m.fallbacks || []).includes(id)).map((m) => m.id);
+  const roles = [];
+  for (const r of fleetRoles || []) {
+    if ((r.candidates || []).includes(id)) roles.push(r.role);
+    else if ((r.overflow || []).includes(id)) roles.push(r.role + " (overflow)");
+  }
+  return { chains, roles };
+}
+
+function renderDrawer() {
+  const { escHtml, fmtCtx, quantLabel, modelType, fmtAgoIso } = ctx.fmt;
+  let el = root.querySelector("#cat-drawer");
+  if (!openModel) {
+    if (el) el.remove();
+    return;
+  }
+  const m = (data?.models || []).find((x) => x.id === openModel);
+  if (!el) {
+    el = document.createElement("aside");
+    el.id = "cat-drawer";
+    el.className = "cat-drawer";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "model details");
+    root.appendChild(el);
+  }
+  if (!m) {
+    el.innerHTML = `<div class="cat-drawer-head"><strong>${escHtml(openModel)}</strong><button class="chat-x" data-action="drawer-close" title="Close">&#10005;</button></div><p class="chat-placeholder">not in the catalog</p>`;
+    return;
+  }
+  const row = (k, v) =>
+    v === "" || v == null || (Array.isArray(v) && !v.length) ? "" : `<div class="mi-row"><span class="mi-label">${k}</span><span>${v}</span></div>`;
+  const badges = (xs, cls) => (xs || []).map((x) => `<span class="badge ${cls}">${escHtml(x)}</span>`).join(" ");
+  const price =
+    m.input_cost_per_million != null || m.output_cost_per_million != null
+      ? `$${m.input_cost_per_million ?? 0} in · $${m.output_cost_per_million ?? 0} out per M`
+      : "";
+  const ctxLabel = m.context_length ? fmtCtx(m.context_length) + (m.effective_context ? ` (good to ${fmtCtx(m.effective_context)})` : "") : "";
+  const refs = referencesTo(m.id);
+  let status = m.availability ? escHtml(m.availability) : m.agent_state ? escHtml(m.agent_state) : escHtml(m.health || "");
+  if (m.availability_reason) status += ` — ${escHtml(m.availability_reason)}`;
+  if (m.availability_since && !m.availability_since.startsWith("0001"))
+    status += ` <span class="act-dim">since ${fmtAgoIso(m.availability_since)}</span>`;
+  el.innerHTML = `
+    <div class="cat-drawer-head"><div><strong>${escHtml(m.id)}</strong> <span class="badge ${modelType(m).badge}">${escHtml(modelType(m).label)}</span>${m.discovered ? ' <span class="badge badge-tag">discovered</span>' : ""}</div><button class="chat-x" data-action="drawer-close" title="Close">&#10005;</button></div>
+    <div class="model-info" style="font-size:0.8rem">
+      ${row("status", status)}
+      ${row("repo", escHtml((m.hf_repo || "").split("#")[0]))}
+      ${row("file", escHtml(m.gguf_file || ""))}
+      ${row("quant", escHtml(quantLabel(m)))}
+      ${row("backend", escHtml(m.backend || ""))}
+      ${row("node(s)", (m.nodes || []).length ? escHtml(m.nodes.join(", ")) : "")}
+      ${row("api base", m.api_base ? `<span class="api-base">${escHtml(m.api_base)}</span>` : "")}
+      ${row("api class", escHtml(m.api_class || ""))}
+      ${row("context", ctxLabel)}
+      ${row("max output", m.max_output_tokens ? fmtCtx(m.max_output_tokens) : "")}
+      ${row("price", price)}
+      ${row("aliases", badges(m.aliases, "badge-alias"))}
+      ${row("capabilities", badges(m.capabilities, "badge-cap"))}
+      ${row("tags", badges(m.tags, "badge-tag"))}
+      ${row("flags", [m.enabled === false ? "disabled" : "", m.always_on ? "always-on" : "on-demand", m.tool_proxy ? "tool-proxy" : ""].filter(Boolean).join(" · "))}
+      ${row("chain of", badges(m.fallbacks, "badge-tag"))}
+      ${row("in chains", badges(refs.chains, "badge-tag"))}
+      ${row("in roles", fleetRoles ? badges(refs.roles, "badge-tool") || '<span class="act-dim">none</span>' : '<span class="act-dim">loading…</span>')}
+      ${m.discovered ? row("provenance", `adopted from the live listing at <span class="api-base">${escHtml(m.api_base || "")}</span>; no models.yaml entry`) : ""}
+    </div>`;
+}
+
+function openDrawer(id, focusEl) {
+  openModel = id;
+  lastFocus = focusEl || null;
+  writeHash();
+  render();
+  if (!fleetRoles) {
+    ctx.api
+      .get("/api/fleet")
+      .then((f) => {
+        fleetRoles = f.roles || [];
+        if (openModel) renderDrawer();
+      })
+      .catch(() => {});
+  }
+}
+function closeDrawer() {
+  if (!openModel) return;
+  const id = openModel;
+  openModel = null;
+  writeHash();
+  render();
+  const back = lastFocus && root.contains(lastFocus) ? lastFocus : root.querySelector(`tr[data-model="${CSS.escape(id)}"]`);
+  if (back) back.focus();
 }
 
 function render() {
@@ -198,9 +301,30 @@ function render() {
   const wasOpen = root.querySelector(".alias-details")?.open;
   root.innerHTML = html;
   if (wasOpen) root.querySelector(".alias-details").open = true;
+  renderDrawer();
+}
+
+function onKey(ev) {
+  if (ev.key === "Escape" && openModel) {
+    ev.preventDefault();
+    closeDrawer();
+    return;
+  }
+  if (ev.key === "Enter" && ev.target.matches?.("tr[data-model]")) openDrawer(ev.target.dataset.model, ev.target);
 }
 
 function onClick(ev) {
+  if (ev.target.closest('[data-action="drawer-close"]')) {
+    closeDrawer();
+    return;
+  }
+  if (ev.target.closest("#cat-drawer")) return; // clicks inside the drawer do nothing else
+  const row = ev.target.closest("tr[data-model]");
+  if (row) {
+    openDrawer(row.dataset.model, row);
+    return;
+  }
+  if (openModel && !ev.target.closest(".filter-chip, .toggle-row, [data-action]")) closeDrawer();
   const chip = ev.target.closest(".filter-chip");
   if (chip) {
     const c = chip.dataset.cap;
@@ -240,6 +364,7 @@ export default {
     root.innerHTML = `<p class="loading">Loading&#8230;</p>`;
     root.addEventListener("click", onClick);
     root.addEventListener("change", onChange);
+    document.addEventListener("keydown", onKey);
     ctx.poll(async () => {
       data = await ctx.api.get("/api/catalog");
       lastStateKey = mergeMetrics(data.node_metrics || {});
@@ -261,8 +386,12 @@ export default {
       root.removeEventListener("click", onClick);
       root.removeEventListener("change", onChange);
     }
+    document.removeEventListener("keydown", onKey);
     root = null;
     data = null;
     lastStateKey = "";
+    openModel = null;
+    fleetRoles = null;
+    lastFocus = null;
   },
 };

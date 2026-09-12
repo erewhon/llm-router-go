@@ -369,6 +369,14 @@ type dashModel struct {
 	// Discovered marks an entry the live inventory adopted from a provider's
 	// listing; it has no models.yaml entry behind it.
 	Discovered bool `json:"discovered,omitempty"`
+	// The rest feeds the Catalog's detail drawer: what the registry says
+	// beyond the table's columns, and when the verdict last changed.
+	APIClass             string    `json:"api_class,omitempty"`
+	MaxOutputTokens      int       `json:"max_output_tokens,omitempty"`
+	InputCostPerMillion  *float64  `json:"input_cost_per_million,omitempty"`
+	OutputCostPerMillion *float64  `json:"output_cost_per_million,omitempty"`
+	Fallbacks            []string  `json:"fallbacks,omitempty"`
+	AvailabilitySince    time.Time `json:"availability_since,omitempty"`
 }
 
 // dashCatalogEntry is one row of the dashboard's model list: every registry
@@ -560,9 +568,15 @@ func (rt *Router) dashCatalogRows(agentState map[string]string, agentReqs map[st
 			GGUFFile:           m.GGUFFile,
 			// The advertised window, resolved the same way the well-known
 			// resolves it, so the dashboard and /.well-known never disagree.
-			ContextLength:    rt.wellKnownContext(m, 0),
-			EffectiveContext: m.EffectiveContext,
-			Discovered:       e.discovered,
+			ContextLength:        rt.wellKnownContext(m, 0),
+			EffectiveContext:     m.EffectiveContext,
+			Discovered:           e.discovered,
+			APIClass:             string(m.APIClass),
+			MaxOutputTokens:      m.MaxOutputTokens,
+			InputCostPerMillion:  m.InputCostPerMillion,
+			OutputCostPerMillion: m.OutputCostPerMillion,
+			Fallbacks:            m.Fallbacks,
+			AvailabilitySince:    verdicts[id].Since,
 		})
 	}
 	return models
