@@ -15,9 +15,7 @@ import traffic from "/static/tabs/traffic.js";
 import connect from "/static/tabs/connect.js";
 
 const TABS = [activity, fleet, catalog, traffic, connect];
-// Fleet until the Activity view lands (its leaf makes #activity the default):
-// an empty placeholder is the wrong first thing to see behind the front door.
-const DEFAULT_TAB = "fleet";
+const DEFAULT_TAB = "activity";
 
 // poll(fn, ms): run fn now and every ms while the owning tab is mounted and
 // the page is visible. Returns a stop function. Every tab's unmount must
@@ -72,8 +70,7 @@ export function parseHash() {
 function renderNav(activeId) {
   const nav = document.getElementById("tabs");
   nav.innerHTML = TABS.map(
-    (t) =>
-      `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
+    (t) => `<a href="#${t.id}" class="${t.id === activeId ? "active" : ""}" data-tab="${t.id}">${fmt.escHtml(t.label)}</a>`,
   ).join("");
 }
 
@@ -122,24 +119,18 @@ async function refreshStrip() {
     const m = d.models || {};
     const r = d.roles || {};
     const dim = (s) => `<span style="color:var(--text-dim);font-size:0.8rem">${s}</span>`;
-    const tile = (v, label) =>
-      `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
+    const tile = (v, label) => `<div class="stat"><div class="stat-value">${v}</div><div class="stat-label">${label}</div></div>`;
     let modelsV = `${m.up ?? "?"}${dim(`/${m.active ?? "?"}`)}`;
-    if (m.warming)
-      modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${m.warming} warming</span>`;
+    if (m.warming) modelsV += ` <span style="color:var(--yellow);font-size:0.8rem">${m.warming} warming</span>`;
     if (m.absent) modelsV += ` <span style="color:var(--red);font-size:0.8rem">${m.absent} absent</span>`;
-    if (m.unavailable)
-      modelsV += ` <span style="color:var(--text-dim);font-size:0.8rem">${m.unavailable} down</span>`;
+    if (m.unavailable) modelsV += ` <span style="color:var(--text-dim);font-size:0.8rem">${m.unavailable} down</span>`;
     const rolesV = `<span${r.bound < r.total ? ' style="color:var(--red)"' : ""}>${r.bound ?? "?"}</span>${dim(`/${r.total ?? "?"}`)}`;
     el.innerHTML =
       tile(modelsV, "models up") +
       tile(rolesV, "roles bound") +
       (m.discovered ? tile(m.discovered, "discovered") : "") +
       tile(d.requests_per_min ?? 0, "req / min") +
-      tile(
-        `${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(d.replica || "")} · up ${fmt.fmtUptime(d.uptime_s)}`)}`,
-        "router",
-      );
+      tile(`${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(d.replica || "")} · up ${fmt.fmtUptime(d.uptime_s)}`)}`, "router");
   } catch (e) {
     el.innerHTML = `<div class="stat"><div class="stat-value" style="color:var(--red)">—</div><div class="stat-label">${fmt.escHtml(String(e))}</div></div>`;
   }

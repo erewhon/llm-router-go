@@ -394,3 +394,31 @@
 .tab-placeholder { color: var(--text-dim); padding: 2rem 0; font-size: 0.9rem; }
 #strip .stat { min-width: 120px; padding: 0.7rem 1.1rem; }
 #strip .stat-value { font-size: 1.2rem; }
+
+/* ---- Activity tab ---- */
+.act-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; margin-bottom: 1.5rem; overflow-x: auto; }
+.act-svg { width: 100%; display: block; font-family: inherit; }
+.act-col { fill: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.act-dim { fill: var(--text-dim); color: var(--text-dim); font-size: 11px; }
+.act-caller circle { fill: var(--surface); stroke: var(--accent); stroke-width: 2; cursor: pointer; }
+.act-caller text { fill: var(--text); font-size: 11px; }
+.act-role rect { fill: rgba(108, 140, 255, 0.12); stroke: var(--accent); stroke-width: 1; cursor: pointer; }
+.act-role text { fill: var(--text); font-size: 12px; font-weight: 600; }
+.act-direct rect { stroke: var(--border); fill: var(--bg); }
+.act-direct text { fill: var(--text-dim); font-weight: 400; }
+.act-node rect, .act-provider rect { fill: var(--bg); stroke: var(--border); stroke-width: 1; cursor: pointer; }
+.act-node-down rect { stroke: rgba(248, 113, 113, 0.5); }
+.act-node-name { fill: var(--text); font-size: 13px; font-weight: 600; }
+.act-bar-label { fill: var(--text-dim); font-size: 10px; }
+.act-bar-track { fill: var(--border); }
+.act-seat-name { fill: var(--text); font-size: 11px; }
+.act-boundary { stroke: var(--yellow); stroke-dasharray: 4 6; stroke-width: 1; opacity: 0.6; }
+.act-trail { fill: none; stroke-width: 2; opacity: 0.55; }
+.act-trail-done { opacity: 0.2; }
+.act-hop-failed { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 4; opacity: 0.8; }
+.act-dot { stroke: var(--bg); stroke-width: 1.5; }
+.act-dot-selected { stroke: #fff; stroke-width: 3; }
+.act-pulse { fill: none; stroke: var(--accent); stroke-width: 1; opacity: 0.5; }
+.act-label { font-size: 11px; font-weight: 600; }
+.act-jobs td, .act-jobs th { white-space: nowrap; }
+.act-row-selected td { background: rgba(108, 140, 255, 0.12); }
