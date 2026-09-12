@@ -499,10 +499,11 @@ func TestInventory_DashboardShowsDiscoveredRowsAndInventory(t *testing.T) {
 	h.listings.set(invZenRoot, listed("pinned"), listed("dash"))
 	h.listings.set(invSeatRoot, listed("other"))
 	h.refresh()
+	dash := h.rt.DashboardHandler(DashboardConfig{APIBase: "http://x"})
 	rec := httptest.NewRecorder()
-	h.rt.DashboardHandler(DashboardConfig{APIBase: "http://x"}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	dash.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("/api/models status = %d", rec.Code)
+		t.Fatalf("/api/catalog status = %d", rec.Code)
 	}
 	var body struct {
 		Models []struct {
@@ -517,6 +518,15 @@ func TestInventory_DashboardShowsDiscoveredRowsAndInventory(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
+	rec = httptest.NewRecorder()
+	dash.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/fleet", nil))
+	var fleet struct {
+		Inventory []health.BaseInventory `json:"inventory"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&fleet); err != nil {
+		t.Fatal(err)
+	}
+	body.Inventory = fleet.Inventory
 	var sawDash, sawSeat bool
 	for _, m := range body.Models {
 		switch m.ID {

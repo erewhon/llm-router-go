@@ -75,7 +75,7 @@ export default {
     root.addEventListener("click", onClick);
     // Only the example's model name depends on the catalog; one fetch.
     ctx.api
-      .get("/api/models")
+      .get("/api/catalog")
       .then((d) => {
         if (root) root.innerHTML = render(d.models || []);
       })

@@ -4,7 +4,8 @@
 // PAIR's Overview shows node cards with live load and a Jobs list naming the
 // serving node; the router knows more — the role asked for, the seat chosen,
 // failovers, overflow, the principal — so those decisions are drawn as they
-// happen. Data: /api/events (SSE), /api/models every 30 s, /api/node-metrics
+// happen. Data: /api/events (SSE), /api/fleet every 10 s (nodes, roles, live
+// load), /api/catalog every 30 s (seats and verdicts), /api/node-metrics
 // every 5 s. SVG + requestAnimationFrame, no library.
 //
 // The reducer half (applyEvent, buildTopology, placeEvent) is pure and
@@ -84,7 +85,8 @@ export function providerKey(apiBase) {
 
 const ROUTER_IDS = ["auto", "auto-free", "auto-full", "coder-resilient"];
 
-// buildTopology derives the static picture from a /api/models payload:
+// buildTopology derives the static picture from the merged /api/fleet +
+// /api/catalog payload:
 // nodes with their seats, providers with their models, roles.
 export function buildTopology(data) {
   const nodes = data.nodes || {};
@@ -579,13 +581,26 @@ export default {
         if (noteEl) noteEl.textContent = `showing this replica's traffic (${d.replica || "?"})`;
       })
       .catch(() => {});
+    // data is the merge of the two registry-shaped payloads; whichever
+    // arrives rebuilds the topology.
     ctx.poll(async () => {
-      data = await ctx.api.get("/api/models");
-      topo = buildTopology(data);
-      layoutStatic();
+      const f = await ctx.api.get("/api/fleet");
+      data = { ...(data || {}), nodes: f.nodes, node_metrics: f.node_metrics, roles: f.roles };
+      if (data.models) {
+        topo = buildTopology(data);
+        layoutStatic();
+      }
+    }, 10000);
+    ctx.poll(async () => {
+      const c = await ctx.api.get("/api/catalog");
+      data = { ...(data || {}), models: c.models };
+      if (data.nodes) {
+        topo = buildTopology(data);
+        layoutStatic();
+      }
     }, 30000);
     ctx.poll(async () => {
-      if (!data) return;
+      if (!data || !data.nodes || !data.models) return;
       data.node_metrics = await ctx.api.get("/api/node-metrics");
       const state2 = {};
       for (const m of Object.values(data.node_metrics)) for (const mdl of m.models || []) state2[mdl.model_id] = mdl.state;

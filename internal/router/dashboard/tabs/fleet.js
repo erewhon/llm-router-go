@@ -1,12 +1,12 @@
 // Fleet tab — "what is up right now, and what does each role mean at this
 // moment?" Nodes (live load), Roles (bindings), Live inventory (per-base
 // listings). Ported behaviour-for-behaviour from the legacy render() on
-// 2026-09-12; data still comes from /api/models + /api/node-metrics until the
-// /api/fleet split leaf lands.
+// 2026-09-12. Data: /api/fleet (nodes, live node metrics, roles, inventory)
+// every 10 s and /api/node-metrics every 2 s for the bars and sparklines.
 
 let root = null;
 let ctx = null;
-let data = null; // last /api/models payload
+let data = null; // last /api/fleet payload (+ fresh node_metrics)
 let selectedNode = null; // tab-local, mirrored into #fleet?node=
 const nodeHistory = {}; // per node: {vram: [], gpu: []} sparkline samples
 const SPARK_MAX = 60; // ~2 min at 2 s intervals
@@ -114,14 +114,8 @@ function renderNodes(nodes, nm) {
     } else if (reachable && m.gpus && m.gpus.length > 1) {
       // Multi-GPU node (talos 2x B70): one MEM + busy pair per card.
       for (const g of m.gpus) {
-        html += bar(
-          `MEM${g.index}`,
-          g.vram_pct,
-          vramBarColor(g.vram_pct),
-          `<strong>${g.vram_used_gb}</strong> / ${g.vram_total_gb} GB`,
-        );
-        if (g.busy_pct != null)
-          html += bar(`GPU${g.index}`, g.busy_pct, busyColor(g.busy_pct), `<strong>${g.busy_pct}%</strong>`);
+        html += bar(`MEM${g.index}`, g.vram_pct, vramBarColor(g.vram_pct), `<strong>${g.vram_used_gb}</strong> / ${g.vram_total_gb} GB`);
+        if (g.busy_pct != null) html += bar(`GPU${g.index}`, g.busy_pct, busyColor(g.busy_pct), `<strong>${g.busy_pct}%</strong>`);
       }
       html += `<div class="metric-row"><span class="metric-label">ALL</span>${sparklineSvg(hist.vram, "var(--accent)")}${sparklineSvg(hist.gpu, "var(--green)")}</div>`;
     } else if (reachable && m.vram_pct !== null && m.vram_pct !== undefined) {
@@ -133,13 +127,7 @@ function renderNodes(nodes, nm) {
         sparklineSvg(hist.vram, "var(--accent)"),
       );
       if (m.gpu_busy_pct != null)
-        html += bar(
-          "GPU",
-          m.gpu_busy_pct,
-          busyColor(m.gpu_busy_pct),
-          `<strong>${m.gpu_busy_pct}%</strong>`,
-          sparklineSvg(hist.gpu, "var(--green)"),
-        );
+        html += bar("GPU", m.gpu_busy_pct, busyColor(m.gpu_busy_pct), `<strong>${m.gpu_busy_pct}%</strong>`, sparklineSvg(hist.gpu, "var(--green)"));
     } else if (reachable) {
       html += `<div class="node-offline">No metrics</div>`;
     } else {
@@ -174,11 +162,13 @@ function renderNodes(nodes, nm) {
   return html + `</div>`;
 }
 
-function renderRoles(roles, models) {
-  const { escHtml, isRouterModel } = ctx.fmt;
+function renderRoles(roles, nm) {
+  const { escHtml } = ctx.fmt;
   if (!roles.length) return "";
-  const modelById = {};
-  for (const m of models) modelById[m.id] = m;
+  // Agent state per model from the live node metrics; a model no agent
+  // lists (externals, the auto stubs) counts as up, as the legacy page did.
+  const stateOf = {};
+  for (const m of Object.values(nm || {})) for (const mdl of m.models || []) stateOf[mdl.model_id] = mdl.state;
   let html = `<div class="section-title">Roles</div><div class="roles">`;
   for (const r of roles) {
     const cls = !r.available ? " role-down" : r.overflowed ? " role-overflow" : "";
@@ -195,8 +185,8 @@ function renderRoles(roles, models) {
     if (hops.length) {
       html += `<div class="role-chain">`;
       for (const h of hops) {
-        const m = modelById[h.id];
-        const up = m && (m.agent_state === "running" || m.agent_state == null || isRouterModel(m));
+        const st = stateOf[h.id];
+        const up = st == null || st === "running";
         let hopCls = h.overflow ? "role-hop-overflow" : up ? "role-hop-up" : "role-hop-down";
         // A chain candidate serves via a provider entry: match the suffix too.
         if (h.id === r.target || (r.target || "").endsWith("/" + h.id)) hopCls = "role-hop-active";
@@ -204,8 +194,7 @@ function renderRoles(roles, models) {
       }
       html += `</div>`;
     }
-    if (!r.available && (r.reasons || []).length)
-      html += `<div class="role-desc" style="color:var(--red)">${escHtml(r.reasons.join("; "))}</div>`;
+    if (!r.available && (r.reasons || []).length) html += `<div class="role-desc" style="color:var(--red)">${escHtml(r.reasons.join("; "))}</div>`;
     html += `</div>`;
   }
   return html + `</div>`;
@@ -239,11 +228,7 @@ function render() {
   if (!root || !data) return;
   const nodes = data.nodes || {};
   const nm = data.node_metrics || {};
-  root.innerHTML =
-    renderStats(nodes, nm) +
-    renderRoles(data.roles || [], data.models || []) +
-    renderInventory(data.inventory || []) +
-    renderNodes(nodes, nm);
+  root.innerHTML = renderStats(nodes, nm) + renderRoles(data.roles || [], nm) + renderInventory(data.inventory || []) + renderNodes(nodes, nm);
 }
 
 export default {
@@ -258,19 +243,14 @@ export default {
     // Registry-shaped things (nodes, roles, inventory) every 30 s; live load
     // every 2 s, merged into the last payload the way the legacy page did.
     ctx.poll(async () => {
-      data = await ctx.api.get("/api/models");
+      data = await ctx.api.get("/api/fleet");
       updateHistory(data.node_metrics || {});
       render();
-    }, 30000);
+    }, 10000);
     ctx.poll(async () => {
       if (!data) return;
-      const nm = await ctx.api.get("/api/node-metrics");
-      data.node_metrics = nm;
-      // Fresh agent state per model, so the Roles hops colour correctly.
-      const state = {};
-      for (const m of Object.values(nm)) for (const mdl of m.models || []) state[mdl.model_id] = mdl.state;
-      for (const m of data.models || []) m.agent_state = state[m.id] || null;
-      updateHistory(nm);
+      data.node_metrics = await ctx.api.get("/api/node-metrics");
+      updateHistory(data.node_metrics);
       render();
     }, 2000);
   },

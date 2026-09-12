@@ -151,7 +151,7 @@ export async function openChat() {
   // The picker reads the catalog itself so it works from any tab.
   let models = [];
   try {
-    const d = await fetch("/api/models", { cache: "no-store" }).then((r) => r.json());
+    const d = await fetch("/api/catalog", { cache: "no-store" }).then((r) => r.json());
     models = (d.models || []).filter(chatCapable);
   } catch (_) {
     /* leave the placeholder */

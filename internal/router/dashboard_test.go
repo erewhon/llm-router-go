@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,15 +47,39 @@ func getDashJSON(t *testing.T, rt *Router, path string) map[string]any {
 	return out
 }
 
-func TestDashboard_ModelsShape(t *testing.T) {
-	rt := newTestRouter(t, nil)
-	// archimedes.local reports nemotron-3-super running; hypatia unreachable.
-	stubNodes(rt, map[string]map[string]string{
-		"archimedes.local": {"nemotron-3-super": "running"},
-	})
+// trackerNodes is an availability that also carries a last node poll, the
+// way the real tracker does, so the Catalog can be tested without a probe.
+type trackerNodes struct {
+	alwaysRoutable
+	nodes map[string]health.NodeSnapshot
+}
 
-	out := getDashJSON(t, rt, "/api/models")
+func (t trackerNodes) Nodes() map[string]health.NodeSnapshot { return t.nodes }
 
+func TestDashboard_CatalogAndFleetShape(t *testing.T) {
+	rt := newTestRouter(t, nil, WithAvailability(trackerNodes{nodes: map[string]health.NodeSnapshot{
+		"archimedes": {Reachable: true, Models: []health.AgentModel{{ModelID: "nemotron-3-super", State: "running", RequestsRunning: 2}}},
+		"hypatia":    {Reachable: false, Models: []health.AgentModel{{ModelID: "qwen36-hypatia", State: "running"}}},
+	}}))
+	// A live probe that would take far too long if anyone called it.
+	var probed atomic.Int32
+	rt.nodeFetcher = func(_ context.Context, host string, _ int) nodeMetric {
+		probed.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		if host == "archimedes.local" {
+			return nodeMetric{Reachable: true, Models: []nodeModelMetric{{ModelID: "nemotron-3-super", State: "running"}}}
+		}
+		return unreachableNode()
+	}
+
+	start := time.Now()
+	out := getDashJSON(t, rt, "/api/catalog")
+	if n := probed.Load(); n != 0 {
+		t.Errorf("/api/catalog probed %d node(s); it must never wait on an agent", n)
+	}
+	if d := time.Since(start); d > 40*time.Millisecond {
+		t.Errorf("/api/catalog took %s", d)
+	}
 	if got := int(out["model_count"].(float64)); got == 0 {
 		t.Fatalf("model_count = 0, want the full registry")
 	}
@@ -62,12 +87,8 @@ func TestDashboard_ModelsShape(t *testing.T) {
 	if out["litellm_url"] != "http://localhost:4010" {
 		t.Errorf("litellm_url = %v", out["litellm_url"])
 	}
-
-	// nodes carry unified_memory (added for the Fleet CPU-RAM card).
-	nodes := out["nodes"].(map[string]any)
-	arch := nodes["archimedes"].(map[string]any)
-	if _, ok := arch["unified_memory"]; !ok {
-		t.Errorf("node archimedes missing unified_memory: %v", arch)
+	if _, has := out["nodes"]; has {
+		t.Errorf("/api/catalog must not carry nodes (that is /api/fleet)")
 	}
 
 	byID := map[string]map[string]any{}
@@ -76,11 +97,41 @@ func TestDashboard_ModelsShape(t *testing.T) {
 		byID[mm["id"].(string)] = mm
 	}
 
-	// Node-managed model with a live agent: health "unknown", agent_state
-	// carries the state, head_node = its node.
+	// Node-managed model with a live agent (from the tracker's last poll):
+	// health "unknown", agent_state carries the state, requests too,
+	// head_node = its node. An unreachable node's stale states are not used.
 	nem := byID["nemotron-3-super"]
-	if nem["health"] != "unknown" || nem["agent_state"] != "running" {
-		t.Errorf("nemotron health/agent_state = %v/%v, want unknown/running", nem["health"], nem["agent_state"])
+	if nem["health"] != "unknown" || nem["agent_state"] != "running" || int(nem["requests_running"].(float64)) != 2 {
+		t.Errorf("nemotron health/agent_state/requests = %v/%v/%v, want unknown/running/2", nem["health"], nem["agent_state"], nem["requests_running"])
+	}
+	if q := byID["qwen36-hypatia"]; q["agent_state"] != nil {
+		t.Errorf("qwen36-hypatia agent_state = %v, want nil (its node is unreachable)", q["agent_state"])
+	}
+
+	// Fleet: DOES probe, carries nodes/node_metrics/roles/inventory.
+	fl := getDashJSON(t, rt, "/api/fleet")
+	if probed.Load() == 0 {
+		t.Errorf("/api/fleet should probe the agents")
+	}
+	nodes := fl["nodes"].(map[string]any)
+	arch := nodes["archimedes"].(map[string]any)
+	if _, ok := arch["unified_memory"]; !ok {
+		t.Errorf("node archimedes missing unified_memory: %v", arch)
+	}
+	for _, k := range []string{"node_metrics", "roles", "node_count"} {
+		if _, ok := fl[k]; !ok {
+			t.Errorf("/api/fleet missing %q", k)
+		}
+	}
+	if _, has := fl["models"]; has {
+		t.Errorf("/api/fleet must not carry the model table")
+	}
+
+	// The old combined endpoint is gone.
+	rec := httptest.NewRecorder()
+	rt.DashboardHandler(DashboardConfig{APIBase: "http://localhost:4010"}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("/api/models = %d, want 404", rec.Code)
 	}
 	if nem["head_node"] != "archimedes" {
 		t.Errorf("nemotron head_node = %v, want archimedes", nem["head_node"])

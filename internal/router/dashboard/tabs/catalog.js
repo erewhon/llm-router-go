@@ -3,8 +3,8 @@
 // behaviour-for-behaviour from the legacy render() on 2026-09-12. Filter
 // state lives in the hash query (#catalog?node=hypatia&cap=vision,paid&
 // hidden=1&cloud=0) so the Fleet tab can deep-link and a reload keeps it.
-// Data: /api/models every 30 s + /api/node-metrics every 2 s (merged the way
-// the legacy pollMetrics did) until the /api/catalog split leaf lands.
+// Data: /api/catalog every 30 s (no node probe on that path) + /api/node-metrics
+// every 2 s, merged the way the legacy pollMetrics did.
 
 const SHOW_TAGS = [
   "tts",
@@ -76,9 +76,7 @@ function mergeMetrics(nm) {
 
 function rowFor(m) {
   const { escHtml, fmtCtx, quantLabel, modelType, isRouterModel, isCloudModel } = ctx.fmt;
-  const nodeStr = m.nodes
-    .map((n) => (n === m.head_node && m.nodes.length > 1 ? `<strong>${escHtml(n)}</strong>` : escHtml(n)))
-    .join(", ");
+  const nodeStr = m.nodes.map((n) => (n === m.head_node && m.nodes.length > 1 ? `<strong>${escHtml(n)}</strong>` : escHtml(n))).join(", ");
   const aliases = m.aliases.map((a) => `<span class="badge badge-alias">${escHtml(a)}</span>`).join(" ");
   const caps = m.capabilities.map((c) => `<span class="badge badge-cap">${escHtml(c)}</span>`).join(" ");
   let flags = "";
@@ -111,8 +109,7 @@ function rowFor(m) {
   const parts = [];
   const running = m.requests_running || 0,
     waiting = m.requests_waiting || 0;
-  if (running > 0 || waiting > 0)
-    parts.push(`<span style="color:var(--yellow)">⚡ ${running} active${waiting > 0 ? ` +${waiting}w` : ""}</span>`);
+  if (running > 0 || waiting > 0) parts.push(`<span style="color:var(--yellow)">⚡ ${running} active${waiting > 0 ? ` +${waiting}w` : ""}</span>`);
   if (m.avg_tok_per_s) parts.push(`<span style="color:var(--text-dim)">${m.avg_tok_per_s} tok/s</span>`);
   if (m.total_requests > 0) parts.push(`<span style="color:var(--text-dim)">${m.total_requests} reqs</span>`);
   const healthExtra = parts.length ? `<div style="font-size:0.7rem;margin-top:2px">${parts.join(" · ")}</div>` : "";
@@ -244,7 +241,7 @@ export default {
     root.addEventListener("click", onClick);
     root.addEventListener("change", onChange);
     ctx.poll(async () => {
-      data = await ctx.api.get("/api/models");
+      data = await ctx.api.get("/api/catalog");
       lastStateKey = mergeMetrics(data.node_metrics || {});
       render();
     }, 30000);

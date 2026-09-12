@@ -154,7 +154,11 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /api/overview", rt.handleDashOverview)
-	mux.HandleFunc("GET /api/models", rt.handleDashModels)
+	// /api/models (everything in one document, with a live node probe) was
+	// split on 2026-09-12: Fleet wants nodes/roles/inventory on a fast
+	// cadence, Catalog wants the table without waiting on a slow agent.
+	mux.HandleFunc("GET /api/fleet", rt.handleDashFleet)
+	mux.HandleFunc("GET /api/catalog", rt.handleDashCatalog)
 	mux.HandleFunc("GET /api/node-metrics", rt.handleDashNodeMetrics)
 	mux.HandleFunc("GET /api/router-metrics", rt.handleDashRouterMetrics)
 	mux.HandleFunc("GET /api/upstream", rt.handleDashUpstream)
@@ -375,19 +379,76 @@ type dashCatalogEntry struct {
 	discovered bool
 }
 
-func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
+// handleDashFleet is the Fleet tab's payload: nodes with a LIVE agent probe
+// (that is what Fleet is for), roles, and the inventory. Polled every 10 s.
+func (rt *Router) handleDashFleet(w http.ResponseWriter, r *http.Request) {
 	nodeMetrics := rt.fetchAllNodeMetrics(r.Context())
+	writeDashJSON(w, map[string]any{
+		"node_count":   len(rt.registry.Nodes),
+		"nodes":        rt.dashNodes(),
+		"node_metrics": nodeMetrics,
+		"roles":        rt.roleBindings(),
+		"inventory":    rt.inventory(false),
+	})
+}
 
-	// model_id -> agent state + request counts, from the node metrics.
+// nodeSnapshotter is the tracker's last node poll, so the Catalog can carry
+// agent state without a live probe of its own.
+type nodeSnapshotter interface {
+	Nodes() map[string]health.NodeSnapshot
+}
+
+// handleDashCatalog is the Catalog tab's payload: every registry entry plus
+// the discovered ones, with verdicts and the agent state from the tracker's
+// last poll. No node is probed here — a slow agent must never delay the
+// table. Polled every 30 s; the tab merges /api/node-metrics for live counts.
+func (rt *Router) handleDashCatalog(w http.ResponseWriter, r *http.Request) {
 	agentState := map[string]string{}
 	agentReqs := map[string]nodeModelMetric{}
-	for _, nm := range nodeMetrics {
-		for _, m := range nm.Models {
-			agentState[m.ModelID] = m.State
-			agentReqs[m.ModelID] = m
+	if src, ok := rt.avail.(nodeSnapshotter); ok {
+		for _, snap := range src.Nodes() {
+			if !snap.Reachable {
+				continue
+			}
+			for _, m := range snap.Models {
+				agentState[m.ModelID] = m.State
+				agentReqs[m.ModelID] = nodeModelMetric{
+					ModelID: m.ModelID, State: m.State, RequestsRunning: m.RequestsRunning,
+					RequestsWaiting: m.RequestsWaiting, AvgTokPerS: m.AvgTokPerS, TotalRequests: m.TotalRequests,
+				}
+			}
 		}
 	}
+	writeDashJSON(w, map[string]any{
+		"litellm_url": rt.dashConfig.APIBase,
+		"model_count": len(rt.registry.Models),
+		"models":      rt.dashCatalogRows(agentState, agentReqs),
+	})
+}
 
+// dashNodes is the registry's node table for the dashboard, with the
+// schedule verdict the Fleet cards render.
+func (rt *Router) dashNodes() map[string]any {
+	nodes := map[string]any{}
+	now := time.Now()
+	for name, n := range rt.registry.Nodes {
+		nodes[name] = map[string]any{
+			"host":           n.Host,
+			"gpu":            string(n.GPU),
+			"vram_gb":        n.VRAMGB,
+			"agent_port":     n.AgentPort,
+			"unified_memory": n.UnifiedMemory,
+			// expected_down lets the UI render planned downtime as planned.
+			// A node powered off inside its own schedule is not a fault.
+			"expected_down": health.ExpectedDown(n, now),
+		}
+	}
+	return nodes
+}
+
+// dashCatalogRows builds the model table from the registry, the discovered
+// set, the tracker's verdicts, and whatever agent state the caller has.
+func (rt *Router) dashCatalogRows(agentState map[string]string, agentReqs map[string]nodeModelMetric) []dashModel {
 	ids := make([]string, 0, len(rt.registry.Models))
 	for id := range rt.registry.Models {
 		ids = append(ids, id)
@@ -503,38 +564,7 @@ func (rt *Router) handleDashModels(w http.ResponseWriter, r *http.Request) {
 			Discovered:       e.discovered,
 		})
 	}
-
-	nodes := map[string]any{}
-	now := time.Now()
-	for name, n := range rt.registry.Nodes {
-		nodes[name] = map[string]any{
-			"host":           n.Host,
-			"gpu":            string(n.GPU),
-			"vram_gb":        n.VRAMGB,
-			"agent_port":     n.AgentPort,
-			"unified_memory": n.UnifiedMemory,
-			// expected_down lets the UI render planned downtime as planned.
-			// A node powered off inside its own schedule is not a fault.
-			"expected_down": health.ExpectedDown(n, now),
-		}
-	}
-
-	writeDashJSON(w, map[string]any{
-		"litellm_url":  rt.dashConfig.APIBase,
-		"node_count":   len(rt.registry.Nodes),
-		"model_count":  len(rt.registry.Models),
-		"nodes":        nodes,
-		"node_metrics": nodeMetrics,
-		"models":       models,
-		// Roles ride along on this payload rather than needing their own poll:
-		// the Roles card wants to render in the same frame as the node states
-		// it explains.
-		"roles": rt.roleBindings(),
-		// Live inventory: per-base listing state, the evidence behind every
-		// absent verdict and every discovered row above. Without the id
-		// lists — the card shows counts and names what is absent/adopted.
-		"inventory": rt.inventory(false),
-	})
+	return models
 }
 
 // reqRateWindow is a 60-slot ring of per-second request counts, so the
