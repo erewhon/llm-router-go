@@ -23,7 +23,11 @@
 # masked/decommissioned Jun 27, to delphi's svc-sys-research-vpn (.84). NOTE the
 # delphi mullvad-vpn container (.93) has an MTU-blackholed tunnel — reaches tiny
 # responses but not html.duckduckgo.com/wikipedia — so it is NOT usable for
-# web_search; .84 is the healthy Mullvad exit. max-tool-rounds raised 5->12 so
+# web_search; .84 is the healthy Mullvad exit.
+# 2026-09-13: --egress-default=us-chi — html.duckduckgo.com (web_search's backend)
+# started 403ing the default Zurich relay IP, so web_search returned empty on the
+# default exit; a US relay via the E2 nested-SOCKS egress returns 200. Sweep on the
+# Forge task "Move the tool proxy's web egress from the Zurich exit to the US Chicago exit". max-tool-rounds raised 5->12 so
 # the research agent's multi-fetch loop can synthesize instead of hitting the cap.
 
 [Unit]
@@ -44,6 +48,7 @@ ExecStart=/usr/local/bin/llm-router-go-tool-proxy \
     --log-format=json \
     --log-level=info \
     --proxy=socks5://192.168.42.86:1080 \
+    --egress-default=us-chi \
     --max-tool-rounds=12 \
     --embed-url=http://192.168.42.240:5404 \
     --embed-model=qwen3-embedding-4b \
