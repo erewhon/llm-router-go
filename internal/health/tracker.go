@@ -387,6 +387,7 @@ func observeModel(id string, m config.ModelDefinition, snaps map[string]NodeSnap
 	if len(nodes) == 0 {
 		return true, ""
 	}
+	head := modelHead(m)
 	for _, n := range nodes {
 		snap, probed := snaps[n]
 		if !probed {
@@ -397,6 +398,14 @@ func observeModel(id string, m config.ModelDefinition, snaps map[string]NodeSnap
 		if !snap.Reachable {
 			return false, fmt.Sprintf("node %q unreachable", n)
 		}
+		// A tensor-parallel group serves its API from the head alone; the
+		// worker ranks run headless, so their agents see no listener and
+		// would call a healthy group "stopped". Workers count for
+		// reachability only — if one dies the NCCL group dies with it and
+		// the head's agent reports that.
+		if head != "" && n != head {
+			continue
+		}
 		// Agents only list models they manage. Silence means "not mine",
 		// not "stopped" — node reachability alone decides for those.
 		if state, listed := snap.ModelState(id); listed && state != StateRunning {
@@ -404,6 +413,22 @@ func observeModel(id string, m config.ModelDefinition, snaps map[string]NodeSnap
 		}
 	}
 	return true, ""
+}
+
+// modelHead names the node whose agent speaks for a multi-node model's state
+// (multi_node.head_node, else the first listed node); "" for single-node and
+// nodeless models.
+func modelHead(m config.ModelDefinition) string {
+	if m.MultiNode == nil {
+		return ""
+	}
+	if m.MultiNode.HeadNode != "" {
+		return m.MultiNode.HeadNode
+	}
+	if len(m.MultiNode.Nodes) > 0 {
+		return m.MultiNode.Nodes[0]
+	}
+	return ""
 }
 
 // modelNodes returns every node a model needs. A multi-node model needs all of
