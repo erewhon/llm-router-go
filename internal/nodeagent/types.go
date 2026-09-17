@@ -27,6 +27,10 @@ type HealthResponse struct {
 	TotalVRAMGB *float64 `json:"total_vram_gb,omitempty"`
 	FreeVRAMGB  *float64 `json:"free_vram_gb,omitempty"`
 	GPUBusyPct  *int     `json:"gpu_busy_pct,omitempty"`
+	// GPUTempC is the hottest card's temperature and GPUPowerW the summed
+	// board power; absent when the vendor path reports neither.
+	GPUTempC    *int     `json:"gpu_temp_c,omitempty"`
+	GPUPowerW   *float64 `json:"gpu_power_w,omitempty"`
 	RAMUsedGB   *float64 `json:"ram_used_gb,omitempty"`
 	RAMTotalGB  *float64 `json:"ram_total_gb,omitempty"`
 	DiskFreeGB  *float64 `json:"disk_free_gb,omitempty"`
@@ -41,11 +45,13 @@ type HealthResponse struct {
 
 // GPUDevice is one physical card's slice of a multi-GPU node.
 type GPUDevice struct {
-	Index       int     `json:"index"`
-	PDev        string  `json:"pdev,omitempty"`
-	VRAMUsedGB  float64 `json:"vram_used_gb"`
-	VRAMTotalGB float64 `json:"vram_total_gb"`
-	BusyPct     *int    `json:"busy_pct,omitempty"`
+	Index       int      `json:"index"`
+	PDev        string   `json:"pdev,omitempty"`
+	VRAMUsedGB  float64  `json:"vram_used_gb"`
+	VRAMTotalGB float64  `json:"vram_total_gb"`
+	BusyPct     *int     `json:"busy_pct,omitempty"`
+	TempC       *int     `json:"temp_c,omitempty"`
+	PowerW      *float64 `json:"power_w,omitempty"`
 }
 
 type ServiceStatus struct {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 
@@ -136,6 +137,8 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 			resp.TotalVRAMGB = &info.TotalVRAMGB
 			resp.FreeVRAMGB = &info.FreeVRAMGB
 			resp.GPUBusyPct = info.GPUBusyPct
+			resp.GPUTempC = info.TempC
+			resp.GPUPowerW = info.PowerW
 			for _, d := range info.Devices {
 				resp.GPUs = append(resp.GPUs, GPUDevice{
 					Index:       d.Index,
@@ -143,6 +146,8 @@ func (a *Agent) handleHealth(w http.ResponseWriter, r *http.Request) {
 					VRAMUsedGB:  d.UsedVRAMGB,
 					VRAMTotalGB: d.TotalVRAMGB,
 					BusyPct:     d.BusyPct,
+					TempC:       d.TempC,
+					PowerW:      d.PowerW,
 				})
 			}
 		}
@@ -245,6 +250,36 @@ func newMetricsHandler(a *Agent) http.Handler {
 	}, func() float64 {
 		return float64(len(a.registry.ModelsForNode(a.node, true)))
 	}))
+
+	// GPU thermals. The reader is cached (gpu.Cached), so a scrape costs
+	// no extra nvidia-smi call beyond /health's cadence. NaN when the
+	// vendor path reports nothing, so a dashboard shows a gap, not 0 °C.
+	if a.gpuReader != nil {
+		gpuInfo := func() (gpu.Info, bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			info, err := a.gpuReader.Read(ctx)
+			return info, err == nil
+		}
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "node_agent_gpu_temperature_celsius",
+			Help: "Hottest GPU's temperature in Celsius (NaN if not reported).",
+		}, func() float64 {
+			if info, ok := gpuInfo(); ok && info.TempC != nil {
+				return float64(*info.TempC)
+			}
+			return math.NaN()
+		}))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "node_agent_gpu_power_watts",
+			Help: "Summed GPU board power draw in watts (NaN if not reported).",
+		}, func() float64 {
+			if info, ok := gpuInfo(); ok && info.PowerW != nil {
+				return *info.PowerW
+			}
+			return math.NaN()
+		}))
+	}
 
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 }

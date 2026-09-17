@@ -29,6 +29,9 @@ func (r *nvidiaReader) Read(ctx context.Context) (Info, error) {
 	if pct, err := r.readUtilisation(ctx); err == nil {
 		info.GPUBusyPct = intPtr(pct)
 	}
+	if temp, power, err := r.readThermal(ctx); err == nil {
+		info.TempC, info.PowerW = temp, power
+	}
 
 	if memErr != nil {
 		return info, memErr
@@ -94,6 +97,42 @@ func (r *nvidiaReader) readUtilisation(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("utilisation not reported")
 	}
 	return strconv.Atoi(line)
+}
+
+// readThermal returns the hottest card's temperature and the summed power
+// draw across cards. Each is nil when every card reports [N/A] for it
+// (some passively cooled or virtualised parts report no power). One line
+// per card: "41, 12.34".
+func (r *nvidiaReader) readThermal(ctx context.Context) (*int, *float64, error) {
+	out, err := r.exec(ctx, "nvidia-smi",
+		"--query-gpu=temperature.gpu,power.draw",
+		"--format=csv,noheader,nounits")
+	if err != nil {
+		return nil, nil, err
+	}
+	var temp *int
+	var power *float64
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) != 2 {
+			continue
+		}
+		if t, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
+			if temp == nil || t > *temp {
+				temp = intPtr(t)
+			}
+		}
+		if p, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil {
+			if power == nil {
+				power = new(float64)
+			}
+			*power += p
+		}
+	}
+	if temp == nil && power == nil {
+		return nil, nil, fmt.Errorf("gpu/nvidia: temperature and power not reported")
+	}
+	return temp, power, nil
 }
 
 // ---------------------------------------------------------------------------

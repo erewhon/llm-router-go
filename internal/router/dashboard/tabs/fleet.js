@@ -39,6 +39,19 @@ function updateHistory(nm) {
   }
 }
 
+// thermalRow renders a GPU's temperature (and power when reported) as a
+// plain metric row. Thresholds follow the blower Quadros / Ada parts on the
+// fleet: they throttle around 89 °C, so amber from 80, red from 90.
+function thermalRow(label, tempC, powerW) {
+  const color = tempC >= 90 ? "var(--red, #dc2626)" : tempC >= 80 ? "var(--amber, #d97706)" : "var(--green)";
+  const power = powerW != null ? ` &middot; ${Math.round(powerW)} W` : "";
+  return `
+        <div class="metric-row">
+          <span class="metric-label">${label}</span>
+          <span class="vram-text"><strong style="color:${color}">${tempC} &deg;C</strong>${power}</span>
+        </div>`;
+}
+
 function bar(label, pct, color, text, spark = "") {
   return `
         <div class="metric-row">
@@ -116,6 +129,7 @@ function renderNodes(nodes, nm) {
       for (const g of m.gpus) {
         html += bar(`MEM${g.index}`, g.vram_pct, vramBarColor(g.vram_pct), `<strong>${g.vram_used_gb}</strong> / ${g.vram_total_gb} GB`);
         if (g.busy_pct != null) html += bar(`GPU${g.index}`, g.busy_pct, busyColor(g.busy_pct), `<strong>${g.busy_pct}%</strong>`);
+        if (g.temp_c != null) html += thermalRow(`TEMP${g.index}`, g.temp_c, g.power_w);
       }
       html += `<div class="metric-row"><span class="metric-label">ALL</span>${sparklineSvg(hist.vram, "var(--accent)")}${sparklineSvg(hist.gpu, "var(--green)")}</div>`;
     } else if (reachable && m.vram_pct !== null && m.vram_pct !== undefined) {
@@ -128,6 +142,7 @@ function renderNodes(nodes, nm) {
       );
       if (m.gpu_busy_pct != null)
         html += bar("GPU", m.gpu_busy_pct, busyColor(m.gpu_busy_pct), `<strong>${m.gpu_busy_pct}%</strong>`, sparklineSvg(hist.gpu, "var(--green)"));
+      if (m.gpu_temp_c != null) html += thermalRow("TEMP", m.gpu_temp_c, m.gpu_power_w);
     } else if (reachable) {
       html += `<div class="node-offline">No metrics</div>`;
     } else {

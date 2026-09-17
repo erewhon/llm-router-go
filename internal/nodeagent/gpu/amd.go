@@ -47,8 +47,30 @@ func (r *amdReader) Read(ctx context.Context) (Info, error) {
 	if pct, err := r.readBusy(); err == nil {
 		info.GPUBusyPct = intPtr(pct)
 	}
+	info.TempC, info.PowerW = r.readThermal(device)
 
 	return info, nil
+}
+
+// readThermal reads the card's hwmon edge temperature (millidegrees) and
+// average power (microwatts). Either is nil when the driver exposes no
+// such file — Strix Halo's APU path reports temperature but its power
+// node is the whole package, so both are best-effort.
+func (r *amdReader) readThermal(device string) (*int, *float64) {
+	var temp *int
+	var power *float64
+	if m, err := r.glob(filepath.Join(device, "hwmon/hwmon*/temp1_input")); err == nil && len(m) > 0 {
+		if v, err := readUint(r.readFile, m[0]); err == nil {
+			temp = intPtr(int(v / 1000))
+		}
+	}
+	if m, err := r.glob(filepath.Join(device, "hwmon/hwmon*/power1_average")); err == nil && len(m) > 0 {
+		if v, err := readUint(r.readFile, m[0]); err == nil {
+			w := float64(v) / 1e6
+			power = &w
+		}
+	}
+	return temp, power
 }
 
 func (r *amdReader) readBusy() (int, error) {

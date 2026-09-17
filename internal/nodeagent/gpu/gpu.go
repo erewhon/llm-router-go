@@ -22,6 +22,11 @@ type Info struct {
 	FreeVRAMGB  float64
 	Unified     bool
 	GPUBusyPct  *int // nil if not available
+	// TempC is the hottest card's temperature and PowerW the summed board
+	// power draw; nil when the vendor path does not report them (Intel
+	// via the exporter today).
+	TempC  *int
+	PowerW *float64
 	// Devices carries per-card figures on multi-GPU hosts (e.g. talos's
 	// 2x Arc Pro B70). Empty on single-GPU or unified-memory hosts, where
 	// the aggregate fields above are the whole story. When set, the
@@ -36,6 +41,8 @@ type Device struct {
 	UsedVRAMGB  float64
 	TotalVRAMGB float64
 	BusyPct     *int // nil if not available
+	TempC       *int
+	PowerW      *float64
 }
 
 // Reader extracts GPU info for a single host. Vendor-specific

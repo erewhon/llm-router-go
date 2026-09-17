@@ -44,6 +44,8 @@ type AgentHealth struct {
 	TotalVRAMGB *float64   `json:"total_vram_gb"`
 	FreeVRAMGB  *float64   `json:"free_vram_gb"`
 	GPUBusyPct  *int       `json:"gpu_busy_pct"`
+	GPUTempC    *int       `json:"gpu_temp_c"`
+	GPUPowerW   *float64   `json:"gpu_power_w"`
 	RAMUsedGB   *float64   `json:"ram_used_gb"`
 	RAMTotalGB  *float64   `json:"ram_total_gb"`
 	DiskFreeGB  *float64   `json:"disk_free_gb"`
@@ -54,11 +56,13 @@ type AgentHealth struct {
 
 // AgentGPU is one card of a multi-GPU node (absent on single-GPU nodes).
 type AgentGPU struct {
-	Index       int     `json:"index"`
-	PDev        string  `json:"pdev"`
-	VRAMUsedGB  float64 `json:"vram_used_gb"`
-	VRAMTotalGB float64 `json:"vram_total_gb"`
-	BusyPct     *int    `json:"busy_pct"`
+	Index       int      `json:"index"`
+	PDev        string   `json:"pdev"`
+	VRAMUsedGB  float64  `json:"vram_used_gb"`
+	VRAMTotalGB float64  `json:"vram_total_gb"`
+	BusyPct     *int     `json:"busy_pct"`
+	TempC       *int     `json:"temp_c"`
+	PowerW      *float64 `json:"power_w"`
 }
 
 // AgentModel is the subset of a node agent's /models list we consume.

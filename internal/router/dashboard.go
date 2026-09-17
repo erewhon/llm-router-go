@@ -191,6 +191,8 @@ type nodeMetric struct {
 	VRAMTotalGB *float64 `json:"vram_total_gb"`
 	VRAMPct     *float64 `json:"vram_pct"`
 	GPUBusyPct  *int     `json:"gpu_busy_pct"`
+	GPUTempC    *int     `json:"gpu_temp_c,omitempty"`
+	GPUPowerW   *float64 `json:"gpu_power_w,omitempty"`
 	RAMUsedGB   *float64 `json:"ram_used_gb"`
 	RAMTotalGB  *float64 `json:"ram_total_gb"`
 	RAMPct      *float64 `json:"ram_pct"`
@@ -204,11 +206,13 @@ type nodeMetric struct {
 }
 
 type dashGPU struct {
-	Index       int     `json:"index"`
-	VRAMUsedGB  float64 `json:"vram_used_gb"`
-	VRAMTotalGB float64 `json:"vram_total_gb"`
-	VRAMPct     float64 `json:"vram_pct"`
-	BusyPct     *int    `json:"busy_pct"`
+	Index       int      `json:"index"`
+	VRAMUsedGB  float64  `json:"vram_used_gb"`
+	VRAMTotalGB float64  `json:"vram_total_gb"`
+	VRAMPct     float64  `json:"vram_pct"`
+	BusyPct     *int     `json:"busy_pct"`
+	TempC       *int     `json:"temp_c,omitempty"`
+	PowerW      *float64 `json:"power_w,omitempty"`
 }
 
 type nodeModelMetric struct {
@@ -247,6 +251,11 @@ func fetchNodeMetrics(ctx context.Context, host string, agentPort int) nodeMetri
 		result.VRAMPct = &pct
 	}
 	result.GPUBusyPct = healthResp.GPUBusyPct
+	result.GPUTempC = healthResp.GPUTempC
+	if healthResp.GPUPowerW != nil {
+		w := round1(*healthResp.GPUPowerW)
+		result.GPUPowerW = &w
+	}
 	if healthResp.RAMUsedGB != nil && healthResp.RAMTotalGB != nil {
 		used := round1(*healthResp.RAMUsedGB)
 		total := round1(*healthResp.RAMTotalGB)
@@ -275,6 +284,8 @@ func fetchNodeMetrics(ctx context.Context, host string, agentPort int) nodeMetri
 				VRAMTotalGB: round1(g.VRAMTotalGB),
 				VRAMPct:     pct,
 				BusyPct:     g.BusyPct,
+				TempC:       g.TempC,
+				PowerW:      g.PowerW,
 			})
 		}
 	}
