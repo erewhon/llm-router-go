@@ -178,9 +178,19 @@ type VllmArgs struct {
 //
 // ToolProxy is *bool so a value of false (explicit opt-out) can be
 // distinguished from "not set" (inherit parent model).
+// AliasOverride tunes how a request that named this alias is forwarded. A
+// model listed under several aliases can present different serving profiles
+// — the classic case is one endpoint with thinking on under one name and off
+// under another — without a second registry entry or a second server.
 type AliasOverride struct {
+	// ChatTemplateKwargs is shorthand for
+	// request_defaults: {chat_template_kwargs: {...}}; see RequestDefaults.
 	ChatTemplateKwargs map[string]any `yaml:"chat_template_kwargs,omitempty"`
 	ToolProxy          *bool          `yaml:"tool_proxy,omitempty"`
+	// RequestDefaults are body fields filled in for requests that arrive via
+	// this alias, over and above (and taking precedence over) the model's own
+	// request_defaults. Same rules as ModelDefinition.RequestDefaults.
+	RequestDefaults map[string]any `yaml:"request_defaults,omitempty"`
 }
 
 type ModelDefinition struct {
@@ -253,6 +263,17 @@ type ModelDefinition struct {
 	// Health tunes how the availability tracker treats this placement. Nil
 	// means the class-based defaults (see health.ProbeEnabled).
 	Health *ModelHealth `yaml:"health,omitempty"`
+	// RequestDefaults are request-body fields the router fills in when the
+	// caller left them unset — sampling (temperature, top_p), a per-request
+	// thinking budget, chat_template_kwargs, anything the engine accepts in
+	// the JSON body. FILL-ONLY: a field the caller sent always wins, and
+	// nested objects merge key by key so a caller's chat_template_kwargs
+	// keeps the entry's other kwargs. Applied on every forwarding attempt for
+	// the seat actually being tried, so a role that fails over from one seat
+	// to another sends each seat its own defaults and never the first seat's.
+	// Reserved and refused at load: model, messages, stream, prompt, input.
+	// Per-alias overrides live in alias_overrides.<alias>.request_defaults.
+	RequestDefaults map[string]any `yaml:"request_defaults,omitempty"`
 }
 
 // ModelHealth is the per-model availability tuning block.
@@ -808,6 +829,14 @@ func zdrToleranceErr(id string, m ModelDefinition, r *ModelRegistry) string {
 func validateModel(id string, m *ModelDefinition, r *ModelRegistry) error {
 	if _, ok := validAPIClasses[m.APIClass]; !ok {
 		return fmt.Errorf("model %q: unknown api_class %q", id, m.APIClass)
+	}
+	if err := validateRequestDefaults(fmt.Sprintf("model %q", id), m.RequestDefaults); err != nil {
+		return err
+	}
+	for alias, ov := range m.AliasOverrides {
+		if err := validateRequestDefaults(fmt.Sprintf("model %q alias_overrides[%q]", id, alias), ov.RequestDefaults); err != nil {
+			return err
+		}
 	}
 	if err := validateFallbacks(id, m, r); err != nil {
 		return err

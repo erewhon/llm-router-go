@@ -507,13 +507,20 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		}
 
 		for attempt := 0; ; attempt++ {
-			bodyMap["model"] = res.BackendModel
+			// Each attempt forwards its own copy of the caller's body: the
+			// seat's request_defaults fill in what the caller left unset
+			// (fill-only, caller wins), and because the copy is rebuilt from
+			// the untouched bodyMap, a failover never carries the previous
+			// seat's defaults to the next one.
+			appliedDefaults := config.AppliedRequestDefaultKeys(bodyMap, res.RequestDefaults)
+			sendMap := config.ApplyRequestDefaults(bodyMap, res.RequestDefaults)
+			sendMap["model"] = res.BackendModel
 			// Re-applied on every attempt: this puts the ZDR directive on the
 			// wire for the seat actually being tried, and — for a directly
 			// named model, which went through no candidate walk — it is the
 			// only place the caller's tier is enforced at all.
 			if privTier != tierNone {
-				if refusal := rt.applyPrivacy(bodyMap, res, privTier, privSource); refusal != "" {
+				if refusal := rt.applyPrivacy(sendMap, res, privTier, privSource); refusal != "" {
 					rt.logger.WarnContext(r.Context(), "refusing on privacy tier",
 						"model", model, "resolved_via", res.ModelID, "role", res.Role,
 						"tier", privTier.String(), "scope", demand.scope, "token_id", demand.tokenID,
@@ -526,7 +533,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				}
 				rec.Header().Set(PrivacyHeader, privTier.String())
 			}
-			newBody, err := json.Marshal(bodyMap)
+			newBody, err := json.Marshal(sendMap)
 			if err != nil {
 				errMsg = "re-encode body: " + err.Error()
 				http.Error(rec, errMsg, http.StatusInternalServerError)
@@ -540,7 +547,8 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				"backend_url", res.BackendURL, "resolved_via", res.ModelID,
 				"role", res.Role, "chain", res.Chain, "overflowed", res.Overflowed,
 				"via_tool_proxy", res.ViaToolProxy,
-				"prompt_tokens_est", res.PromptTokens, "downshift_from", res.Downshift)
+				"prompt_tokens_est", res.PromptTokens, "downshift_from", res.Downshift,
+				"request_defaults", appliedDefaults)
 
 			// Chains also retry on upstream 5xx / error-envelope-in-2xx — but
 			// only while another provider could actually take the request. On

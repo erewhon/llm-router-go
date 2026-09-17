@@ -188,7 +188,9 @@ func (p *Proxy) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rewrite the model field to the backend's expected name for every path.
+	// Fill in the entry's request_defaults (caller's fields win), then
+	// rewrite the model field to the backend's expected name for every path.
+	bodyMap = config.ApplyRequestDefaults(bodyMap, res.RequestDefaults)
 	bodyMap["model"] = res.BackendModel
 
 	if !p.shouldInjectTools(res.ModelID) {

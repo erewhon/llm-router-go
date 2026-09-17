@@ -38,6 +38,16 @@ models:
     vllm_args:                        # informational / used by node‑agent launch
       tool_call_parser: qwen3_coder
       max_model_len: 262144
+    request_defaults:                 # body fields filled in when the caller
+      temperature: 0.7                # left them unset (fill‑only: a caller's
+      top_p: 0.8                      # own value always wins, nested objects
+      chat_template_kwargs:           # merge key by key). Reserved: model,
+        enable_thinking: false        # messages, stream, prompt, input.
+    alias_overrides:                  # per‑alias tweaks, on top of the above
+      coder:
+        request_defaults:
+          chat_template_kwargs:
+            enable_thinking: true     # "coder" thinks; a direct name does not
 
   # --- Scenario 2: LM Studio on THIS machine (localhost) ------------------
   # LM Studio serves an OpenAI‑compatible API on http://localhost:1234/v1.

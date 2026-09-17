@@ -134,6 +134,48 @@ Rules worth knowing before wiring a script's `--privacy` flag to it:
 still somebody else's computer. Use `local` for anything that must not leave the
 fleet at all.
 
+### Per-model request defaults (`request_defaults`)
+
+An entry can fill in request-body fields the caller left unset — sampling, a
+per-request thinking budget, `chat_template_kwargs`, anything the engine
+accepts in the JSON body:
+
+```yaml
+models:
+  glm-5.3-flash-spark:
+    hf_repo: glm-5.3-flash
+    backend: vllm
+    multi_node: {nodes: [archimedes, hypatia], head_node: archimedes}
+    aliases: [glm-fast, glm-think]
+    request_defaults:                # every request via this entry
+      temperature: 1.0
+      top_p: 0.95
+      chat_template_kwargs: {enable_thinking: false}
+    alias_overrides:
+      glm-think:                     # ...except these, when named as glm-think
+        request_defaults:
+          thinking_token_budget: 3000
+          chat_template_kwargs: {enable_thinking: true}
+```
+
+The merge is **fill-only**: a field the caller sent always wins, at every
+nesting level — objects merge key by key (a caller's
+`chat_template_kwargs: {reasoning_effort: low}` keeps the entry's
+`enable_thinking`), and any other collision keeps the caller's value.
+Precedence when both exist is alias override, then model. An alias override's
+older `chat_template_kwargs:` key is shorthand for
+`request_defaults: {chat_template_kwargs: ...}`.
+
+Defaults are applied per forwarding attempt for the seat actually being tried,
+so a role that fails over from one seat to another sends each seat its own
+defaults, never the first seat's. Role candidates are registry keys, so a role
+that wants the thinking profile lists a second entry pointing at the same
+server rather than an alias. `model`, `messages`, `stream`, `prompt` and
+`input` are refused at load. The forwarding log line names the top-level keys
+each request picked up (`request_defaults=[top_p ...]`). The tool proxy applies
+the same defaults for callers that reach it directly; behind the router the
+second application is a no-op.
+
 ### Live inventory and discovery
 
 `/v1/models` and the OpenCode well-known are rendered from what each upstream

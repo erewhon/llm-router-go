@@ -82,6 +82,11 @@ type resolveResult struct {
 	// Discovered marks a target the live inventory adopted from a provider's
 	// listing rather than one written in models.yaml. Carried to reqlog.
 	Discovered bool
+	// RequestDefaults are the body fields to fill in for THIS seat (the
+	// model's request_defaults merged under the matched alias's override),
+	// applied by handleProxy on every attempt — so a failover sends the next
+	// seat its own defaults, never the first seat's. Nil when unconfigured.
+	RequestDefaults map[string]any
 }
 
 // resolveModel maps an incoming model name to its upstream. It matches, in
@@ -341,16 +346,17 @@ func (rt *Router) buildResult(id string, m config.ModelDefinition, matchedAlias,
 	}
 
 	return resolveResult{
-		BackendURL:   root,
-		BackendModel: backendModel,
-		AuthBearer:   auth,
-		AuthHeader:   authHeader,
-		ModelID:      id,
-		ResolvedFrom: original,
-		ViaToolProxy: viaToolProxy,
-		APIClass:     m.APIClass,
-		Egress:       egress,
-		Discovered:   m.IsDiscovered(),
+		BackendURL:      root,
+		BackendModel:    backendModel,
+		AuthBearer:      auth,
+		AuthHeader:      authHeader,
+		ModelID:         id,
+		ResolvedFrom:    original,
+		ViaToolProxy:    viaToolProxy,
+		APIClass:        m.APIClass,
+		Egress:          egress,
+		Discovered:      m.IsDiscovered(),
+		RequestDefaults: m.RequestDefaultsFor(matchedAlias),
 	}, nil
 }
 

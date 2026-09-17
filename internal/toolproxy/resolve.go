@@ -21,6 +21,12 @@ type resolveResult struct {
 	ResolvedFrom string
 	// ModelID is the registry key that matched (e.g. "nemotron-3-super").
 	ModelID string
+	// RequestDefaults are the entry's request_defaults (merged under the
+	// matched alias's override, if an alias was what matched), filled into
+	// the body before forwarding. The router applies the same defaults on
+	// its side; the fill-only merge makes the second application a no-op,
+	// so this exists for callers that hit the tool proxy directly.
+	RequestDefaults map[string]any
 }
 
 // resolveModel finds the registry entry for a model name as sent by an
@@ -74,11 +80,18 @@ func resolveModel(r *config.ModelRegistry, model string) (resolveResult, error) 
 		}
 		// APIBase returns ".../v1"; the proxy wants just the host:port.
 		root := strings.TrimSuffix(base, "/v1")
+		// Only an alias match carries alias-level overrides; a key or
+		// hf_repo match gets the model's own defaults.
+		alias := ""
+		if id != want && hfBase != want && m.HFRepo != want {
+			alias = want
+		}
 		return resolveResult{
-			BackendURL:   root,
-			BackendModel: hfBase,
-			ResolvedFrom: model,
-			ModelID:      id,
+			BackendURL:      root,
+			BackendModel:    hfBase,
+			ResolvedFrom:    model,
+			ModelID:         id,
+			RequestDefaults: m.RequestDefaultsFor(alias),
 		}, nil
 	}
 	return resolveResult{}, fmt.Errorf("toolproxy: unknown model %q", model)
