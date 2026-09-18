@@ -398,9 +398,9 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 
 		// Size the request before resolving: role candidates whose context
 		// envelope this exceeds get skipped in the walk (see envelope.go).
-		// The whole body is the input, tool definitions and transcript
+		// The whole transcript is the input, tool definitions and tool results
 		// included — an agent loop's last message says nothing about its size.
-		promptTokens := estimatePromptTokens(body)
+		promptTokens := estimatePromptTokens(bodyMap)
 
 		// The caller's privacy tier — the stricter of their X-Router-Privacy
 		// header and their token's scope (scope.go) — is read BEFORE

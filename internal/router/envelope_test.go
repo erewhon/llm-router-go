@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -96,15 +97,17 @@ func TestNoEnvelopeMeansOnlyTheDeclaredWindowGates(t *testing.T) {
 	// hard gate, which just moves a certain backend failure to the router).
 	rt := newEnvelopeRouter(t)
 
-	for _, promptTokens := range []int{0, 1000, 100_000, 130_000} {
+	for _, promptTokens := range []int{0, 1000, 8000, 10_000, 10_241, 100_000, 130_000} {
 		res, err := rt.resolveModel("tiny", false, promptTokens, tierNone)
 		if err != nil {
 			t.Fatalf("resolve tiny at %d tokens: %v", promptTokens, err)
 		}
 		want := "small-window"
-		if promptTokens > 8192 {
-			// Past small-window's declared window the HARD gate applies —
-			// which is the other half of the feature, not a regression.
+		if float64(promptTokens) > 8192*hardGateSlack {
+			// Past small-window's declared window BY MORE THAN THE SLACK the
+			// HARD gate applies — the other half of the feature. Inside the
+			// slack (10_000 on an 8192 window) the estimate is within its
+			// own error band and the backend decides.
 			want = "gpt-oss"
 		}
 		if res.ModelID != want {
@@ -296,11 +299,77 @@ func TestFailoverWalkRespectsTheEnvelope(t *testing.T) {
 
 func TestEstimatePromptTokens(t *testing.T) {
 	if got := estimatePromptTokens(nil); got != 0 {
-		t.Errorf("empty body -> %d, want 0", got)
+		t.Errorf("nil body -> %d, want 0", got)
 	}
-	body := []byte(strings.Repeat("x", 3500))
-	if got := estimatePromptTokens(body); got != 1000 {
-		t.Errorf("3500 chars -> %d tokens, want 1000", got)
+	if got := estimatePromptTokens(map[string]any{"model": "x"}); got != 0 {
+		t.Errorf("no messages -> %d, want 0 (gate disabled)", got)
+	}
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": strings.Repeat("x", int(3500*charsPerToken/3.5))},
+	}}
+	want := 1000 + messageOverheadTokens
+	if got := estimatePromptTokens(body); got != want {
+		t.Errorf("one 1000-token message -> %d, want %d", got, want)
+	}
+}
+
+// The regression: an agent transcript's JSON envelope — escaped newlines and
+// tabs in every line of code, the per-turn tool-result wrapper — must not
+// count. Measured against the same body serialized, the estimate has to
+// track the text, not the bytes.
+func TestEstimateIgnoresTheJSONEnvelope(t *testing.T) {
+	line := "\t\tlog.Printf(\"read %q: %v\\n\", path, err)\n"
+	code := strings.Repeat(line, 3000) // ~110K chars: tabs, quotes and newlines on every line
+	var msgs []any
+	msgs = append(msgs, map[string]any{"role": "system", "content": "You are a coding agent."})
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs,
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "c", "type": "function", "function": map[string]any{
+					"name": "read", "arguments": `{"path":"/repo/file.go"}`}}}},
+			map[string]any{"role": "tool", "tool_call_id": "c", "content": code},
+		)
+	}
+	body := map[string]any{"messages": msgs, "tools": []any{
+		map[string]any{"type": "function", "function": map[string]any{
+			"name": "read", "description": "Read a file", "parameters": map[string]any{
+				"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}}}},
+	}}
+	got := estimatePromptTokens(body)
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byBytes := int(float64(len(raw)) / charsPerToken)
+	textChars := 5 * len(code)
+	// Every tab, quote and newline in the code is one byte of text but two of
+	// JSON, so the old estimate ran a clear fraction above the text-based one.
+	if byBytes < int(float64(got)*1.10) {
+		t.Fatalf("fixture is not envelope-heavy enough: bytes-estimate %d vs text-estimate %d", byBytes, got)
+	}
+	lo := int(float64(textChars) / charsPerToken)
+	hi := int(float64(textChars)/charsPerToken*1.05) + 11*messageOverheadTokens
+	if got < lo || got > hi {
+		t.Errorf("estimate %d outside [%d, %d] for %d chars of text", got, lo, hi, textChars)
+	}
+}
+
+func TestEstimateCountsImagesFlat(t *testing.T) {
+	// A base64 image is ~1.3 MB of body for one picture; it must cost the
+	// flat per-image amount, not a third of a million tokens.
+	data := "data:image/png;base64," + strings.Repeat("A", 1_300_000)
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "what is this?"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": data}},
+		}},
+	}}
+	got := estimatePromptTokens(body)
+	q := "what is this?"
+	want := imageTokens + messageOverheadTokens + int(float64(len(q))/charsPerToken)
+	if got != want {
+		t.Errorf("image message -> %d, want %d", got, want)
 	}
 }
 
