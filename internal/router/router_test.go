@@ -132,6 +132,14 @@ models:
     api_base: http://pythia.local:5397/v1
     api_class: tts
     aliases: [tts, speak]
+
+  # stt model (whisper.cpp, multipart /v1/audio/transcriptions path)
+  whisper-large-v3-turbo:
+    hf_repo: whisper-large-v3-turbo
+    backend: external
+    api_base: http://pythia.local:5394
+    api_class: stt
+    aliases: [stt, transcribe]
 `
 
 func testRegistry(t *testing.T) *config.ModelRegistry {

@@ -20,7 +20,9 @@ import (
 // backends). /v1/images/generations is plain JSON and reuses the generic
 // handleProxy. /v1/images/edits is multipart/form-data, which handleProxy's
 // JSON parse would reject — handleProxyMultipart below resolves the model
-// from the form and forwards the body VERBATIM.
+// from the form and forwards the body VERBATIM. /v1/audio/transcriptions
+// (whisper.cpp, api_class stt) is the same shape — audio file part plus a
+// model field — and shares the handler.
 //
 // No model rewrite happens on the multipart path: each creative backend
 // serves exactly one model and ignores the field, and rewriting one part of

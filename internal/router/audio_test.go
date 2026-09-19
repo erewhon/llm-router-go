@@ -1,6 +1,9 @@
 package router
 
 import (
+	"bytes"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,5 +69,104 @@ func TestAudioSpeech_RejectsChatModel(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "api_class") {
 		t.Errorf("error should name the api_class mismatch: %s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /v1/audio/transcriptions (multipart in, JSON out, images/edits proxy path)
+// ---------------------------------------------------------------------------
+
+// transcriptionBody builds an OpenAI-shaped transcription form: a small fake
+// WAV file part, the model field, and a response_format field.
+func transcriptionBody(t *testing.T, model string) (*bytes.Buffer, string) {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	mw := multipart.NewWriter(buf)
+	fw, err := mw.CreateFormFile("file", "turn.wav")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := fw.Write([]byte("RIFF fake wav bytes")); err != nil {
+		t.Fatalf("write audio part: %v", err)
+	}
+	if model != "" {
+		if err := mw.WriteField("model", model); err != nil {
+			t.Fatalf("WriteField model: %v", err)
+		}
+	}
+	if err := mw.WriteField("response_format", "json"); err != nil {
+		t.Fatalf("WriteField response_format: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	return buf, mw.FormDataContentType()
+}
+
+func TestAudioTranscriptions_MultipartForwardsVerbatim(t *testing.T) {
+	var gotPath, gotCT string
+	var gotBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotCT = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":" hello there"}`))
+	}))
+	defer up.Close()
+	rt := newTestRouter(t, &transportRedirect{to: up.URL, rt: http.DefaultTransport})
+
+	// The model field comes AFTER the file part here, as OpenAI clients send
+	// it; the form scan must drain the audio to reach it.
+	body, ct := transcriptionBody(t, "stt") // alias of whisper-large-v3-turbo
+	sent := body.Bytes()
+	rec := postMultipart(t, rt, "/v1/audio/transcriptions", body, ct)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/audio/transcriptions" {
+		t.Errorf("upstream path = %q, want /v1/audio/transcriptions", gotPath)
+	}
+	if !bytes.Equal(gotBody, sent) {
+		t.Errorf("multipart body was modified in transit (len %d -> %d)", len(sent), len(gotBody))
+	}
+	if !strings.HasPrefix(gotCT, "multipart/form-data") {
+		t.Errorf("upstream content-type = %q", gotCT)
+	}
+	if got := rec.Body.String(); got != `{"text":" hello there"}` {
+		t.Errorf("transcription body mangled: %q", got)
+	}
+}
+
+// A TTS model on the transcriptions endpoint is a class mismatch: both are
+// "audio", but speech and stt are different classes and different backends.
+func TestAudioTranscriptions_RejectsTTSModel(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	body, ct := transcriptionBody(t, "tts")
+	rec := postMultipart(t, rt, "/v1/audio/transcriptions", body, ct)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "api_class") {
+		t.Errorf("error should name the api_class mismatch: %s", rec.Body.String())
+	}
+}
+
+func TestAudioTranscriptions_MissingModelIs400(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	body, ct := transcriptionBody(t, "")
+	rec := postMultipart(t, rt, "/v1/audio/transcriptions", body, ct)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A JSON body on the transcriptions endpoint is the wrong encoding, not a
+// proxy: the form is where the model lives.
+func TestAudioTranscriptions_NonMultipartIs400(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	rec := postTo(t, rt, "/v1/audio/transcriptions", `{"model":"stt"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }

@@ -225,6 +225,14 @@ func (rt *Router) Handler() http.Handler {
 	// is raw audio (audio/wav); ModifyResponse leaves non-JSON, non-SSE
 	// bodies untouched, so it streams through with no usage capture.
 	mux.HandleFunc("POST /v1/audio/speech", rt.handleProxy(config.APIClassTTS, true))
+	// STT passthrough (whisper.cpp, OpenAI /v1/audio/transcriptions shape).
+	// The request is multipart/form-data — the audio is a file part and the
+	// model name a form field — so it takes the images/edits path, which
+	// resolves the model from the form and forwards the body verbatim. The
+	// backend must serve the OpenAI path itself: whisper.cpp's server does so
+	// only with --inference-path /v1/audio/transcriptions (its default is
+	// /inference) — see deploy/pythia/whisper-server.service in llm-router.
+	mux.HandleFunc("POST /v1/audio/transcriptions", rt.handleProxyMultipart(config.APIClassSTT))
 
 	// Anthropic Messages passthrough — registered only when an
 	// api_class:anthropic target is configured. Both paths bypass the
