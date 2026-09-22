@@ -1,4 +1,4 @@
-package main
+package saycmd
 
 import (
 	"context"

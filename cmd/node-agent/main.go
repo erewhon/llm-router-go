@@ -1,152 +1,34 @@
 // Command node-agent serves the per-machine HTTP API that manages
-// inference backends on a single node. See docs/PLAN.md Phase 1.
+// inference backends on a single node.
+//
+// The body lives in package cli (cli.NodeAgent) so the unified pitf CLI can
+// mount it; this file only stamps the version and turns the returned error
+// into the exit status the binary has always used.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
-	"time"
 
-	"github.com/erewhon/llm-router-go/internal/config"
-	"github.com/erewhon/llm-router-go/internal/httpx"
-	"github.com/erewhon/llm-router-go/internal/logx"
-	"github.com/erewhon/llm-router-go/internal/nodeagent"
-	"github.com/erewhon/llm-router-go/internal/nodeagent/backends/sglang"
-	"github.com/erewhon/llm-router-go/internal/nodeagent/gpu"
+	"github.com/erewhon/llm-router-go/cli"
 )
 
 // version is overridden via -ldflags="-X main.version=$(git describe ...)".
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:]))
-}
-
-func run(args []string) int {
-	fs := flag.NewFlagSet("node-agent", flag.ContinueOnError)
-	var (
-		addr         = fs.String("addr", ":8100", "listen address")
-		modelsYAML   = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
-		nodeName     = fs.String("node", "", "node name in models.yaml (defaults to hostname's first label)")
-		logLevel     = fs.String("log-level", "info", "log level: debug, info, warn, error")
-		logFormat    = fs.String("log-format", "json", "log format: json or text")
-		shutdownTo   = fs.Duration("shutdown-timeout", 5*time.Second, "graceful shutdown deadline")
-		probeHost    = fs.String("probe-host", "localhost", "host name backend probes target")
-		showVer      = fs.Bool("version", false, "print version and exit")
-		validateOnly = fs.Bool("validate", false, "load --models-yaml with THIS binary's config package, report OK or the load error, and exit; the deploy preflight runs this on every reader before pushing a registry")
-	)
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-
-	if *showVer {
-		fmt.Println(version)
-		return 0
-	}
-	// --validate exists so a registry can be checked against EVERY binary
-	// that will read it, not only the router. The three cmds share the config
-	// package but ship separately, and on 2026-09-10 a models.yaml using a
-	// value only the newest router understood crash-looped every agent and
-	// the tool proxy while the router's own validator reported 0 errors.
-	// The check is exactly the load this binary performs at startup.
-	if *validateOnly {
-		if _, err := config.Load(*modelsYAML); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: %v\n", *modelsYAML, err)
-			return 1
-		}
-		fmt.Printf("OK — %s loads with %s\n", *modelsYAML, version)
-		return 0
-	}
-
-	level, err := logx.ParseLevel(*logLevel)
-	if err != nil {
+	cli.Version = version
+	// A background context on purpose: cli.NodeAgent installs its own signal
+	// handling at the point the old main did, so startup and shutdown
+	// behave exactly as before.
+	err := cli.NodeAgent(context.Background(), os.Args[1:])
+	var exit *cli.ExitError
+	if err != nil && !errors.As(err, &exit) && !errors.Is(err, flag.ErrHelp) {
+		// ExitError and ErrHelp have already printed their diagnostics.
 		fmt.Fprintln(os.Stderr, err)
-		return 2
 	}
-	logger := logx.New(os.Stdout, logx.Config{
-		Level:  level,
-		Format: *logFormat,
-		Attrs:  httpx.LogAttrsFromContext,
-	}).With("svc", "node-agent")
-
-	if *nodeName == "" {
-		hn, err := os.Hostname()
-		if err != nil {
-			logger.Error("hostname lookup failed", "err", err)
-			return 1
-		}
-		*nodeName = strings.SplitN(hn, ".", 2)[0]
-	}
-
-	registry, err := config.Load(*modelsYAML)
-	if err != nil {
-		logger.Error("load registry failed", "path", *modelsYAML, "err", err)
-		return 1
-	}
-
-	nodeDef := registry.Nodes[*nodeName]
-
-	opts := []nodeagent.Option{
-		// SGLang on the Sparks (and the legacy vLLM image) both advertise
-		// over the same OpenAI-shaped /v1/models + Prometheus /metrics
-		// protocol, so one driver covers BackendVLLM today. llama.cpp's
-		// llama-server (e.g. hekaton's CPU-served MiniMax) speaks the same
-		// shape, so the same driver probes it.
-		nodeagent.WithBackend(config.BackendVLLM, sglang.New(*probeHost)),
-	}
-
-	// GPU snapshot for /health, installed only on nodes that actually have a
-	// GPU. A CPU-only node (gpu: none) gets no reader, so /health cleanly
-	// omits the gpu_* fields instead of erroring on every probe. When such a
-	// node gains a card, flip its models.yaml gpu: to the real vendor.
-	//
-	// The vendor comes from the registry; the per-node vram_gb is a fallback
-	// when xpu-smi discovery can't determine total VRAM on Arc.
-	//
-	// Cached: the GPU probe is the one slow part of /health (Intel xpu-smi can
-	// take ~1.5s, right at the dashboard's 1.5s probe timeout). The cache runs
-	// it at most once per TTL and serves the last snapshot otherwise, so
-	// /health stays fast. Mirrors the Python agent's get_gpu_info_cached fix.
-	if nodeDef.GPU != "" && nodeDef.GPU != config.GpuNone {
-		opts = append(opts, nodeagent.WithGPUReader(gpu.Cached(gpu.NewReader(nodeDef.GPU, gpu.ReaderOptions{
-			FallbackTotalVRAMGB: nodeDef.VRAMGB,
-		}), 5*time.Second)))
-	}
-
-	agent, err := nodeagent.New(registry, *nodeName, logger, version, opts...)
-	if err != nil {
-		logger.Error("agent init failed", "node", *nodeName, "err", err)
-		return 1
-	}
-
-	handler := httpx.Chain(
-		agent.Handler(),
-		httpx.RequestID,
-		httpx.AccessLog(logger),
-		httpx.Recover(logger),
-	)
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	logger.Info("starting", "addr", *addr, "node", *nodeName, "version", version,
-		"models_yaml", *modelsYAML)
-
-	if err := httpx.ServeContext(ctx, srv, *shutdownTo); err != nil {
-		logger.Error("server stopped with error", "err", err)
-		return 1
-	}
-	logger.Info("shutdown complete")
-	return 0
+	os.Exit(cli.ExitCode(err))
 }

@@ -266,6 +266,11 @@ just fmt
 just lint               # requires golangci-lint
 ```
 
+Each binary's body is importable as `github.com/erewhon/llm-router-go/cli`
+(`cli.Router`, `cli.NodeAgent`, `cli.GPUExporter`, `cli.ToolProxy`, `cli.Say`),
+so the unified `pitf` CLI can mount them; `cmd/*` are thin wrappers over those
+entries and stay the build targets.
+
 ## License
 
 AGPL-3.0-or-later. See [`LICENSE`](LICENSE).

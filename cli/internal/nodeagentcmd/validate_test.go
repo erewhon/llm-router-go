@@ -1,9 +1,12 @@
-package main
+package nodeagentcmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/erewhon/llm-router-go/cli/internal/exitcode"
 )
 
 const goodRegistry = `
@@ -30,13 +33,13 @@ roles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if rc := run([]string{"--validate", "--models-yaml", good}); rc != 0 {
+	if rc := exitcode.Code(Run(context.Background(), []string{"--validate", "--models-yaml", good})); rc != 0 {
 		t.Errorf("--validate on a loadable file: exit %d, want 0", rc)
 	}
-	if rc := run([]string{"--validate", "--models-yaml", bad}); rc != 1 {
+	if rc := exitcode.Code(Run(context.Background(), []string{"--validate", "--models-yaml", bad})); rc != 1 {
 		t.Errorf("--validate on an unloadable file: exit %d, want 1", rc)
 	}
-	if rc := run([]string{"--validate", "--models-yaml", filepath.Join(dir, "missing.yaml")}); rc != 1 {
+	if rc := exitcode.Code(Run(context.Background(), []string{"--validate", "--models-yaml", filepath.Join(dir, "missing.yaml")})); rc != 1 {
 		t.Errorf("--validate on a missing file: exit %d, want 1", rc)
 	}
 }
