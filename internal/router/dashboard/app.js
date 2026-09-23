@@ -12,9 +12,10 @@ import activity from "/static/tabs/activity.js";
 import fleet from "/static/tabs/fleet.js";
 import catalog from "/static/tabs/catalog.js";
 import traffic from "/static/tabs/traffic.js";
+import requests from "/static/tabs/requests.js";
 import connect from "/static/tabs/connect.js";
 
-const TABS = [activity, fleet, catalog, traffic, connect];
+const TABS = [activity, fleet, catalog, traffic, requests, connect];
 const DEFAULT_TAB = "activity";
 
 // poll(fn, ms): run fn now and every ms while the owning tab is mounted and

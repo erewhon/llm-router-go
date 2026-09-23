@@ -337,6 +337,7 @@ func TestDashboardV2_StaticServing(t *testing.T) {
 		{"/static/tabs/fleet.js", 200, "text/javascript", `id: "fleet"`},
 		{"/static/tabs/catalog.js", 200, "text/javascript", `id: "catalog"`},
 		{"/static/tabs/traffic.js", 200, "text/javascript", `id: "traffic"`},
+		{"/static/tabs/requests.js", 200, "text/javascript", `id: "requests"`},
 		{"/static/tabs/connect.js", 200, "text/javascript", `id: "connect"`},
 		{"/static/nope.js", 404, "", ""},
 		{"/static/index.html", 404, "", ""},
@@ -564,5 +565,66 @@ func TestDashboard_Traffic(t *testing.T) {
 	_, out = trafficReq(t, rt, gated, "/api/traffic?window=1h&by=principal", map[string]string{DashboardAuthHeader: "s", "X-Auth-Request-Email": "owner@example"})
 	if len(out["rows"].([]any)) != 2 {
 		t.Errorf("owner by principal should see both principals: %v", out["rows"])
+	}
+}
+
+func TestDashboard_RequestsBySession(t *testing.T) {
+	sink := &reqlog.MemorySink{}
+	now := time.Now()
+	for i, r := range []reqlog.Record{
+		{SessionID: "0d3e4b2a-1111", Principal: "steven", ResolvedVia: "glm"},
+		{SessionID: "0d3e4b2a-1111", Principal: "family", ResolvedVia: "glm"},
+		{SessionID: "ffff0000-2222", Principal: "steven", ResolvedVia: "glm"},
+		{Principal: "steven", ResolvedVia: "glm"},
+	} {
+		r.TS, r.Status, r.LatencyMS = now.Add(time.Duration(i)*time.Second), 200, 5
+		sink.Log(r)
+	}
+	rt := newTestRouter(t, nil, WithSink(sink))
+	open := DashboardConfig{}
+
+	code, out := trafficReq(t, rt, open, "/api/requests?session=0D3E", nil)
+	if code != 200 || out["available"] != true || len(out["rows"].([]any)) != 2 {
+		t.Fatalf("open, prefix: %d %v", code, out)
+	}
+	if first := out["rows"].([]any)[0].(map[string]any); first["principal"] != "family" {
+		t.Errorf("rows not newest first: %v", out["rows"])
+	}
+	if code, _ := trafficReq(t, rt, open, "/api/requests?session=0d3", nil); code != 400 {
+		t.Errorf("3-char prefix: %d, want 400", code)
+	}
+	if code, _ := trafficReq(t, rt, open, "/api/requests?session=0d3e&limit=x", nil); code != 400 {
+		t.Errorf("bad limit: %d, want 400", code)
+	}
+	_, out = trafficReq(t, rt, open, "/api/requests?session=0d3e&limit=1", nil)
+	if len(out["rows"].([]any)) != 1 {
+		t.Errorf("limit=1: %v", out["rows"])
+	}
+	_, out = trafficReq(t, rt, open, "/api/requests?session=9999", nil)
+	if rows := out["rows"].([]any); len(rows) != 0 {
+		t.Errorf("unknown session should be an empty list: %v", out)
+	}
+
+	// Non-owner sees only their own principal's rows; the owner sees all.
+	gated := DashboardConfig{AuthSecret: "s", Owners: []string{"owner@example"}}
+	fam := map[string]string{DashboardAuthHeader: "s", "X-Auth-Request-Email": "family"}
+	_, out = trafficReq(t, rt, gated, "/api/requests?session=0d3e", fam)
+	rows := out["rows"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["principal"] != "family" {
+		t.Errorf("non-owner = %v, want only family's row", rows)
+	}
+	owner := map[string]string{DashboardAuthHeader: "s", "X-Auth-Request-Email": "owner@example"}
+	_, out = trafficReq(t, rt, gated, "/api/requests?session=0d3e", owner)
+	if len(out["rows"].([]any)) != 2 {
+		t.Errorf("owner should see both rows: %v", out["rows"])
+	}
+	if code, _ := trafficReq(t, rt, gated, "/api/requests?session=0d3e", nil); code != 401 {
+		t.Errorf("no identity behind a secret: %d, want 401", code)
+	}
+
+	// No queryable sink.
+	_, out = trafficReq(t, newTestRouter(t, nil), open, "/api/requests?session=0d3e", nil)
+	if out["available"] != false {
+		t.Errorf("NopSink: %v", out)
 	}
 }

@@ -1,6 +1,7 @@
 package reqlog
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"log/slog"
@@ -453,5 +454,64 @@ CREATE TABLE router_requests (
 	}
 	if n != 1 {
 		t.Errorf("session_id index count = %d, want 1", n)
+	}
+}
+
+// RequestsBySession: prefix match is case-insensitive, LIKE metacharacters
+// in the prefix are literal, the principal filter holds, newest first.
+func TestSQLiteSink_RequestsBySession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite: %v", err)
+	}
+	now := time.Now()
+	pt := 12
+	for i, r := range []Record{
+		{SessionID: "ABCD1234-aaaa", Principal: "steven", Model: "coder", PromptTokens: &pt},
+		{SessionID: "abcd1234-aaaa", Principal: "family", Model: "coder"},
+		{SessionID: "abcd9999-bbbb", Principal: "steven", Model: "coder"},
+		{SessionID: "ab%d-literal", Principal: "steven", Model: "coder"},
+		{Principal: "steven", Model: "coder"},
+	} {
+		r.Method, r.Path, r.Status, r.LatencyMS = "POST", "/v1/chat/completions", 200, 5
+		r.TS = now.Add(time.Duration(i) * time.Second)
+		sink.Log(r)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reader, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reader.Close()
+	ctx := context.Background()
+
+	rows, err := reader.RequestsBySession(ctx, "abcd1234", "", 10)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 2 || rows[0].Principal != "family" || rows[1].SessionID != "ABCD1234-aaaa" {
+		t.Fatalf("rows = %+v, want both abcd1234 rows newest first", rows)
+	}
+	if rows[1].PromptTokens == nil || *rows[1].PromptTokens != 12 || rows[0].PromptTokens != nil {
+		t.Errorf("prompt tokens not carried as nullable: %+v", rows)
+	}
+	if rows[0].TS.IsZero() {
+		t.Errorf("ts not parsed")
+	}
+	rows, _ = reader.RequestsBySession(ctx, "abcd1234", "steven", 10)
+	if len(rows) != 1 || rows[0].Principal != "steven" {
+		t.Errorf("principal filter: %+v", rows)
+	}
+	rows, _ = reader.RequestsBySession(ctx, "ab%d", "", 10)
+	if len(rows) != 1 || rows[0].SessionID != "ab%d-literal" {
+		t.Errorf("%% must be literal: %+v", rows)
+	}
+	rows, _ = reader.RequestsBySession(ctx, "abcd", "", 1)
+	if len(rows) != 1 {
+		t.Errorf("limit: %d rows", len(rows))
 	}
 }
