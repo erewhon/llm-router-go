@@ -55,6 +55,7 @@ func TestPostgresSink_RoundTrip(t *testing.T) {
 		PromptTokens:     &pt,
 		CompletionTokens: &ct,
 		TotalTokens:      &tt,
+		SessionID:        "0d3e4b2a-test",
 	})
 
 	// Async writer — poll until the row appears (or give up after ~2s).
@@ -74,14 +75,15 @@ func TestPostgresSink_RoundTrip(t *testing.T) {
 		status, latency               int
 		via                           bool
 		prompt, completion, total     *int
+		sessionID                     *string
 	)
 	err = sink.pool.QueryRow(ctx,
 		`SELECT model, backend_model, api_class, via_tool_proxy, status, latency_ms,
-		        prompt_tokens, completion_tokens, total_tokens
+		        prompt_tokens, completion_tokens, total_tokens, session_id
 		   FROM router_requests
 		  WHERE request_id = $1`, "test-rt-1").
 		Scan(&model, &backendModel, &apiClass, &via, &status, &latency,
-			&prompt, &completion, &total)
+			&prompt, &completion, &total, &sessionID)
 	if err != nil {
 		t.Fatalf("QueryRow: %v", err)
 	}
@@ -92,6 +94,10 @@ func TestPostgresSink_RoundTrip(t *testing.T) {
 	}
 	if prompt == nil || *prompt != 7 || completion == nil || *completion != 11 || total == nil || *total != 18 {
 		t.Errorf("token round-trip wrong: pt=%v ct=%v tt=%v", prompt, completion, total)
+	}
+
+	if sessionID == nil || *sessionID != "0d3e4b2a-test" {
+		t.Errorf("session_id round-trip wrong: %v", sessionID)
 	}
 
 	// Close is idempotent: an explicit Close before the defer must not panic.

@@ -370,3 +370,88 @@ func TestSQLiteSink_LocalRequestStoresNullProvenance(t *testing.T) {
 		t.Errorf("rows with NULL provenance = %d, want 1", n)
 	}
 }
+
+// session_id must land on a table created by an older binary (see
+// TestSQLiteSink_MigratesProvenanceColumns for why), and a request that
+// carried no session id must store NULL so "unattributed" is IS NULL.
+func TestSQLiteSink_MigratesSessionID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "presession.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A table with every column up to (but not including) session_id.
+	const preSession = `
+CREATE TABLE router_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, ts TEXT NOT NULL,
+    method TEXT NOT NULL, path TEXT NOT NULL, model TEXT NOT NULL,
+    backend_model TEXT, backend_url TEXT, resolved_via TEXT, api_class TEXT,
+    via_tool_proxy INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+    cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER,
+    prefix_hash_chain TEXT, role TEXT, role_overflowed INTEGER NOT NULL DEFAULT 0,
+    candidate_pressure INTEGER, failover_from TEXT, error TEXT,
+    upstream_status INTEGER, error_class TEXT, principal TEXT, token_id TEXT,
+    upstream_provider TEXT, privacy_tolerance TEXT, upstream_cost_usd REAL,
+    cached_prompt_tokens INTEGER, discovered INTEGER NOT NULL DEFAULT 0);`
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(preSession); err != nil {
+		t.Fatalf("create pre-session schema: %v", err)
+	}
+	seed.Close()
+
+	sink, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite (migrate): %v", err)
+	}
+	sink.Log(Record{
+		Method: "POST", Path: "/v1/messages", Model: "claude-opus-5-5",
+		Status: 200, LatencyMS: 40, SessionID: "0d3e4b2a-1111-2222-3333-444455556666",
+	})
+	sink.Log(Record{Method: "POST", Path: "/v1/chat/completions", Model: "qwen38", Status: 200, LatencyMS: 20})
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A second open against the migrated table must be a no-op.
+	again, err := NewSQLite(path, logger)
+	if err != nil {
+		t.Fatalf("NewSQLite (re-open): %v", err)
+	}
+	if err := again.Close(); err != nil {
+		t.Fatalf("Close (re-open): %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db.Close()
+
+	var got *string
+	if err := db.QueryRow(
+		`SELECT session_id FROM router_requests WHERE model = ?`, "claude-opus-5-5",
+	).Scan(&got); err != nil {
+		t.Fatalf("query migrated row: %v", err)
+	}
+	if got == nil || *got != "0d3e4b2a-1111-2222-3333-444455556666" {
+		t.Errorf("session_id = %v, want the Claude Code UUID", got)
+	}
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM router_requests WHERE model = 'qwen38' AND session_id IS NULL`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rows with NULL session_id = %d, want 1", n)
+	}
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'router_requests_session_id_idx'`).Scan(&n); err != nil {
+		t.Fatalf("index lookup: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("session_id index count = %d, want 1", n)
+	}
+}

@@ -128,6 +128,13 @@ type Record struct {
 	// in no role, so "how much of the paid traffic went to models nobody
 	// vetted" is this column grouped by ResolvedVia.
 	Discovered bool
+	// SessionID is the caller's own session id as the harness sent it (a
+	// Claude Code session UUID, an opencode session), logged verbatim. The
+	// router never mints or rewrites it, and it is unrelated to the "llmr-"
+	// affinity ids session.go puts on outbound requests. It is the join key
+	// agent-monitor and tokenator already share, so a session's router rows
+	// can be found without inferring them. Empty when the caller sent none.
+	SessionID string
 }
 
 // Sink consumes records. Implementations must be safe for concurrent Log

@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS router_requests (
     privacy_tolerance TEXT,
     upstream_cost_usd REAL,
     cached_prompt_tokens INTEGER,
-    discovered        INTEGER NOT NULL DEFAULT 0
+    discovered        INTEGER NOT NULL DEFAULT 0,
+    session_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS router_requests_ts_idx ON router_requests (ts DESC);
 CREATE INDEX IF NOT EXISTS router_requests_request_id_idx ON router_requests (request_id);
@@ -81,6 +82,7 @@ var sqliteMigrations = []struct{ name, ddl string }{
 	{"cached_prompt_tokens", "ALTER TABLE router_requests ADD COLUMN cached_prompt_tokens INTEGER"},
 	{"candidate_pressure", "ALTER TABLE router_requests ADD COLUMN candidate_pressure INTEGER"},
 	{"discovered", "ALTER TABLE router_requests ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0"},
+	{"session_id", "ALTER TABLE router_requests ADD COLUMN session_id TEXT"},
 }
 
 // sqlitePostMigrateSQL runs AFTER migrateSQLite, never inside
@@ -92,6 +94,7 @@ var sqliteMigrations = []struct{ name, ddl string }{
 const sqlitePostMigrateSQL = `
 CREATE INDEX IF NOT EXISTS router_requests_principal_idx ON router_requests (principal);
 CREATE INDEX IF NOT EXISTS router_requests_upstream_provider_idx ON router_requests (upstream_provider);
+CREATE INDEX IF NOT EXISTS router_requests_session_id_idx ON router_requests (session_id);
 `
 
 const sqliteInsertSQL = `
@@ -102,8 +105,9 @@ INSERT INTO router_requests
    cache_creation_input_tokens, cache_read_input_tokens, prefix_hash_chain,
    role, role_overflowed, failover_from, error, upstream_status, error_class,
    principal, token_id, upstream_provider, privacy_tolerance,
-   upstream_cost_usd, cached_prompt_tokens, candidate_pressure, discovered)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   upstream_cost_usd, cached_prompt_tokens, candidate_pressure, discovered,
+   session_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SQLiteSink writes records asynchronously to a local SQLite database. It's the
@@ -233,6 +237,7 @@ func (s *SQLiteSink) insertRec(rec Record) {
 		nullIfEmpty(rec.UpstreamProvider), nullIfEmpty(rec.PrivacyTolerance),
 		rec.UpstreamCostUSD, rec.CachedPromptTokens,
 		rec.CandidatePressure, b2i(rec.Discovered),
+		nullIfEmpty(rec.SessionID),
 	)
 	if err != nil {
 		s.logger.Error("reqlog: insert failed", "err", err, "model", rec.Model, "path", rec.Path)
