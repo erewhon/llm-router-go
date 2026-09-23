@@ -177,23 +177,7 @@ func (p *Proxy) runLoop(ctx context.Context, backendURL string, bodyMap map[stri
 		// the results, and loop for the model's next move.
 		p.logger.InfoContext(ctx, "executing proxy tools", "round", round+1, "count", len(proxyCalls))
 		messages = append(messages, assistantToolCallMessage(cleanContent, calls))
-		for _, c := range proxyCalls {
-			out := p.tools.Execute(ctx, c.Function.Name, c.Function.Arguments)
-			stats.executed++
-			if tools.IsFailure(out) {
-				stats.failed++
-				if stats.firstFailure == "" {
-					stats.firstFailure = c.Function.Name + ": " + truncateForLog(out, 200)
-				}
-				// Log every failing tool call: without this a dead egress is
-				// invisible in the journal until someone reproduces it by hand.
-				p.logger.WarnContext(ctx, "proxy tool failed",
-					"tool", c.Function.Name, "round", round+1,
-					"args", truncateForLog(c.Function.Arguments, 200),
-					"result", truncateForLog(out, 200))
-			}
-			messages = append(messages, toolResultMessage(c.ID, out))
-		}
+		messages = p.executeProxyCalls(ctx, round, proxyCalls, &stats, messages)
 	}
 
 	p.logger.WarnContext(ctx, "max tool rounds reached",
@@ -202,6 +186,29 @@ func (p *Proxy) runLoop(ctx context.Context, backendURL string, bodyMap map[stri
 		outcome: outcomeMaxRounds, content: lastContent, reasoning: lastReasoning,
 		messages: messages, tools: stats, lastRaw: lastRaw,
 	}, nil
+}
+
+// executeProxyCalls runs each proxy-owned call, counts it in stats, and
+// appends its result to messages. Shared by the JSON and streaming loops.
+func (p *Proxy) executeProxyCalls(ctx context.Context, round int, calls []toolCall, stats *toolStats, messages []any) []any {
+	for _, c := range calls {
+		out := p.tools.Execute(ctx, c.Function.Name, c.Function.Arguments)
+		stats.executed++
+		if tools.IsFailure(out) {
+			stats.failed++
+			if stats.firstFailure == "" {
+				stats.firstFailure = c.Function.Name + ": " + truncateForLog(out, 200)
+			}
+			// Log every failing tool call: without this a dead egress is
+			// invisible in the journal until someone reproduces it by hand.
+			p.logger.WarnContext(ctx, "proxy tool failed",
+				"tool", c.Function.Name, "round", round+1,
+				"args", truncateForLog(c.Function.Arguments, 200),
+				"result", truncateForLog(out, 200))
+		}
+		messages = append(messages, toolResultMessage(c.ID, out))
+	}
+	return messages
 }
 
 // usageCompletionTokens safely reads completion tokens from a possibly-nil usage.
@@ -390,9 +397,9 @@ func (p *Proxy) runToolLoopJSON(w http.ResponseWriter, r *http.Request, res reso
 	}
 
 	// A final answer the backend truncated while tools were attached is retried
-	// once without them. Streaming gets this for free (it always re-issues the
-	// final generation); without it, non-streaming callers silently receive a
-	// half-written answer — invalid JSON for structured-output clients.
+	// once without them; without it, non-streaming callers silently receive a
+	// half-written answer — invalid JSON for structured-output clients. (The
+	// streaming driver relays rounds live and cannot retract text; see stream.go.)
 	if truncatedFinal(result) {
 		p.logger.WarnContext(ctx, "final answer truncated with tools attached; regenerating without tools",
 			"backend_url", res.BackendURL, "content_len", len(result.content))
@@ -435,73 +442,6 @@ func finalFinishReason(res loopResult) string {
 		return res.finishReason
 	}
 	return "stop"
-}
-
-// runToolLoopStreaming runs the loop, then streams the result as SSE. On a
-// natural answer (outcomeFinal) it re-streams the final generation straight
-// from the backend for true token-by-token output; the client-call and
-// max-rounds branches emit hand-built SSE. Mirrors _stream_chat_completion.
-func (p *Proxy) runToolLoopStreaming(w http.ResponseWriter, r *http.Request, res resolveResult, bodyMap map[string]any, messages []any, allTools []any, toolChoice any) {
-	ctx := r.Context()
-	model := res.BackendModel
-
-	result, err := p.runLoop(ctx, res.BackendURL, bodyMap, messages, allTools, toolChoice)
-
-	// Same empty-answer guard as the JSON path. Checked before any SSE byte is
-	// written, so a plain JSON 502 is still a valid response to the client —
-	// and re-streaming an empty generation would just burn a second one.
-	if err == nil && p.reportEmptyAnswer(ctx, w, result) {
-		return
-	}
-
-	// Final answer: drop the tools, re-issue the request as a stream, and relay
-	// the backend's tokens through the reverse proxy. This is the one branch
-	// that doesn't build SSE by hand (and the deliberate redundant generation
-	// the Python proxy also pays for true streaming).
-	if err == nil && result.outcome == outcomeFinal {
-		bodyMap["messages"] = result.messages
-		delete(bodyMap, "tools")
-		delete(bodyMap, "tool_choice")
-		bodyMap["stream"] = true
-		finalBody, mErr := json.Marshal(bodyMap)
-		if mErr == nil {
-			p.reverseProxyTo(w, r, res.BackendURL, finalBody, "")
-			return
-		}
-		err = fmt.Errorf("toolproxy: marshal final stream body: %w", mErr)
-	}
-
-	// Every other branch emits SSE directly.
-	flusher, _ := w.(http.Flusher)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	chunkID := "chatcmpl-" + randHex(12)
-
-	if err != nil {
-		p.logger.ErrorContext(ctx, "tool loop backend error (streaming)", "backend_url", res.BackendURL, "err", err)
-		writeSSE(w, flusher, buildSSEChunk(chunkID, model, sseFields{role: "assistant"}))
-		writeSSE(w, flusher, buildSSEChunk(chunkID, model, sseFields{content: "Error: " + err.Error(), finishReason: "stop"}))
-		writeSSE(w, flusher, sseDone)
-		return
-	}
-
-	switch result.outcome {
-	case outcomeClientCalls:
-		// Single chat.completion object inside the stream, then [DONE] — the
-		// Python proxy's build_tool_calls_response breakout (no usage field).
-		cc := newChatCompletion(chunkID, model, result.content, result.reasoning, result.toolCalls, nil, "tool_calls")
-		b, _ := json.Marshal(cc)
-		writeSSE(w, flusher, "data: "+string(b)+"\n\n")
-		writeSSE(w, flusher, sseDone)
-	case outcomeMaxRounds:
-		writeSSE(w, flusher, buildSSEChunk(chunkID, model, sseFields{role: "assistant"}))
-		if result.reasoning != "" {
-			writeSSE(w, flusher, buildSSEChunk(chunkID, model, sseFields{reasoning: result.reasoning}))
-		}
-		writeSSE(w, flusher, buildSSEChunk(chunkID, model, sseFields{content: maxRoundsContent(result), finishReason: "stop"}))
-		writeSSE(w, flusher, sseDone)
-	}
 }
 
 // writeSSE writes one SSE event and flushes so the client sees it immediately.

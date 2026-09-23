@@ -17,8 +17,8 @@ import (
 
 // ---------------------------------------------------------------------------
 // Test harness: a proxy with the calculator tool registered, and a scripted
-// upstream that returns queued JSON for non-streaming (loop) calls and a fixed
-// SSE body for the streaming (final re-stream) call.
+// upstream that returns queued JSON for non-streaming calls and queued SSE
+// bodies (falling back to a fixed one) for streaming calls.
 // ---------------------------------------------------------------------------
 
 func newToolProxy(t *testing.T, transport http.RoundTripper, opts ...Option) *Proxy {
@@ -39,11 +39,12 @@ func newToolProxy(t *testing.T, transport http.RoundTripper, opts ...Option) *Pr
 }
 
 type scriptedUpstream struct {
-	mu     sync.Mutex
-	queue  []string         // popped in order for stream:false calls
-	repeat string           // if set, returned for every stream:false call (queue ignored)
-	sse    string           // returned for the stream:true call
-	calls  []map[string]any // captured request bodies, in order
+	mu       sync.Mutex
+	queue    []string         // popped in order for stream:false calls
+	repeat   string           // if set, returned for every stream:false call (queue ignored)
+	sse      string           // returned for stream:true calls once sseQueue is empty
+	sseQueue []string         // popped in order for stream:true calls
+	calls    []map[string]any // captured request bodies, in order
 }
 
 func (s *scriptedUpstream) handler() http.HandlerFunc {
@@ -58,10 +59,15 @@ func (s *scriptedUpstream) handler() http.HandlerFunc {
 		var resp string
 		switch {
 		case isStream:
+			body := s.sse
+			if len(s.sseQueue) > 0 {
+				body = s.sseQueue[0]
+				s.sseQueue = s.sseQueue[1:]
+			}
 			s.mu.Unlock()
 			w.Header().Set("Content-Type", "text/event-stream")
 			flusher, _ := w.(http.Flusher)
-			_, _ = io.WriteString(w, s.sse)
+			_, _ = io.WriteString(w, body)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -608,18 +614,11 @@ func TestToolLoop_DropsStreamOptionsOnNonStreamingRounds(t *testing.T) {
 	}
 }
 
-func TestToolLoop_StreamingReStreamsFinal(t *testing.T) {
-	finalSSE := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
-		"data: {\"choices\":[{\"delta\":{\"content\":\"The answer\"}}]}\n\n" +
-		"data: {\"choices\":[{\"delta\":{\"content\":\" is 4\"},\"finish_reason\":\"stop\"}]}\n\n" +
-		"data: [DONE]\n\n"
-	up := &scriptedUpstream{
-		queue: []string{
-			toolCallResp("calculator", `{"expression":"2+2"}`), // round 1: tool
-			answerResp("buffered final, discarded"),            // round 2: no tools → outcomeFinal
-		},
-		sse: finalSSE,
-	}
+func TestToolLoop_StreamingToolRoundThenLiveAnswer(t *testing.T) {
+	up := &scriptedUpstream{sseQueue: []string{
+		sseToolCall("calculator", `{"expression":"2+2"}`), // round 1: tool
+		sseAnswer("The answer", " is 4"),                  // round 2: streamed live
+	}}
 	server := httptest.NewServer(up.handler())
 	defer server.Close()
 	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
@@ -632,29 +631,107 @@ func TestToolLoop_StreamingReStreamsFinal(t *testing.T) {
 		t.Errorf("Content-Type = %q, want event-stream", ct)
 	}
 	got := rec.Body.String()
-	for _, want := range []string{"The answer", "is 4", "[DONE]"} {
+	for _, want := range []string{"The answer", " is 4", "[DONE]"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("stream missing %q:\n%s", want, got)
 		}
 	}
-	// Three upstream hits: two loop calls + the streamed re-generation.
-	if up.callCount() != 3 {
-		t.Fatalf("upstream calls = %d, want 3", up.callCount())
+	if strings.Contains(got, "calculator") {
+		t.Errorf("proxy tool call leaked to the client:\n%s", got)
 	}
-	final := up.call(2)
-	if stream, _ := final["stream"].(bool); !stream {
-		t.Error("final call was not stream:true")
+	// Two upstream hits, both streamed, both with tools: no regeneration.
+	if up.callCount() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", up.callCount())
 	}
-	if _, present := final["tools"]; present {
-		t.Error("final stream call still carried tools")
+	for i := 0; i < 2; i++ {
+		c := up.call(i)
+		if stream, _ := c["stream"].(bool); !stream {
+			t.Errorf("call %d was not stream:true", i)
+		}
+		if _, present := c["tools"]; !present {
+			t.Errorf("call %d dropped the tools", i)
+		}
+		so, _ := c["stream_options"].(map[string]any)
+		if so["include_usage"] != true {
+			t.Errorf("call %d stream_options = %v, want include_usage", i, so)
+		}
 	}
-	if role := msgField(final, -1, "role"); role != "tool" {
-		t.Errorf("final call history last role = %v, want tool", role)
+	if role := msgField(up.call(1), -1, "role"); role != "tool" {
+		t.Errorf("round 2 history last role = %v, want tool", role)
+	}
+	// Usage summed over both rounds (1+1 prompt, 5+2 completion).
+	if !strings.Contains(got, `"prompt_tokens":2`) || !strings.Contains(got, `"completion_tokens":7`) {
+		t.Errorf("usage not summed across rounds:\n%s", got)
+	}
+}
+
+// A plain answer is one streamed backend call, relayed as it arrives — the
+// old driver generated it twice.
+func TestToolLoop_StreamingPlainAnswerIsOneCall(t *testing.T) {
+	up := &scriptedUpstream{sseQueue: []string{sseAnswer("hello", " world")}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if up.callCount() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", up.callCount())
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, `"content":"hello"`) || !strings.Contains(got, `"content":" world"`) {
+		t.Errorf("deltas not relayed one by one:\n%s", got)
+	}
+	if !strings.Contains(got, `"role":"assistant"`) {
+		t.Errorf("first delta should carry the role:\n%s", got)
+	}
+	// llama.cpp's timings ride on the terminal chunk and must survive.
+	if !strings.Contains(got, `"timings"`) || !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Errorf("terminal chunk (finish_reason + timings) not replayed:\n%s", got)
+	}
+}
+
+// A model without a tool parser writes <tool_call> in content. The tag must
+// never reach the client, even when it is split across deltas.
+func TestToolLoop_StreamingTextualToolCallNotLeaked(t *testing.T) {
+	tc := `<tool_call>{"name":"calculator","arguments":{"expression":"3*3"}}</tool_call>`
+	up := &scriptedUpstream{sseQueue: []string{
+		sseAnswer("Let me compute. <tool", "_call>"+tc[len("<tool_call>"):]),
+		sseAnswer("It is 9."),
+	}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"messages":[{"role":"user","content":"3*3?"}]}`)
+	if got := streamedContent(t, rec.Body.String()); got != "Let me compute. It is 9." {
+		t.Errorf("streamed content = %q, want the prose without the tool call", got)
+	}
+	if up.callCount() != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (textual call executed)", up.callCount())
+	}
+	if role := msgField(up.call(1), -1, "role"); role != "tool" {
+		t.Errorf("textual call was not executed; last role = %v", role)
+	}
+}
+
+// "<tool_call>" that is not a parseable call is prose and goes out after all.
+func TestToolLoop_StreamingLiteralTagInProseFlushed(t *testing.T) {
+	up := &scriptedUpstream{sseQueue: []string{sseAnswer("Models emit <tool_call> tags", " when unparsed.")}}
+	server := httptest.NewServer(up.handler())
+	defer server.Close()
+	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
+
+	rec := postChat(t, p, `{"model":"nemotron-3-super","stream":true,"messages":[{"role":"user","content":"?"}]}`)
+	if got := streamedContent(t, rec.Body.String()); got != "Models emit <tool_call> tags when unparsed." {
+		t.Errorf("streamed content = %q, want the prose verbatim", got)
+	}
+	if up.callCount() != 1 {
+		t.Errorf("upstream calls = %d, want 1", up.callCount())
 	}
 }
 
 func TestToolLoop_StreamingClientToolBreakout(t *testing.T) {
-	up := &scriptedUpstream{queue: []string{toolCallResp("get_weather", `{"city":"NYC"}`)}}
+	up := &scriptedUpstream{sseQueue: []string{sseToolCall("get_weather", `{"city":"NYC"}`)}}
 	server := httptest.NewServer(up.handler())
 	defer server.Close()
 	p := newToolProxy(t, &transportRedirect{to: server.URL, rt: http.DefaultTransport})
@@ -664,7 +741,7 @@ func TestToolLoop_StreamingClientToolBreakout(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"tool_calls", "get_weather", "[DONE]", "chat.completion"} {
+	for _, want := range []string{"tool_calls", "get_weather", "NYC", "[DONE]", "chat.completion"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("stream missing %q:\n%s", want, body)
 		}
@@ -672,6 +749,59 @@ func TestToolLoop_StreamingClientToolBreakout(t *testing.T) {
 	if up.callCount() != 1 {
 		t.Errorf("upstream calls = %d, want 1 (no re-stream on client breakout)", up.callCount())
 	}
+}
+
+// streamedContent concatenates every content delta in an SSE body.
+func streamedContent(t *testing.T, body string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var ch struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &ch); err != nil {
+			t.Fatalf("bad SSE line %q: %v", data, err)
+		}
+		for _, c := range ch.Choices {
+			b.WriteString(c.Delta.Content)
+		}
+	}
+	return b.String()
+}
+
+// sseAnswer is a streamed answer: one content delta per part, then a terminal
+// chunk with finish_reason and llama.cpp-style timings, a usage chunk, [DONE].
+func sseAnswer(parts ...string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		c, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": p}, "finish_reason": nil}}})
+		b.WriteString("data: " + string(c) + "\n\n")
+	}
+	b.WriteString(`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"timings":{"predicted_per_second":12.5}}` + "\n\n")
+	b.WriteString(`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}` + "\n\n")
+	b.WriteString("data: [DONE]\n\n")
+	return b.String()
+}
+
+// sseToolCall streams one structured tool call, arguments split in two.
+func sseToolCall(name, args string) string {
+	half := len(args) / 2
+	c1, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+		map[string]any{"index": 0, "id": "call_abc", "type": "function", "function": map[string]any{"name": name, "arguments": args[:half]}}}}}}})
+	c2, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+		map[string]any{"index": 0, "function": map[string]any{"arguments": args[half:]}}}}}}})
+	return "data: " + string(c1) + "\n\n" + "data: " + string(c2) + "\n\n" +
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n" +
+		`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":5,"total_tokens":6}}` + "\n\n" +
+		"data: [DONE]\n\n"
 }
 
 // ---------------------------------------------------------------------------
