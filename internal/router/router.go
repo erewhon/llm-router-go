@@ -320,6 +320,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 			// Attribution. Empty on auth-exempt paths and on a router running
 			// without auth; empty means unattributed, not trusted.
 			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
+			lr.SessionID = callerSessionID(r.Header, "")
 			if resolved != nil {
 				lr.BackendModel = resolved.BackendModel
 				lr.BackendURL = resolved.BackendURL

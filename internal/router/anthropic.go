@@ -65,6 +65,9 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 			// privacy tier turned the request away before forwarding.
 			refusalClass     string
 			privacyTolerance string
+			// body is kept for the session-id fallback in the deferred
+			// record; nil until the read below succeeds.
+			body []byte
 		)
 
 		defer func() {
@@ -88,6 +91,11 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 			// credential ("anthropic:<fp>" / "anthropic-oauth:<fp>"). Empty
 			// only when the caller sent no credential at all.
 			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
+			// Claude Code sends the session as a header; metadata.user_id is
+			// the fallback, parsed only when no header named one.
+			if lr.SessionID = callerSessionID(r.Header, ""); lr.SessionID == "" && body != nil {
+				lr.SessionID = callerSessionID(nil, anthropicUserID(body))
+			}
 			lr.PrivacyTolerance = privacyTolerance
 			if refusalClass != "" {
 				lr.ErrorClass = refusalClass
@@ -104,7 +112,8 @@ func (rt *Router) handleAnthropic(modelID, backendRoot string) http.HandlerFunc 
 		// Read the body so we can log the model + prefix hash chain, but forward
 		// the exact original bytes (never re-marshal — the acceptance criterion
 		// is a byte-identical request).
-		body, err := io.ReadAll(r.Body)
+		var err error
+		body, err = io.ReadAll(r.Body)
 		if err != nil {
 			errMsg = "read body: " + err.Error()
 			http.Error(rec, errMsg, http.StatusBadRequest)

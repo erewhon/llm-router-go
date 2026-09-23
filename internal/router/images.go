@@ -66,6 +66,7 @@ func (rt *Router) handleProxyMultipart(requireClass config.APIClass) http.Handle
 				Error:     errMsg,
 			}
 			lr.Principal, lr.TokenID = auth.PrincipalFromContext(r.Context())
+			lr.SessionID = callerSessionID(r.Header, "")
 			if resolved != nil {
 				lr.BackendModel = resolved.BackendModel
 				lr.BackendURL = resolved.BackendURL
