@@ -88,12 +88,15 @@ homebrew_casks:
       email: noreply@byrnes.org
     # The binary is unsigned: strip the Gatekeeper quarantine bit on install so
     # it runs without a "developer cannot be verified" prompt.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/llm-router"]
-          end
+    # Homebrew 7 deprecates `postflight` blocks (what hooks.post.install
+    # renders) for declarative `postflight_steps`; GoReleaser has no steps
+    # option, so the stanza goes in custom_block. chdir "." is the staged path.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "llm-router"], chdir: "."
+        end
+      end
     caveats: |
       A sample multi-backend config ships in the release archive as
       configs/models.example.yaml. Quick start:
@@ -122,12 +125,15 @@ homebrew_casks:
     commit_author:
       name: goreleaser-bot
       email: noreply@byrnes.org
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/orpheus-say"]
-          end
+    # Homebrew 7 deprecates `postflight` blocks (what hooks.post.install
+    # renders) for declarative `postflight_steps`; GoReleaser has no steps
+    # option, so the stanza goes in custom_block. chdir "." is the staged path.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "orpheus-say"], chdir: "."
+        end
+      end
     caveats: |
       orpheus-say speaks text via an Orpheus /v1/audio/speech endpoint and plays
       it on your default audio output (macOS: afplay; Linux: paplay/ffplay/aplay).
