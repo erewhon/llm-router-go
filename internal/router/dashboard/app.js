@@ -14,8 +14,11 @@ import catalog from "/static/tabs/catalog.js";
 import traffic from "/static/tabs/traffic.js";
 import requests from "/static/tabs/requests.js";
 import connect from "/static/tabs/connect.js";
+import agents from "/static/tabs/agents.js";
 
-const TABS = [activity, fleet, catalog, traffic, requests, connect];
+// Agents appears only when the router knows an agent-monitor to read
+// (--dashboard-monitor-url): a laptop router beside its agents.
+const TABS = [activity, ...((window.DASH_CONFIG || {}).monitorUrl ? [agents] : []), fleet, catalog, traffic, requests, connect];
 const DEFAULT_TAB = "activity";
 
 // poll(fn, ms): run fn now and every ms while the owning tab is mounted and

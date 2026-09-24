@@ -130,6 +130,11 @@ func Run(ctx context.Context, args []string) error {
 		dashAuthSecret = fs.String("dashboard-auth-secret", "", "shared secret the front proxy sends in X-Dashboard-Auth; gates the dashboard's identity-bearing routes. Empty falls back to $DASHBOARD_AUTH_SECRET, then disables token self-service")
 		dashOwners     = fs.String("dashboard-owners", "", "comma-separated principals allowed to mint unrestricted (models:*) tokens from the dashboard; everyone else is capped at models:local. Empty falls back to $DASHBOARD_OWNERS")
 		dashIDHeader   = fs.String("dashboard-identity-header", "X-Auth-Request-Email", "request header carrying the proxy-verified principal")
+		// Agents tab: an agent-monitor web UI the dashboard's browser can
+		// reach. Meant for a router run on the same machine as its agents (a
+		// laptop); `pitf router serve` exports PITF_MONITOR_URL, so it wires
+		// itself there.
+		dashMonitorURL = fs.String("dashboard-monitor-url", "", "agent-monitor web UI (e.g. http://127.0.0.1:8070) for the dashboard's Agents tab; empty falls back to $PITF_MONITOR_URL, then hides the tab")
 
 		// Anthropic passthrough attribution: the operator's map from an
 		// upstream credential's fingerprint (the 8 hex chars after
@@ -470,6 +475,7 @@ func Run(ctx context.Context, args []string) error {
 				AuthSecret:     secret,
 				IdentityHeader: *dashIDHeader,
 				Owners:         splitCSV(owners),
+				MonitorURL:     monitorURL(*dashMonitorURL),
 			}),
 			httpx.RequestID,
 			httpx.AccessLog(logger.With("svc", "dashboard")),
@@ -593,4 +599,13 @@ func buildZDRCanary(registry *config.ModelRegistry, interval time.Duration, logg
 	logger.Warn("ZDR canary has no Anthropic-backed OpenRouter model to probe; verdicts will likely be inconclusive",
 		"using", fallbackID)
 	return router.NewZDRCanary(m.APIBase, os.Getenv(m.APIKey), m.HFRepo, interval, logger)
+}
+
+// monitorURL is the Agents tab's agent-monitor base: the flag, else
+// $PITF_MONITOR_URL (what pitf exports to the commands it mounts).
+func monitorURL(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv("PITF_MONITOR_URL")
 }

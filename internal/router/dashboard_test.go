@@ -628,3 +628,31 @@ func TestDashboard_RequestsBySession(t *testing.T) {
 		t.Errorf("NopSink: %v", out)
 	}
 }
+
+// The Agents tab is driven by DASH_CONFIG.monitorUrl: JSON-escaped (it is
+// operator input), trailing slash trimmed, and empty when unset so the shell
+// leaves the tab out.
+func TestDashboard_MonitorURLSubstitution(t *testing.T) {
+	rt := newTestRouter(t, nil)
+	serve := func(u string) string {
+		rec := httptest.NewRecorder()
+		rt.DashboardHandler(DashboardConfig{MonitorURL: u}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		return rec.Body.String()
+	}
+	if body := serve("http://127.0.0.1:8070/"); !strings.Contains(body, `monitorUrl: "http://127.0.0.1:8070",`) {
+		t.Errorf("monitor URL not substituted (trimmed):\n%s", body)
+	}
+	if body := serve(""); !strings.Contains(body, `monitorUrl: "",`) || strings.Contains(body, "%%MONITOR_URL%%") {
+		t.Error("an unset monitor URL must substitute to the empty string")
+	}
+	if body := serve(`http://x/"</script><script>alert(1)`); strings.Contains(body, `"</script>`) {
+		t.Error("monitor URL must be JSON-escaped inside the script block")
+	}
+}
+
+func TestDashboardV2_AgentsTabServed(t *testing.T) {
+	rec := dashV2(t, "/static/tabs/agents.js")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "agents"`) {
+		t.Fatalf("agents tab module: %d", rec.Code)
+	}
+}

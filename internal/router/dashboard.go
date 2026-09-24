@@ -81,6 +81,10 @@ type DashboardConfig struct {
 	// Owners may mint any scope from the dashboard. Everyone else is capped
 	// at models:local — a family token must be structurally unable to spend.
 	Owners []string
+	// MonitorURL is an agent-monitor web UI the browser can reach (normally
+	// loopback, on the same machine as a local router). Set, the shell gains
+	// an Agents tab that reads its /api/agents; empty hides the tab.
+	MonitorURL string
 }
 
 // DashboardHandler returns the http.Handler for the dashboard listener. The
@@ -90,15 +94,17 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	if keyHint == "" {
 		keyHint = "pat_…"
 	}
-	// The shell gets the four substitutions once, into its window.DASH_CONFIG
-	// block. The setup hint is multi-line prose and lands inside a JS string
-	// literal, so it is JSON-escaped first; the other three are URLs and ids
-	// and go in as they are.
+	// The shell gets the substitutions once, into its window.DASH_CONFIG
+	// block. The setup hint is multi-line prose and the monitor URL is
+	// operator input, so both land JSON-escaped inside their JS string
+	// literals; the other three are URLs and ids and go in as they are.
 	html := ""
 	if raw, err := dashboardV2.ReadFile("dashboard/index.html"); err == nil {
 		hint, _ := json.Marshal(cfg.SetupHint)
+		monitor, _ := json.Marshal(strings.TrimRight(cfg.MonitorURL, "/"))
 		html = strings.NewReplacer(
 			"\"%%SETUP_HINT%%\"", string(hint),
+			"\"%%MONITOR_URL%%\"", string(monitor),
 			"%%API_BASE%%", cfg.APIBase,
 			"%%API_KEY%%", keyHint,
 			"%%PROVIDER_ID%%", cfg.ProviderID,
