@@ -52,7 +52,7 @@ func defaultReqlogPath() string {
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("router", flag.ContinueOnError)
 	var (
-		addr         = fs.String("addr", ":4015", "listen address (cutover runs parallel to LiteLLM:4010)")
+		addr         = fs.String("addr", ":4010", "listen address")
 		modelsYAML   = fs.String("models-yaml", "/etc/llm-router/models.yaml", "path to models.yaml")
 		mode         = fs.String("mode", "", `mode tag filter ("big"/"default"/...); empty = all enabled models`)
 		logLevel     = fs.String("log-level", "info", "log level: debug, info, warn, error")

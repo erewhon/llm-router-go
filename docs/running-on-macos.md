@@ -91,7 +91,7 @@ Useful flags (all optional):
 
 | Flag | Purpose |
 | --- | --- |
-| `-addr :4010` | Listen address (default `:4015`). |
+| `-addr :4010` | Listen address (default `:4010`; `127.0.0.1:4010` keeps it off the network). |
 | `-api-keys sk-abc,sk-def` | Require a bearer token on `/v1/*`. Omit to allow any local caller (also settable via `$ROUTER_API_KEYS`). |
 | `-log-format text` | Human-readable logs instead of JSON. |
 | `-mode <tag>` | Filter to models tagged `mode:<tag>` (plus untagged). |
