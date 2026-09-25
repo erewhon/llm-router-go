@@ -816,7 +816,7 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 		Role bool `json:"role,omitempty"`
 		// Discovered marks an entry the live inventory adopted from a
 		// provider's listing: routable by name, priced from the provider when
-		// it says, in no role or chain. It may disappear when the provider
+		// it says, in a role only where models.yaml names it. It may disappear when the provider
 		// drops it, where a models.yaml entry only disappears on a deploy.
 		Discovered bool `json:"discovered,omitempty"`
 	}
@@ -881,7 +881,7 @@ func (rt *Router) handleModels(w http.ResponseWriter, r *http.Request) {
 		} else if len(rt.roles[name].Candidates) > 0 {
 			// Nothing available right now: still advertise the role (it will
 			// come back when the fleet does) using its first candidate's class.
-			if m, ok := rt.active[rt.roles[name].Candidates[0]]; ok {
+			if m, ok := rt.lookupModel(rt.roles[name].Candidates[0]); ok {
 				e.APIClass = m.APIClass
 			}
 		}

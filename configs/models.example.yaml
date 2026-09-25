@@ -159,10 +159,18 @@ models:
 # missing (not routable, not advertised, returns when the listing does). With
 # it, ids the provider lists that you never wrote down become routable under
 # the prefix: `zen/claude-opus-5`, `or/deepseek/deepseek-v4-pro`. They are
-# listed and priced from the provider's metadata, never joined to a role or
-# chain, and retired two polls after the provider drops them. A hand-written
-# entry for the same provider id at the same base — under any name, enabled
-# or not — always wins.
+# listed and priced from the provider's metadata and retired two polls after
+# the provider drops them. Discovery never puts an id in a role by itself,
+# but a role may name one exactly (`candidates: [lms/qwen3-8b]`): the prefix
+# and adopt/exclude are checked at load, and until the provider lists the id
+# the role skips it with a reason (`--validate --validate-live` reports it).
+# A hand-written entry for the same provider id at the same base — under any
+# name, enabled or not — always wins.
+#
+# `capabilities:` is a floor every adopted entry gets. Most listings (LM
+# Studio, llama-server, LiteLLM-style gateways) say nothing about tools or
+# vision, so without it an adopted id is text-only and a role that requires
+# tool_calling skips it.
 #
 # `adopt: all` suits a small, curated catalogue; a large one (OpenRouter lists
 # hundreds) wants an allowlist of globs (`*` matches anything, slashes

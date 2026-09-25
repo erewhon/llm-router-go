@@ -185,7 +185,7 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 		var cost *wellKnownCost
 		rctx, rout := ctxLimit, outLimit
 		if len(rd.Candidates) > 0 {
-			if m, ok := rt.active[rd.Candidates[0]]; ok {
+			if m, ok := rt.lookupModel(rd.Candidates[0]); ok {
 				if m.APIClass != config.APIClassChat {
 					continue
 				}

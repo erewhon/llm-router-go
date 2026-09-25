@@ -74,15 +74,53 @@ func LiveCheck(ctx context.Context, reg *config.ModelRegistry, mode string,
 			}
 			out = append(out, config.Diagnostic{
 				Severity: config.SevInfo, Code: config.LintDiscoveredModel, Subject: id, Mode: mode,
-				Message: fmt.Sprintf("adoptable from %s%s — the router serves it by this name; write a models.yaml entry to pin pricing/aliases or to seat it in a role", b.Base, detail),
+				Message: fmt.Sprintf("adoptable from %s%s — the router serves it by this name; name it in a role, or write a models.yaml entry to pin pricing/aliases", b.Base, detail),
 			})
 		}
 	}
+	out = append(out, roleMemberDiagnostics(reg, mode, disc)...)
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Code != out[j].Code {
 			return out[i].Code < out[j].Code
 		}
 		return out[i].Subject < out[j].Subject
 	})
+	return out
+}
+
+// roleMemberDiagnostics checks the role members that name discovered ids
+// against what the sources list right now: a typo in the provider half of
+// the id loads cleanly and only surfaces here (or as a skip reason on the
+// role), so this is where it should be caught before a push.
+func roleMemberDiagnostics(reg *config.ModelRegistry, mode string, disc map[string]config.ModelDefinition) []config.Diagnostic {
+	var out []config.Diagnostic
+	for name, rd := range reg.RolesForMode(mode) {
+		members := append(append([]string{}, rd.Candidates...), rd.Overflow...)
+		for _, id := range members {
+			if _, written := reg.Models[id]; written {
+				continue
+			}
+			src, pid, under := reg.DiscoveredMember(id)
+			if !under {
+				continue
+			}
+			m, listed := disc[id]
+			if !listed {
+				out = append(out, config.Diagnostic{
+					Severity: config.SevWarn, Code: config.LintRoleMemberNotListed, Subject: name, Mode: mode,
+					Message: fmt.Sprintf("member %s: %s (%s) does not list %q right now; the role skips it until it does", id, src.Prefix, src.APIBase, pid),
+				})
+				continue
+			}
+			for _, want := range rd.Require.Capabilities {
+				if !m.HasCapability(want) {
+					out = append(out, config.Diagnostic{
+						Severity: config.SevWarn, Code: config.LintRoleMemberCapability, Subject: name, Mode: mode,
+						Message: fmt.Sprintf("member %s lacks required capability %q (its listing does not say; set capabilities on discovery %s)", id, want, src.Prefix),
+					})
+				}
+			}
+		}
+	}
 	return out
 }

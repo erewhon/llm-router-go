@@ -78,6 +78,12 @@ const (
 	LintInventoryUnreachable = "inventory-unreachable"
 	LintNotListed            = "not-listed"
 	LintDiscoveredModel      = "discovered-model"
+	// role-member-not-listed: a role names a discovered id its source does
+	//   not list; the role skips it until it does.
+	// role-member-capability: a listed discovered role member lacks a
+	//   capability the role requires (listing + the source's floor).
+	LintRoleMemberNotListed  = "role-member-not-listed"
+	LintRoleMemberCapability = "role-member-capability"
 )
 
 // ToolProxyRouteCategories mirrors the categories the tool proxy's auto-router

@@ -768,8 +768,19 @@ func validateRole(name string, role *RoleDefinition, r *ModelRegistry) error {
 // contract. enforceLocality is false for overflow entries.
 func roleMemberErrs(role, kind, id string, rd *RoleDefinition, r *ModelRegistry, enforceLocality bool) []error {
 	m, ok := r.Models[id]
+	discovered := false
 	if !ok {
-		return []error{fmt.Errorf("role %q: %s %q is not a known model", role, kind, id)}
+		src, pid, under := r.DiscoveredMember(id)
+		switch {
+		case !under:
+			return []error{fmt.Errorf("role %q: %s %q is not a known model (nor under a discovery prefix)", role, kind, id)}
+		case !src.Adopts(pid):
+			return []error{fmt.Errorf("role %q: %s %q: discovery %s would never adopt %q (adopt/exclude)", role, kind, id, src.Prefix, pid)}
+		}
+		// Check what holds for everything the source adopts (locality,
+		// api_class); capabilities depend on the listing and are checked
+		// per request instead.
+		m, discovered = src.Entry(ListedModel{ID: pid}), true
 	}
 	var errs []error
 	if enforceLocality {
@@ -785,7 +796,7 @@ func roleMemberErrs(role, kind, id string, rd *RoleDefinition, r *ModelRegistry,
 		}
 	}
 	for _, want := range rd.Require.Capabilities {
-		if !m.HasCapability(want) {
+		if !discovered && !m.HasCapability(want) {
 			errs = append(errs, fmt.Errorf("role %q: %s %q lacks required capability %q", role, kind, id, want))
 		}
 	}
@@ -1062,6 +1073,12 @@ func (r *ModelRegistry) RolesForMode(mode string) map[string]RoleDefinition {
 		for _, id := range ids {
 			if _, ok := active[id]; ok {
 				out = append(out, id)
+			} else if _, isModel := r.Models[id]; !isModel {
+				// A discovered member: no mode tags, and whether it is listed
+				// right now is the request path's question.
+				if _, _, under := r.DiscoveredMember(id); under {
+					out = append(out, id)
+				}
 			}
 		}
 		return out

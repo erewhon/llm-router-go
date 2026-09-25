@@ -93,7 +93,7 @@ func roleOrder(rd config.RoleDefinition) []roleCandidate {
 func (rt *Router) expandChains(order []roleCandidate) []roleCandidate {
 	out := make([]roleCandidate, 0, len(order))
 	for _, cand := range order {
-		m, known := rt.active[cand.ModelID]
+		m, known := rt.lookupModel(cand.ModelID)
 		if !known || len(m.Fallbacks) == 0 {
 			out = append(out, cand)
 			continue
@@ -137,10 +137,14 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 	gatedOut := ""
 
 	for i, cand := range order {
-		m, known := rt.active[cand.ModelID]
+		m, known := rt.lookupModel(cand.ModelID)
 		if !known {
-			// RolesForMode already filtered these out; a survivor here means
-			// the registry changed under us. Skip rather than 500.
+			// A discovered member its provider does not list (yet, or any
+			// more) — worth saying. Anything else: RolesForMode already
+			// filtered it, so the registry changed under us; skip, not 500.
+			if why := rt.unlistedReason(cand.ModelID); why != "" {
+				reasons = append(reasons, fmt.Sprintf("%s: %s", cand.ModelID, why))
+			}
 			continue
 		}
 		// Policy first — before health — so the classification above is
@@ -151,6 +155,10 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 		// so X-Router-Overflow: true cannot happen under `local`.
 		if why := privacyGate(m, tier); why != "" {
 			excluded = append(excluded, fmt.Sprintf("%s: %s", cand.ModelID, why))
+			continue
+		}
+		if why := capabilityGap(m, rd); why != "" {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", cand.ModelID, why))
 			continue
 		}
 		if !rt.avail.Routable(cand.ModelID) {
@@ -214,8 +222,8 @@ func (rt *Router) resolveRole(name, original string, forceDirect bool, promptTok
 // exhausted or nothing left in it is routable.
 func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolveResult, bool) {
 	for i, cand := range res.Remaining {
-		m, known := rt.active[cand.ModelID]
-		if !known || !rt.avail.Routable(cand.ModelID) {
+		m, known := rt.lookupModel(cand.ModelID)
+		if !known || !rt.avail.Routable(cand.ModelID) || capabilityGap(m, rt.roles[res.Role]) != "" {
 			continue
 		}
 		// Same tier as the first pass. This is what keeps a zen/ member of a
@@ -246,6 +254,32 @@ func (rt *Router) nextRoleCandidate(res resolveResult, forceDirect bool) (resolv
 		return next, true
 	}
 	return resolveResult{}, false
+}
+
+// capabilityGap re-checks a discovered member against the role's required
+// capabilities: load time could only vouch for the source, and what the
+// entry claims comes from its listing plus the source's capabilities floor.
+// Hand-written members were checked at load and pass through.
+func capabilityGap(m config.ModelDefinition, rd config.RoleDefinition) string {
+	if !m.IsDiscovered() {
+		return ""
+	}
+	for _, want := range rd.Require.Capabilities {
+		if !m.HasCapability(want) {
+			return fmt.Sprintf("lacks required capability %q (its listing does not say; set capabilities on the discovery source)", want)
+		}
+	}
+	return ""
+}
+
+// unlistedReason explains a role member that names a discovered id the
+// inventory has not adopted, or "" for anything else.
+func (rt *Router) unlistedReason(id string) string {
+	src, pid, ok := rt.registry.DiscoveredMember(id)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("not listed by %s (%s) — it becomes routable when the listing includes %q", src.Prefix, src.APIBase, pid)
 }
 
 // RoleNames returns the configured role names for this mode, sorted. Used by

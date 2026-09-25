@@ -129,7 +129,12 @@ type invHarness struct {
 
 func newInventoryHarness(t *testing.T) *invHarness {
 	t.Helper()
-	reg, err := config.LoadBytes([]byte(inventoryRouterYAML))
+	return newInventoryHarnessYAML(t, inventoryRouterYAML)
+}
+
+func newInventoryHarnessYAML(t *testing.T, yml string) *invHarness {
+	t.Helper()
+	reg, err := config.LoadBytes([]byte(yml))
 	if err != nil {
 		t.Fatalf("LoadBytes: %v", err)
 	}

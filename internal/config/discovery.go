@@ -16,12 +16,17 @@ package config
 // adopting those wholesale would bury the catalogue and the OpenCode
 // well-known under noise, so that source takes an allowlist of patterns.
 //
-// What discovery never does is touch a role or a chain. A discovered id is
-// routable by name, listed, and priced from the provider's own metadata when
-// it offers any; seat decisions — what "coder" means, which providers back
-// "kimi-k3" — stay explicit in models.yaml. And a hand-written entry with the
-// same id always wins over a discovered one, so pinned pricing, aliases and
-// chains stay authoritative even while the provider lists the id too.
+// What discovery never does is put an id in a role or a chain by itself. A
+// discovered id is routable by name, listed, and priced from the provider's
+// own metadata when it offers any; seat decisions — what "coder" means,
+// which providers back "kimi-k3" — stay explicit in models.yaml. A role may
+// name a discovered id exactly (prefix + provider id, never a glob): that is
+// the operator making the seat decision, and it is checked at load against
+// the source (prefix, adopt/exclude, locality, api_class) and at request
+// time against the listing (not yet listed → skipped with a reason;
+// capabilities). And a hand-written entry with the same id always wins over
+// a discovered one, so pinned pricing, aliases and chains stay authoritative
+// even while the provider lists the id too.
 
 import (
 	"errors"
@@ -72,6 +77,13 @@ type DiscoverySource struct {
 	// leaves them unset, i.e. the well-known's endpoint default applies.
 	ContextLength   int `yaml:"context_length,omitempty"`
 	MaxOutputTokens int `yaml:"max_output_tokens,omitempty"`
+	// Capabilities is a floor every adopted entry gets on top of what the
+	// listing says. Most listings (LM Studio, llama-server, a LiteLLM-style
+	// gateway) carry no capability metadata, so without it an adopted id is
+	// text-only and a role requiring tool_calling skips it. Setting it is
+	// the operator vouching for everything the source adopts: narrow adopt
+	// to what it is true of.
+	Capabilities []ModelCapability `yaml:"capabilities,omitempty"`
 }
 
 // AdoptPolicy is the `adopt:` field: the scalar `all`, or a list of patterns.
@@ -242,6 +254,11 @@ func (s DiscoverySource) Entry(lm ListedModel) ModelDefinition {
 	if lm.Vision {
 		m.Capabilities = append(m.Capabilities, CapVision)
 	}
+	for _, c := range s.Capabilities {
+		if !m.HasCapability(c) {
+			m.Capabilities = append(m.Capabilities, c)
+		}
+	}
 	m.ContextLength = lm.ContextLength
 	if m.ContextLength == 0 {
 		m.ContextLength = s.ContextLength
@@ -326,8 +343,35 @@ func (r *ModelRegistry) validateDiscovery() error {
 				errs = append(errs, fmt.Errorf("%s: exclude pattern %v", subject, err))
 			}
 		}
+		for _, c := range s.Capabilities {
+			if _, ok := knownCapabilities[c]; !ok {
+				errs = append(errs, fmt.Errorf("%s: unknown capability %q", subject, c))
+			}
+		}
 	}
 	return errors.Join(errs...)
+}
+
+var knownCapabilities = map[ModelCapability]struct{}{
+	CapText: {}, CapVision: {}, CapAudio: {}, CapImageGen: {}, CapToolCalling: {},
+}
+
+// DiscoveredMember splits an id that names a discovered entry into its
+// source and provider id, by longest matching prefix. ok is false for an id
+// under no source's prefix (a plain registry id, or a typo).
+func (r *ModelRegistry) DiscoveredMember(id string) (src DiscoverySource, providerID string, ok bool) {
+	best := -1
+	for i, s := range r.Discovery {
+		if s.Prefix != "" && strings.HasPrefix(id, s.Prefix) && len(id) > len(s.Prefix) &&
+			(best < 0 || len(s.Prefix) > len(r.Discovery[best].Prefix)) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return DiscoverySource{}, "", false
+	}
+	s := r.Discovery[best]
+	return s, strings.TrimPrefix(id, s.Prefix), true
 }
 
 // ReservedNames returns every name a discovered id must not shadow: model

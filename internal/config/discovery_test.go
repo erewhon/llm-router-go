@@ -121,6 +121,7 @@ models:
 		{"bad adopt scalar", "discovery:\n  - api_base: https://a.example/v1\n    prefix: x/\n    adopt: some\n", "want `all` or a list"},
 		{"bad glob", "discovery:\n  - api_base: https://a.example/v1\n    prefix: x/\n    adopt: [\"[\"]\n", "unterminated character class"},
 		{"bad exclude glob", "discovery:\n  - api_base: https://a.example/v1\n    prefix: x/\n    adopt: all\n    exclude: [\"[\"]\n", "exclude pattern"},
+		{"unknown capability", "discovery:\n  - api_base: https://a.example/v1\n    prefix: x/\n    adopt: all\n    capabilities: [text, tools]\n", `unknown capability "tools"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,5 +202,87 @@ func TestReservedNames(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("ReservedNames() = %s, missing %q", got, want)
 		}
+	}
+}
+
+func TestDiscovery_CapabilitiesFloor(t *testing.T) {
+	src := DiscoverySource{APIBase: "http://lms.example/v1", Prefix: "lms/", Adopt: AdoptPolicy{All: true},
+		Capabilities: []ModelCapability{CapText, CapToolCalling}}
+	m := src.Entry(ListedModel{ID: "qwen3-8b", Vision: true})
+	want := []ModelCapability{CapText, CapVision, CapToolCalling}
+	if len(m.Capabilities) != len(want) {
+		t.Fatalf("capabilities = %v, want %v (listing plus floor, no duplicates)", m.Capabilities, want)
+	}
+	for _, c := range want {
+		if !m.HasCapability(c) {
+			t.Errorf("missing %q in %v", c, m.Capabilities)
+		}
+	}
+}
+
+func TestDiscovery_RoleMembers(t *testing.T) {
+	base := `
+nodes:
+  n1: {host: n1.local, gpu: nvidia, vram_gb: 80}
+models:
+  m:
+    hf_repo: m
+    node: n1
+    capabilities: [text]
+discovery:
+  - api_base: http://lms.example/v1
+    prefix: lms/
+    adopt: all
+  - api_base: https://or.example/api/v1
+    prefix: or/
+    adopt: ["deepseek/*"]
+    exclude: ["*:batch"]
+  - api_base: https://or.example/api/v1/nested
+    prefix: or/x/
+    adopt: all
+roles:
+`
+	ok := []string{
+		"  r: {candidates: [lms/qwen3-8b, m]}\n",
+		"  r: {candidates: [or/deepseek/deepseek-v4]}\n",
+		// capabilities cannot be known at load for a discovered member
+		"  r: {require: {capabilities: [tool_calling]}, candidates: [lms/qwen3-8b]}\n",
+		// longest prefix wins: or/x/ adopts all, or/ would not adopt "x/any"
+		"  r: {candidates: [or/x/anything]}\n",
+		"  r: {candidates: [m], on_empty: overflow, overflow: [lms/big]}\n",
+	}
+	for _, block := range ok {
+		if _, err := LoadBytes([]byte(base + block)); err != nil {
+			t.Errorf("%s: %v", strings.TrimSpace(block), err)
+		}
+	}
+	bad := []struct{ block, want string }{
+		{"  r: {candidates: [lmz/qwen3-8b]}\n", "not a known model (nor under a discovery prefix)"},
+		{"  r: {candidates: [or/openai/gpt-9]}\n", `discovery or/ would never adopt "openai/gpt-9"`},
+		{"  r: {candidates: [or/deepseek/v4:batch]}\n", "would never adopt"},
+		{"  r: {require: {locality: local}, candidates: [lms/qwen3-8b]}\n", "is not local"},
+		{"  r: {candidates: [lms/]}\n", "not a known model"},
+	}
+	for _, tc := range bad {
+		_, err := LoadBytes([]byte(base + tc.block))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", strings.TrimSpace(tc.block), err, tc.want)
+		}
+	}
+
+	// A hand-written entry with the id wins: disabled means dropped, not
+	// resurrected as a discovered member.
+	pinned := strings.Replace(base, "discovery:", `  lms/pinned:
+    hf_repo: pinned
+    backend: external
+    api_base: http://lms.example/v1
+    enabled: false
+discovery:`, 1)
+	reg, err := LoadBytes([]byte(pinned + "  r: {candidates: [lms/pinned, lms/other, m]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(reg.RolesForMode("")["r"].Candidates, ","); got != "lms/other,m" {
+		t.Errorf("candidates %q, want the disabled hand-written entry dropped", got)
 	}
 }
