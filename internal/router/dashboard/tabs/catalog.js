@@ -221,6 +221,7 @@ function renderDrawer() {
       ${row("max output", m.max_output_tokens ? fmtCtx(m.max_output_tokens) : "")}
       ${row("price", price)}
       ${row("aliases", badges(m.aliases, "badge-alias"))}
+      ${ctx.config.tokensUrl ? row("tokens", `<a href="#tokens?model=${encodeURIComponent(m.id)}" style="color:var(--accent)">sessions that used ${escHtml(m.id)}</a>`) : ""}
       ${row("capabilities", badges(m.capabilities, "badge-cap"))}
       ${row("tags", badges(m.tags, "badge-tag"))}
       ${row("flags", [m.enabled === false ? "disabled" : "", m.always_on ? "always-on" : "on-demand", m.tool_proxy ? "tool-proxy" : ""].filter(Boolean).join(" · "))}

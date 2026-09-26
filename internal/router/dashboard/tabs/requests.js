@@ -40,6 +40,7 @@ function table(d) {
   const sessions = new Set(d.rows.map((r) => r.session_id));
   let h = `<div style="margin:0 0 0.5rem;color:var(--text-dim);font-size:0.85rem">${d.rows.length}${d.rows.length === d.limit ? "+" : ""} requests`;
   if (sessions.size > 1) h += ` across ${sessions.size} sessions (the prefix is ambiguous)`;
+  else if (ctx.config.tokensUrl) h += ` · <a href="#tokens?session=${encodeURIComponent(d.session)}" style="color:var(--accent)" title="tokenator profile for this session">tokens</a>`;
   h += `</div><div class="node-card" style="padding:0.5rem 0.9rem;overflow-x:auto"><table class="usage-table"><thead><tr>
     <th>when</th><th>model</th><th>served by</th><th class="num">status</th><th class="num">latency</th>
     <th class="num">in</th><th class="num">out</th><th class="num">cache read</th><th>provider</th><th>principal</th>${sessions.size > 1 ? "<th>session</th>" : ""}
@@ -57,7 +58,7 @@ function table(d) {
       <td class="num">${tokens(r.cache_read_tokens)}</td>
       <td>${escHtml(r.upstream_provider || "")}</td>
       <td>${escHtml(r.principal || "")}</td>
-      ${sessions.size > 1 ? `<td><span class="api-base">${escHtml(r.session_id)}</span></td>` : ""}
+      ${sessions.size > 1 ? `<td>${ctx.config.tokensUrl ? `<a href="#tokens?session=${encodeURIComponent(r.session_id)}" style="color:var(--accent)" title="tokenator profile">` : ""}<span class="api-base">${escHtml(r.session_id)}</span>${ctx.config.tokensUrl ? "</a>" : ""}</td>` : ""}
     </tr>`;
   }
   return h + "</tbody></table></div>";

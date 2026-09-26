@@ -33,7 +33,11 @@ function sessionCell(a) {
     return `<span style="color:var(--text-dim)" title="no hook has reported a session id; see agent-monitor hooks install">–</span>`;
   }
   const short = a.session_id.slice(0, 8);
-  return `<a href="#requests?session=${encodeURIComponent(a.session_id)}" style="color:var(--accent)" title="router requests for ${escHtml(a.session_id)}">requests</a>
+  const sid = encodeURIComponent(a.session_id);
+  const tokens = ctx.config.tokensUrl
+    ? ` · <a href="#tokens?session=${sid}" style="color:var(--accent)" title="tokenator profile for ${escHtml(a.session_id)}">tokens</a>`
+    : "";
+  return `<a href="#requests?session=${sid}" style="color:var(--accent)" title="router requests for ${escHtml(a.session_id)}">requests</a>${tokens}
     <span class="api-base" title="${escHtml(a.session_id)}">${escHtml(short)}</span>`;
 }
 

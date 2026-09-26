@@ -392,6 +392,10 @@
 .tabs a:hover { color: var(--text); }
 .tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-placeholder { color: var(--text-dim); padding: 2rem 0; font-size: 0.9rem; }
+  /* Tokens tab: tokenator framed through the /tokens/ proxy in its embedded
+     mode; the frame paints its own (matching) background. */
+  .tokens-frame { width: 100%; height: calc(100vh - 15rem); min-height: 480px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface); display: block; }
 #strip .stat { min-width: 120px; padding: 0.7rem 1.1rem; }
 #strip .stat-value { font-size: 1.2rem; }
 

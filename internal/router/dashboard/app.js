@@ -15,10 +15,13 @@ import traffic from "/static/tabs/traffic.js";
 import requests from "/static/tabs/requests.js";
 import connect from "/static/tabs/connect.js";
 import agents from "/static/tabs/agents.js";
+import tokens from "/static/tabs/tokens.js";
 
-// Agents appears only when the router knows an agent-monitor to read
-// (--dashboard-monitor-url): a laptop router beside its agents.
-const TABS = [activity, ...((window.DASH_CONFIG || {}).monitorUrl ? [agents] : []), fleet, catalog, traffic, requests, connect];
+// Agents and Tokens appear only when the router proxies the tool
+// (--dashboard-monitor-url / --dashboard-tokens-url): the shell's
+// monitorUrl/tokensUrl are then the same-origin prefixes.
+const cfg = window.DASH_CONFIG || {};
+const TABS = [activity, ...(cfg.monitorUrl ? [agents] : []), ...(cfg.tokensUrl ? [tokens] : []), fleet, catalog, traffic, requests, connect];
 const DEFAULT_TAB = "activity";
 
 // poll(fn, ms): run fn now and every ms while the owning tab is mounted and

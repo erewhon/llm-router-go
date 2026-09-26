@@ -55,7 +55,16 @@ function render(models) {
         <a href="https://llm-dashboard.bcc.sh" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:500">Dashboard</a>
         <a href="http://192.168.42.159:5403" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:500">ACE-Step Music</a>
       </div>
-    </div>`;
+    </div>
+    ${
+      ctx.config.tokensUrl && ctx.config.monitorUrl
+        ? ""
+        : `<p class="node-detail" style="margin-top:0.75rem">${
+            ctx.config.tokensUrl ? "" : "No Tokens tab: this router proxies no tokenator — start one and pass <span class=\"api-base\">--dashboard-tokens-url</span> (pitf exports PITF_TOKENS_URL). "
+          }${
+            ctx.config.monitorUrl ? "" : "No Agents tab: this router proxies no agent-monitor — start one and pass <span class=\"api-base\">--dashboard-monitor-url</span> (pitf exports PITF_MONITOR_URL)."
+          }</p>`
+    }`;
 }
 
 function onClick(ev) {

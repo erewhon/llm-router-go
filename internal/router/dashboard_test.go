@@ -653,6 +653,16 @@ func TestDashboard_MonitorURLSubstitution(t *testing.T) {
 	}
 }
 
+func TestDashboardV2_TokensTabServed(t *testing.T) {
+	rec := dashV2(t, "/static/tabs/tokens.js")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "tokens"`) || !strings.Contains(rec.Body.String(), "tokenator-jump") {
+		t.Fatalf("tokens tab module: %d", rec.Code)
+	}
+	if body := dashV2(t, "/static/app.js").Body.String(); !strings.Contains(body, "cfg.tokensUrl ? [tokens]") {
+		t.Error("the shell must include the Tokens tab only when tokensUrl is configured")
+	}
+}
+
 func TestDashboardV2_AgentsTabServed(t *testing.T) {
 	rec := dashV2(t, "/static/tabs/agents.js")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "agents"`) {
