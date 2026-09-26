@@ -37,6 +37,14 @@ function query() {
   return new URLSearchParams(qs || "");
 }
 
+// tk fetches one tokenator API path and unwraps its {"data"} envelope;
+// api.get already turned an {"error"} answer into a thrown Error.
+async function tk(path) {
+  const env = await ctx.api.get(`${base}${path}`);
+  if (!env || typeof env !== "object" || !("data" in env)) throw new Error("unexpected answer from tokenator (no data envelope)");
+  return env.data;
+}
+
 export function hashFor(params) {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") p.set(k, v);
@@ -130,7 +138,7 @@ async function renderList(q) {
   const body = root.querySelector("#tkBody");
   try {
     const p = new URLSearchParams({ q: text, project, since });
-    const d = await ctx.api.get(`${base}/api/sessions?${p}`);
+    const d = await tk(`/api/sessions?${p}`);
     const sel = root.querySelector("#tkProject");
     if (sel) {
       sel.innerHTML = `<option value="">all projects</option>` + (d.projects || []).map((pr) => `<option${pr === project ? " selected" : ""}>${escHtml(pr)}</option>`).join("");
@@ -213,7 +221,7 @@ async function renderProfile(key) {
   root.innerHTML = `<p class="tab-placeholder">loading session ${escHtml(key)}…</p>`;
   let d;
   try {
-    d = await ctx.api.get(`${base}/api/session/${encodeURIComponent(key)}`);
+    d = await tk(`/api/session/${encodeURIComponent(key)}`);
   } catch (e) {
     root.innerHTML = crumbs([{ label: key }]) + errorCard(e);
     return;
@@ -309,7 +317,7 @@ async function loadPage(anchor) {
   const limit = 500;
   for (;;) {
     const p = new URLSearchParams({ q: st.q || "", offset: String(st.offset), limit: String(limit) });
-    const d = await ctx.api.get(`${base}/api/session/${encodeURIComponent(st.key)}/transcript?${p}`);
+    const d = await tk(`/api/session/${encodeURIComponent(st.key)}/transcript?${p}`);
     st.meta = d.meta;
     st.total = d.total;
     st.err = d.err || "";
@@ -383,7 +391,7 @@ async function renderModel(name) {
   root.innerHTML = `<p class="tab-placeholder">loading model ${escHtml(name)}…</p>`;
   let d;
   try {
-    d = await ctx.api.get(`${base}/api/model/${encodeURIComponent(name)}`);
+    d = await tk(`/api/model/${encodeURIComponent(name)}`);
   } catch (e) {
     root.innerHTML = crumbs([{ label: name }]) + errorCard(e);
     return;
