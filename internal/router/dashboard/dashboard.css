@@ -401,10 +401,29 @@
   .task-move { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.75rem; margin-left: 0.3rem; }
   .task-del-confirm { color: var(--red); border-color: var(--red); }
   .task-pending { opacity: 0.6; }
-  /* Tokens tab: tokenator framed through the /tokens/ proxy in its embedded
-     mode; the frame paints its own (matching) background. */
-  .tokens-frame { width: 100%; height: calc(100vh - 15rem); min-height: 480px; border: 1px solid var(--border);
-    border-radius: 8px; background: var(--surface); display: block; }
+  /* Tokens tab: tokenator drawn natively over its JSON API */
+  .tk-crumbs { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 0.4rem; }
+  .tk-crumbs a { color: var(--accent); text-decoration: none; }
+  .tk-links { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.85rem; margin: 0 0 0.8rem; }
+  .tk-links a { color: var(--accent); text-decoration: none; }
+  .tk-chip { display: inline-block; font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    padding: 0.05rem 0.45rem; border-radius: 9px; color: #0f1117; margin-right: 0.4rem; }
+  .tk-snips { margin: 0.5rem 0 0; padding: 0; list-style: none; }
+  .tk-snips li { margin: 0.35rem 0; font-size: 0.8rem; color: var(--text-dim); }
+  .tk-snips li a, .tk-ehead a { color: var(--accent); text-decoration: none; }
+  .tk-t { color: var(--text-dim); font-size: 0.72rem; margin-right: 0.4rem; }
+  .tk-tool { color: var(--text); font-weight: 600; font-size: 0.78rem; margin-right: 0.4rem; }
+  .tk-entry { border-top: 1px solid var(--border); padding: 0.5rem 0; }
+  .tk-entry:first-child { border-top: 0; }
+  .tk-entry.tk-target { background: rgba(251, 191, 36, 0.10); border-radius: 6px; }
+  .tk-ehead { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; font-size: 0.75rem; color: var(--text-dim); }
+  .tk-entry pre { margin: 0.35rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.78rem; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); }
+  .tk-entry.err pre { color: var(--red); }
+  .tk-entry details summary { cursor: pointer; color: var(--text-dim); font-size: 0.75rem; margin-top: 0.25rem; }
+  .tk-entry mark, .tk-snips mark { background: var(--yellow); color: #0f1117; border-radius: 2px; padding: 0 1px; }
+  .tk-legend { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-dim); margin-top: 0.3rem; }
+  .tk-legend i { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 2px; margin-right: 0.3rem; vertical-align: -1px; }
 #strip .stat { min-width: 120px; padding: 0.7rem 1.1rem; }
 #strip .stat-value { font-size: 1.2rem; }
 

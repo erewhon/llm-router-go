@@ -655,7 +655,10 @@ func TestDashboard_MonitorURLSubstitution(t *testing.T) {
 
 func TestDashboardV2_TokensTabServed(t *testing.T) {
 	rec := dashV2(t, "/static/tabs/tokens.js")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "tokens"`) || !strings.Contains(rec.Body.String(), "tokenator-jump") {
+	body := rec.Body.String()
+	// Native tab (phase 2): draws tokenator's JSON API, frames nothing.
+	if rec.Code != http.StatusOK || !strings.Contains(body, `id: "tokens"`) || !strings.Contains(body, "/api/sessions") ||
+		!strings.Contains(body, "/transcript?") || !strings.Contains(body, "/api/model/") || strings.Contains(body, "<iframe") {
 		t.Fatalf("tokens tab module: %d", rec.Code)
 	}
 	if body := dashV2(t, "/static/app.js").Body.String(); !strings.Contains(body, "cfg.tokensUrl ? [tokens]") {
