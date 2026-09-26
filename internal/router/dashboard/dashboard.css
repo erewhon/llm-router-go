@@ -392,6 +392,15 @@
 .tabs a:hover { color: var(--text); }
 .tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-placeholder { color: var(--text-dim); padding: 2rem 0; font-size: 0.9rem; }
+  /* Agents tab: task board */
+  .task-new { display: flex; gap: 0.5rem; margin: 0 0 0.6rem; flex-wrap: wrap; }
+  .task-new-title { flex: 2 1 16rem; } .task-new-group { flex: 1 1 8rem; }
+  .task-title { cursor: text; } .task-title:hover { text-decoration: underline dotted var(--text-dim); }
+  .task-title-input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 0.15rem 0.4rem; font: inherit; }
+  .task-actions { white-space: nowrap; text-align: right; }
+  .task-move { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.15rem 0.3rem; font-size: 0.75rem; margin-left: 0.3rem; }
+  .task-del-confirm { color: var(--red); border-color: var(--red); }
+  .task-pending { opacity: 0.6; }
   /* Tokens tab: tokenator framed through the /tokens/ proxy in its embedded
      mode; the frame paints its own (matching) background. */
   .tokens-frame { width: 100%; height: calc(100vh - 15rem); min-height: 480px; border: 1px solid var(--border);

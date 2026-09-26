@@ -1,13 +1,17 @@
 // Agents tab — the coding agents agent-monitor is watching, live, with a
-// jump from each agent's harness session to the Requests tab. Shown only
-// when the router has a --dashboard-monitor-url. The browser never talks to
-// the monitor itself: ctx.config.monitorUrl is the router's same-origin
-// proxy prefix (/monitor), so this works behind the SSO front door at home
-// as well as on a laptop, with no CORS. Read-only for now; the task board
-// stays in agent-monitor's own page, linked from here.
+// jump from each agent's harness session to the Requests and Tokens tabs,
+// and agent-monitor's task board below (agents-tasks.js: create, rename,
+// move, launch, delete). Shown only when the router has a
+// --dashboard-monitor-url. The browser never talks to the monitor itself:
+// ctx.config.monitorUrl is the router's same-origin proxy prefix
+// (/monitor), so reads AND writes work behind the SSO front door at home as
+// well as on a laptop, with no CORS on agent-monitor.
+import { mountTasks, unmountTasks } from "/static/tabs/agents-tasks.js";
+
 let root = null;
 let ctx = null;
 let stopPoll = null;
+let refreshTasks = null;
 
 // Attention first: an agent waiting on the operator outranks one working.
 const ORDER = { waiting: 0, error: 1, running: 2, planning: 3, idle: 4, unknown: 5 };
@@ -79,6 +83,7 @@ async function load() {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const agents = await res.json();
     if (root) body.innerHTML = table(Array.isArray(agents) ? agents : []);
+    if (refreshTasks) await refreshTasks();
   } catch (e) {
     if (!root) return;
     const { escHtml } = ctx.fmt;
@@ -97,14 +102,18 @@ export default {
     const base = ctx.config.monitorUrl;
     root.innerHTML = `
       <div class="section-title">Agents
-        <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(from agent-monitor at <a href="${escHtml(base)}/" target="_blank" rel="noopener" style="color:var(--accent)">${escHtml(base)}</a> ↗, which also has the task board)</span>
+        <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(from agent-monitor via <span class="api-base">${escHtml(base)}/</span>)</span>
       </div>
-      <div id="agentsBody"><p class="tab-placeholder">loading…</p></div>`;
+      <div id="agentsBody"><p class="tab-placeholder">loading…</p></div>
+      <div id="tasksBody"></div>`;
+    refreshTasks = mountTasks(root.querySelector("#tasksBody"), ctx, base);
     stopPoll = ctx.poll(load, 3000);
   },
   unmount() {
     if (stopPoll) stopPoll();
     stopPoll = null;
+    unmountTasks();
+    refreshTasks = null;
     root = null;
   },
 };

@@ -665,7 +665,14 @@ func TestDashboardV2_TokensTabServed(t *testing.T) {
 
 func TestDashboardV2_AgentsTabServed(t *testing.T) {
 	rec := dashV2(t, "/static/tabs/agents.js")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "agents"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id: "agents"`) || !strings.Contains(rec.Body.String(), "agents-tasks.js") {
 		t.Fatalf("agents tab module: %d", rec.Code)
+	}
+	rec = dashV2(t, "/static/tabs/agents-tasks.js")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "/api/launch") || !strings.Contains(rec.Body.String(), `"PATCH"`) {
+		t.Fatalf("agents task board module: %d", rec.Code)
+	}
+	if body := dashV2(t, "/static/lib/api.js").Body.String(); !strings.Contains(body, "async send(method, path, body)") {
+		t.Error("api.js must carry the write helper the task board uses")
 	}
 }

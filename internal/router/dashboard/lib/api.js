@@ -18,6 +18,32 @@ export const api = {
     return r.json();
   },
 
+  // send is a write: JSON body in, JSON (or null for 204) out. Errors read
+  // like get's: the server's {"error"} or plain-text body when there is one,
+  // else the status line.
+  async send(method, path, body) {
+    const init = { method, cache: "no-store", headers: {} };
+    if (body !== undefined) {
+      init.headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const r = await fetch(path, init);
+    if (!r.ok) {
+      let msg = `${r.status} ${r.statusText}`;
+      const text = await r.text().catch(() => "");
+      try {
+        const j = JSON.parse(text);
+        if (j && j.error) msg = j.error;
+      } catch (_) {
+        if (text.trim()) msg = text.trim();
+      }
+      throw new Error(msg);
+    }
+    if (r.status === 204) return null;
+    const text = await r.text();
+    return text ? JSON.parse(text) : null;
+  },
+
   // Server-sent events. handlers is {snapshot(data), request(data), open(),
   // error(e)} keyed by event name; unknown events are ignored. Returns a
   // cancel function. Reconnects with backoff on failure. The /api/events
