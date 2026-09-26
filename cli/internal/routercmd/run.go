@@ -134,7 +134,8 @@ func Run(ctx context.Context, args []string) error {
 		// reach. Meant for a router run on the same machine as its agents (a
 		// laptop); `pitf router serve` exports PITF_MONITOR_URL, so it wires
 		// itself there.
-		dashMonitorURL = fs.String("dashboard-monitor-url", "", "agent-monitor web UI (e.g. http://127.0.0.1:8070) for the dashboard's Agents tab; empty falls back to $PITF_MONITOR_URL, then hides the tab")
+		dashMonitorURL = fs.String("dashboard-monitor-url", "", "agent-monitor the router can reach (e.g. http://127.0.0.1:8070); the dashboard proxies it at /monitor/ and gains the Agents tab. Empty falls back to $PITF_MONITOR_URL, then hides the tab")
+		dashTokensURL  = fs.String("dashboard-tokens-url", "", "tokenator serve the router can reach (e.g. http://127.0.0.1:8990); the dashboard proxies it at /tokens/. Empty falls back to $PITF_TOKENS_URL, then leaves /tokens/ off")
 
 		// Anthropic passthrough attribution: the operator's map from an
 		// upstream credential's fingerprint (the 8 hex chars after
@@ -476,6 +477,7 @@ func Run(ctx context.Context, args []string) error {
 				IdentityHeader: *dashIDHeader,
 				Owners:         splitCSV(owners),
 				MonitorURL:     monitorURL(*dashMonitorURL),
+				TokensURL:      envFallback(*dashTokensURL, "PITF_TOKENS_URL"),
 			}),
 			httpx.RequestID,
 			httpx.AccessLog(logger.With("svc", "dashboard")),
@@ -601,11 +603,14 @@ func buildZDRCanary(registry *config.ModelRegistry, interval time.Duration, logg
 	return router.NewZDRCanary(m.APIBase, os.Getenv(m.APIKey), m.HFRepo, interval, logger)
 }
 
-// monitorURL is the Agents tab's agent-monitor base: the flag, else
+// monitorURL is the dashboard's agent-monitor target: the flag, else
 // $PITF_MONITOR_URL (what pitf exports to the commands it mounts).
-func monitorURL(flag string) string {
+func monitorURL(flag string) string { return envFallback(flag, "PITF_MONITOR_URL") }
+
+// envFallback is the flag when set, else the named environment variable.
+func envFallback(flag, env string) string {
 	if flag != "" {
 		return flag
 	}
-	return os.Getenv("PITF_MONITOR_URL")
+	return os.Getenv(env)
 }

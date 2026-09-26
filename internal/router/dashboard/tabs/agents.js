@@ -1,9 +1,10 @@
 // Agents tab — the coding agents agent-monitor is watching, live, with a
 // jump from each agent's harness session to the Requests tab. Shown only
-// when the router has a --dashboard-monitor-url (a router on the same
-// machine as its agents, e.g. a work laptop): the browser reads the monitor
-// directly, which answers GETs with CORS *. Read-only; the task board stays
-// in agent-monitor's own page, linked from here.
+// when the router has a --dashboard-monitor-url. The browser never talks to
+// the monitor itself: ctx.config.monitorUrl is the router's same-origin
+// proxy prefix (/monitor), so this works behind the SSO front door at home
+// as well as on a laptop, with no CORS. Read-only for now; the task board
+// stays in agent-monitor's own page, linked from here.
 let root = null;
 let ctx = null;
 let stopPoll = null;

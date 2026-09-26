@@ -81,11 +81,21 @@ type DashboardConfig struct {
 	// Owners may mint any scope from the dashboard. Everyone else is capped
 	// at models:local — a family token must be structurally unable to spend.
 	Owners []string
-	// MonitorURL is an agent-monitor web UI the browser can reach (normally
-	// loopback, on the same machine as a local router). Set, the shell gains
-	// an Agents tab that reads its /api/agents; empty hides the tab.
+	// MonitorURL is an agent-monitor the ROUTER can reach (loopback on a
+	// laptop; the coding box's LAN address at home). Set, the dashboard
+	// proxies /monitor/* to it and the shell gains an Agents tab that reads
+	// /monitor/api/agents; empty hides the tab and /monitor/ answers 404.
 	MonitorURL string
+	// TokensURL is a tokenator serve the router can reach, proxied at
+	// /tokens/* the same way; the shell's tokensUrl is "/tokens" when set.
+	TokensURL string
 }
+
+// Browser-side paths the shell uses for the proxied tools.
+const (
+	dashMonitorPrefix = "/monitor"
+	dashTokensPrefix  = "/tokens"
+)
 
 // DashboardHandler returns the http.Handler for the dashboard listener. The
 // HTML is substituted once here and captured in the root handler's closure.
@@ -101,10 +111,14 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	html := ""
 	if raw, err := dashboardV2.ReadFile("dashboard/index.html"); err == nil {
 		hint, _ := json.Marshal(cfg.SetupHint)
-		monitor, _ := json.Marshal(strings.TrimRight(cfg.MonitorURL, "/"))
+		// The browser never sees the tools' own addresses: when a tool is
+		// configured its shell URL is the same-origin proxy prefix.
+		monitor, _ := json.Marshal(proxyPrefixIf(cfg.MonitorURL, dashMonitorPrefix))
+		tokens, _ := json.Marshal(proxyPrefixIf(cfg.TokensURL, dashTokensPrefix))
 		html = strings.NewReplacer(
 			"\"%%SETUP_HINT%%\"", string(hint),
 			"\"%%MONITOR_URL%%\"", string(monitor),
+			"\"%%TOKENS_URL%%\"", string(tokens),
 			"%%API_BASE%%", cfg.APIBase,
 			"%%API_KEY%%", keyHint,
 			"%%PROVIDER_ID%%", cfg.ProviderID,
@@ -113,11 +127,10 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	staticFS, _ := fs.Sub(dashboardV2, "dashboard")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
+	// Exactly "/" (the {$} anchor): a subtree "GET /" would conflict with
+	// the method-agnostic /monitor/ and /tokens/ proxy patterns below, and
+	// every other unknown path is a 404 either way.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		if html == "" {
 			http.Error(w, "dashboard shell not embedded", http.StatusInternalServerError)
 			return
@@ -181,7 +194,24 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.Handle("GET /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensList)))
 	mux.Handle("POST /api/tokens", ident(http.HandlerFunc(rt.handleDashTokensMint)))
 	mux.Handle("DELETE /api/tokens/{id}", ident(http.HandlerFunc(rt.handleDashTokensRevoke)))
+	// The other tool UIs, same origin, behind the same gate. A bad target
+	// URL is an operator error worth failing loudly on at startup.
+	if err := mountDashProxy(mux, ident, dashMonitorPrefix, "--dashboard-monitor-url", cfg.MonitorURL); err != nil {
+		panic(err)
+	}
+	if err := mountDashProxy(mux, ident, dashTokensPrefix, "--dashboard-tokens-url", cfg.TokensURL); err != nil {
+		panic(err)
+	}
 	return mux
+}
+
+// proxyPrefixIf is the shell-side URL for a proxied tool: its prefix when
+// the tool is configured, "" (tab hidden) when not.
+func proxyPrefixIf(target, prefix string) string {
+	if strings.TrimSpace(target) == "" {
+		return ""
+	}
+	return prefix
 }
 
 // ---------------------------------------------------------------------------

@@ -629,24 +629,27 @@ func TestDashboard_RequestsBySession(t *testing.T) {
 	}
 }
 
-// The Agents tab is driven by DASH_CONFIG.monitorUrl: JSON-escaped (it is
-// operator input), trailing slash trimmed, and empty when unset so the shell
+// The Agents and Tokens tabs are driven by DASH_CONFIG.monitorUrl /
+// tokensUrl: the same-origin proxy prefix when the tool is configured (the
+// browser never sees the tool's own address), empty when unset so the shell
 // leaves the tab out.
 func TestDashboard_MonitorURLSubstitution(t *testing.T) {
 	rt := newTestRouter(t, nil)
-	serve := func(u string) string {
+	serve := func(cfg DashboardConfig) string {
 		rec := httptest.NewRecorder()
-		rt.DashboardHandler(DashboardConfig{MonitorURL: u}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		rt.DashboardHandler(cfg).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		return rec.Body.String()
 	}
-	if body := serve("http://127.0.0.1:8070/"); !strings.Contains(body, `monitorUrl: "http://127.0.0.1:8070",`) {
-		t.Errorf("monitor URL not substituted (trimmed):\n%s", body)
+	body := serve(DashboardConfig{MonitorURL: "http://127.0.0.1:8070/", TokensURL: "http://192.168.42.240:8990"})
+	if !strings.Contains(body, `monitorUrl: "/monitor",`) || !strings.Contains(body, `tokensUrl: "/tokens",`) {
+		t.Errorf("configured tools must substitute to their proxy prefixes:\n%s", body)
 	}
-	if body := serve(""); !strings.Contains(body, `monitorUrl: "",`) || strings.Contains(body, "%%MONITOR_URL%%") {
-		t.Error("an unset monitor URL must substitute to the empty string")
+	if strings.Contains(body, "8070") || strings.Contains(body, "192.168.42.240") {
+		t.Error("the tools' own addresses must not reach the browser")
 	}
-	if body := serve(`http://x/"</script><script>alert(1)`); strings.Contains(body, `"</script>`) {
-		t.Error("monitor URL must be JSON-escaped inside the script block")
+	body = serve(DashboardConfig{})
+	if !strings.Contains(body, `monitorUrl: "",`) || !strings.Contains(body, `tokensUrl: "",`) || strings.Contains(body, "%%MONITOR_URL%%") || strings.Contains(body, "%%TOKENS_URL%%") {
+		t.Error("unset tools must substitute to the empty string")
 	}
 }
 
