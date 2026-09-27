@@ -63,6 +63,82 @@ function upsertJob(state, row) {
   if (state.jobs.length > JOBS_MAX) state.jobs.length = JOBS_MAX;
 }
 
+// ---- Replicas ------------------------------------------------------------
+// With peers configured the event stream is the whole fleet's and every
+// event names the replica that handled it (`replica`). These helpers are the
+// replica dimension of the view; all pure.
+
+export function replicaOf(e) {
+  return e.replica || "";
+}
+
+// Colours for replicas. Deliberately none of the status colours (accent,
+// yellow, red, green, orange): a dot's fill says how the request is going,
+// its ring says where it ran.
+export const REPLICA_PALETTE = ["#2dd4bf", "#c084fc", "#f472b6", "#38bdf8"];
+
+// replicaColor is stable for a name given the fleet's (sorted) replica list;
+// a name not in the list falls back to a hash, so it is still stable.
+export function replicaColor(name, known = []) {
+  if (!name) return "var(--text-dim)";
+  let i = known.indexOf(name);
+  if (i < 0) {
+    i = 0;
+    for (const ch of name) i = (i * 31 + ch.codePointAt(0)) >>> 0;
+  }
+  return REPLICA_PALETTE[i % REPLICA_PALETTE.length];
+}
+
+// fleetOf reads /api/overview's `replicas` into what the view needs:
+// names (sorted, this replica included), and the peers whose picture is
+// missing — unreachable, or reachable with their event feed down. A peer
+// that has never answered has no name yet and goes by its URL: it is still
+// a configured peer, and its absence still has to show.
+export function fleetOf(overview) {
+  const reps = (overview && overview.replicas) || [];
+  const self = (overview && overview.replica) || (reps[0] && reps[0].replica) || "";
+  const names = [...new Set(reps.map((r) => r.replica || r.url).filter(Boolean))].sort();
+  if (!names.length && self) names.push(self);
+  const missing = reps
+    .filter((r) => r.feed && (!r.reachable || !r.feed.connected))
+    .map((r) => r.replica || r.url || "?")
+    .sort();
+  return { self, names, missing };
+}
+
+// noteFor is the line beside "Live activity": whose traffic this is, and
+// loudly when part of it is missing — a half view must not pass for a quiet
+// fleet.
+export function noteFor(fleet) {
+  if (fleet.names.length < 2) return { text: `showing this replica's traffic (${fleet.self || "?"}) — no peers configured`, warn: false };
+  if (fleet.missing.length) {
+    const seen = fleet.names.filter((n) => !fleet.missing.includes(n));
+    return { text: `showing ${seen.join(", ") || "nothing"} — ${fleet.missing.join(", ")} feed disconnected`, warn: true };
+  }
+  return { text: `showing all replicas (${fleet.names.join(", ")})`, warn: false };
+}
+
+// dropReplicaInflight gives up on a replica's in-flight requests once its
+// feed is gone: their `finished` will never arrive here, and a row that says
+// "in flight" forever is a lie. The rows stay in Jobs, marked lost. Returns
+// the request ids dropped, so the renderer can retire their dots.
+export function dropReplicaInflight(state, replica) {
+  const ids = [];
+  for (const [id, cur] of state.inflight) {
+    const last = cur.events[cur.events.length - 1];
+    if (replicaOf(last) !== replica) continue;
+    state.inflight.delete(id);
+    ids.push(id);
+  }
+  for (const j of state.jobs) {
+    if (ids.includes(j.request_id)) {
+      j.inflight = false;
+      j.lost = true;
+    }
+  }
+  return ids;
+}
+
 // activeCallers returns principals seen within the window, most recent first.
 export function activeCallers(state, now = Date.now()) {
   const out = [];
@@ -164,8 +240,13 @@ let positions = {}; // key → {x, y}
 let dots = new Map(); // request_id → dot animation
 let raf = 0,
   stopSSE = null;
-const filters = { role: "", node: "", principal: "", errors: false, inflight: false };
+const filters = { role: "", node: "", principal: "", replica: "", errors: false, inflight: false };
 let selected = null;
+// The fleet as /api/overview last described it, and whether our own event
+// stream is down (which outranks anything the overview says).
+let fleet = { self: "", names: [], missing: [] };
+let sseDown = false;
+let legendEl = null;
 
 const verdictColor = (m) => {
   if (!m) return "var(--text-dim)";
@@ -187,12 +268,13 @@ function readHash() {
   filters.role = q.get("role") || "";
   filters.node = q.get("node") || "";
   filters.principal = q.get("principal") || "";
+  filters.replica = q.get("replica") || "";
   filters.errors = q.get("errors") === "1";
   filters.inflight = q.get("inflight") === "1";
 }
 function writeHash() {
   const q = new URLSearchParams();
-  for (const k of ["role", "node", "principal"]) if (filters[k]) q.set(k, filters[k]);
+  for (const k of ["role", "node", "principal", "replica"]) if (filters[k]) q.set(k, filters[k]);
   if (filters.errors) q.set("errors", "1");
   if (filters.inflight) q.set("inflight", "1");
   const s = q.toString();
@@ -451,8 +533,11 @@ function frame(now) {
       } else pos = end;
     }
     const sel = selected === id ? " act-dot-selected" : "";
+    // The ring says which replica handled it, once there is more than one;
+    // a selected dot keeps its white ring.
+    const ring = fleet.names.length > 1 && !sel ? `;stroke:${replicaColor(replicaOf(d.e), fleet.names)};stroke-width:2` : "";
     if (d.phase !== "done" || now - d.labelAt < 2500) {
-      out += `<circle cx="${pos.x}" cy="${pos.y}" r="${d.phase === "done" ? 4 : 6}" class="act-dot${sel}" style="fill:${color}" data-id="${esc(id)}"/>`;
+      out += `<circle cx="${pos.x}" cy="${pos.y}" r="${d.phase === "done" ? 4 : 6}" class="act-dot${sel}" style="fill:${color}${ring}" data-id="${esc(id)}"/>`;
       if (d.label)
         out += `<text x="${pos.x + 10}" y="${pos.y - 8}" class="act-label" style="fill:${color};opacity:${Math.max(0, 1 - (now - d.labelAt) / 2500)}">${esc(d.label)}</text>`;
     } else {
@@ -471,6 +556,7 @@ function jobRows() {
     if (filters.role && (j.role || "") !== filters.role) return false;
     if (filters.node && (j.node || j.provider || "") !== filters.node) return false;
     if (filters.principal && principalOf(j) !== filters.principal) return false;
+    if (filters.replica && replicaOf(j) !== filters.replica) return false;
     if (filters.errors && !(j.status >= 400 || j.error_class)) return false;
     if (filters.inflight && !j.inflight) return false;
     return true;
@@ -485,29 +571,40 @@ function renderJobs() {
   const roles = [...new Set(state.jobs.map((j) => j.role).filter(Boolean))].sort();
   const places = [...new Set(state.jobs.map((j) => j.node || j.provider).filter(Boolean))].sort();
   const principals = [...new Set(state.jobs.map(principalOf))].sort();
-  let h = `<div class="section-title">Jobs <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(last ${state.jobs.length} requests on this replica)</span></div><div class="filter-bar">`;
+  // The replica dimension appears with the second replica: in the fleet as
+  // the overview describes it, or in the rows themselves.
+  const replicas = [...new Set([...fleet.names, ...state.jobs.map(replicaOf).filter(Boolean)])].sort();
+  const multi = replicas.length > 1;
+  const scope = multi ? `across ${replicas.length} replicas` : "on this replica";
+  let h = `<div class="section-title">Jobs <span style="color:var(--text-dim);font-weight:400;font-size:0.8rem">(last ${state.jobs.length} requests ${scope})</span></div><div class="filter-bar">`;
   for (const r of roles) h += chip("role", r, r);
   for (const p of places) h += chip("node", p, p);
   for (const p of principals) h += chip("principal", p, p);
+  if (multi || filters.replica) for (const r of replicas) h += chip("replica", r, r);
   h += chip("errors", true, "errors only") + chip("inflight", true, "in flight");
-  if (filters.role || filters.node || filters.principal || filters.errors || filters.inflight)
+  if (filters.role || filters.node || filters.principal || filters.replica || filters.errors || filters.inflight)
     h += `<button class="clear-btn" data-action="clear">clear filters</button>`;
-  h += `</div><div class="node-card" style="padding:0.4rem 0.8rem;overflow-x:auto"><table class="usage-table act-jobs"><thead><tr><th>time</th><th>principal</th><th>asked</th><th>resolved via</th><th>where</th><th>failover</th><th class="num">tokens</th><th class="num">latency</th><th>status</th><th>privacy</th></tr></thead><tbody>`;
+  h += `</div><div class="node-card" style="padding:0.4rem 0.8rem;overflow-x:auto"><table class="usage-table act-jobs"><thead><tr><th>time</th>${multi ? "<th>replica</th>" : ""}<th>principal</th><th>asked</th><th>resolved via</th><th>where</th><th>failover</th><th class="num">tokens</th><th class="num">latency</th><th>status</th><th>privacy</th></tr></thead><tbody>`;
   for (const j of rows) {
     const t = j.ts ? new Date(j.ts) : null;
     const time = t ? t.toLocaleTimeString([], { hour12: false }) : "";
-    const status = j.inflight
-      ? `<span style="color:var(--yellow)">in flight${j.stream ? " ▶" : ""}</span>`
-      : j.error_class && /refused/.test(j.error_class)
-        ? `<span style="color:var(--orange)">${esc(j.error_class)}</span>`
-        : j.status >= 400
-          ? `<span style="color:var(--red)">${j.status}${j.error_class ? " " + esc(j.error_class) : ""}</span>`
-          : `${j.status}${j.stream ? " ▶" : ""}`;
+    const status = j.lost
+      ? `<span class="act-dim" title="this replica's event feed dropped while the request was in flight; its outcome is in the Requests tab">unknown (feed lost)</span>`
+      : j.inflight
+        ? `<span style="color:var(--yellow)">in flight${j.stream ? " ▶" : ""}</span>`
+        : j.error_class && /refused/.test(j.error_class)
+          ? `<span style="color:var(--orange)">${esc(j.error_class)}</span>`
+          : j.status >= 400
+            ? `<span style="color:var(--red)">${j.status}${j.error_class ? " " + esc(j.error_class) : ""}</span>`
+            : `${j.status}${j.stream ? " ▶" : ""}`;
     const tokens = j.prompt_tokens != null || j.completion_tokens != null ? `${j.prompt_tokens ?? "–"}/${j.completion_tokens ?? "–"}` : "";
     const lat = j.latency_ms != null ? (j.latency_ms >= 1000 ? `${(j.latency_ms / 1000).toFixed(1)} s` : `${j.latency_ms} ms`) : "";
-    h += `<tr data-id="${esc(j.request_id)}" class="${selected === j.request_id ? "act-row-selected" : ""}"><td>${time}</td><td>${esc(principalOf(j))}</td><td>${esc(j.model || "")}</td><td>${esc(j.resolved_via || "")}${j.discovered ? ' <span class="badge badge-tag">discovered</span>' : ""}</td><td>${esc(j.node || j.provider || "")}${j.upstream_provider ? ` <span class="act-dim">${esc(j.upstream_provider)}</span>` : ""}</td><td>${esc(j.failover_from || "")}${j.overflowed ? ' <span class="badge badge-tool">overflow</span>' : ""}</td><td class="num">${tokens}</td><td class="num">${lat}</td><td>${status}</td><td>${esc(j.privacy_tolerance || "")}</td></tr>`;
+    const rc = replicaColor(replicaOf(j), fleet.names);
+    const repCell = multi ? `<td><span class="act-replica" style="color:${rc};border-color:${rc}">${esc(replicaOf(j) || "?")}</span></td>` : "";
+    h += `<tr data-id="${esc(j.request_id)}" class="${selected === j.request_id ? "act-row-selected" : ""}"><td>${time}</td>${repCell}<td>${esc(principalOf(j))}</td><td>${esc(j.model || "")}</td><td>${esc(j.resolved_via || "")}${j.discovered ? ' <span class="badge badge-tag">discovered</span>' : ""}</td><td>${esc(j.node || j.provider || "")}${j.upstream_provider ? ` <span class="act-dim">${esc(j.upstream_provider)}</span>` : ""}</td><td>${esc(j.failover_from || "")}${j.overflowed ? ' <span class="badge badge-tool">overflow</span>' : ""}</td><td class="num">${tokens}</td><td class="num">${lat}</td><td>${status}</td><td>${esc(j.privacy_tolerance || "")}</td></tr>`;
   }
-  if (!rows.length) h += `<tr><td colspan="10" class="act-dim">no requests${state.jobs.length ? " match the filters" : " yet"}</td></tr>`;
+  if (!rows.length)
+    h += `<tr><td colspan="${multi ? 11 : 10}" class="act-dim">no requests${state.jobs.length ? " match the filters" : " yet"}</td></tr>`;
   h += `</tbody></table></div>`;
   jobsEl.innerHTML = h;
 }
@@ -524,7 +621,7 @@ function onClick(ev) {
     return;
   }
   if (ev.target.closest('[data-action="clear"]')) {
-    Object.assign(filters, { role: "", node: "", principal: "", errors: false, inflight: false });
+    Object.assign(filters, { role: "", node: "", principal: "", replica: "", errors: false, inflight: false });
     writeHash();
     renderJobs();
     return;
@@ -559,6 +656,27 @@ function onClick(ev) {
   }
 }
 
+// renderFleet draws the note and the replica legend from `fleet`.
+function renderFleet() {
+  if (noteEl) {
+    const n = sseDown ? { text: "event stream disconnected — reconnecting…", warn: true } : noteFor(fleet);
+    noteEl.textContent = n.text;
+    noteEl.style.color = n.warn ? "var(--yellow)" : "";
+  }
+  if (legendEl) {
+    legendEl.innerHTML =
+      fleet.names.length > 1
+        ? fleet.names
+            .map((n) => {
+              const c = replicaColor(n, fleet.names);
+              const gone = fleet.missing.includes(n);
+              return `<span class="act-replica${gone ? " act-replica-gone" : ""}" style="color:${c};border-color:${c}" title="${gone ? "feed disconnected" : "live"}">${esc(n)}</span>`;
+            })
+            .join(" ")
+        : "";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tab
 // ---------------------------------------------------------------------------
@@ -576,7 +694,7 @@ export default {
     selected = null;
     readHash();
     root.innerHTML = `
-      <div class="section-title">Live activity <span id="act-note" class="act-dim" style="font-weight:400;font-size:0.8rem"></span></div>
+      <div class="section-title">Live activity <span id="act-note" class="act-dim" style="font-weight:400;font-size:0.8rem"></span> <span id="act-legend" style="font-weight:400"></span></div>
       <div class="act-wrap"><svg id="act-svg" class="act-svg" viewBox="0 0 ${W} 320" preserveAspectRatio="xMinYMin meet"><g id="act-static"></g><g id="act-dyn"></g></svg></div>
       <div id="act-jobs"></div>`;
     svg = root.querySelector("#act-svg");
@@ -584,13 +702,21 @@ export default {
     dynG = root.querySelector("#act-dyn");
     jobsEl = root.querySelector("#act-jobs");
     noteEl = root.querySelector("#act-note");
+    legendEl = root.querySelector("#act-legend");
+    fleet = { self: "", names: [], missing: [] };
+    sseDown = false;
     root.addEventListener("click", onClick);
-    ctx.api
-      .get("/api/overview")
-      .then((d) => {
-        if (noteEl) noteEl.textContent = `showing this replica's traffic (${d.replica || "?"})`;
-      })
-      .catch(() => {});
+    // The fleet, every 10 s: who is in the picture, and who dropped out of
+    // it. A replica whose feed has just gone takes its in-flight rows with
+    // it (their `finished` will never reach us).
+    ctx.poll(async () => {
+      const next = fleetOf(await ctx.api.get("/api/overview"));
+      const newlyGone = next.missing.filter((n) => !fleet.missing.includes(n));
+      fleet = next;
+      for (const n of newlyGone) for (const id of dropReplicaInflight(state, n)) dots.delete(id);
+      renderFleet();
+      renderJobs();
+    }, 10000);
     // data is the merge of the two registry-shaped payloads; whichever
     // arrives rebuilds the topology.
     ctx.poll(async () => {
@@ -645,10 +771,12 @@ export default {
         renderJobs();
       },
       error: () => {
-        if (noteEl) noteEl.textContent = "event stream disconnected — reconnecting…";
+        sseDown = true;
+        renderFleet();
       },
       open: () => {
-        if (noteEl && /disconnected/.test(noteEl.textContent)) noteEl.textContent = "reconnected";
+        sseDown = false;
+        renderFleet();
       },
     });
     raf = requestAnimationFrame(frame);
@@ -659,7 +787,7 @@ export default {
     stopSSE = null;
     cancelAnimationFrame(raf);
     if (root) root.removeEventListener("click", onClick);
-    root = svg = staticG = dynG = jobsEl = noteEl = null;
+    root = svg = staticG = dynG = jobsEl = noteEl = legendEl = null;
     topo = null;
     data = null;
   },

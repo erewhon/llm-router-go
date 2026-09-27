@@ -454,6 +454,10 @@
 .act-label { font-size: 11px; font-weight: 600; }
 .act-jobs td, .act-jobs th { white-space: nowrap; }
 .act-row-selected td { background: rgba(108, 140, 255, 0.12); }
+/* Which replica handled a request: a Jobs cell, a legend entry. The colour is
+   set inline (one per replica); a replica whose feed is gone is struck out. */
+.act-replica { display: inline-block; padding: 0 0.4rem; border: 1px solid; border-radius: 9px; font-size: 11px; line-height: 16px; }
+.act-replica-gone { text-decoration: line-through; opacity: 0.6; }
 
 /* ---- Catalog drawer ---- */
 .cat-row { cursor: pointer; }
