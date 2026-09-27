@@ -37,6 +37,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/erewhon/llm-router-go/internal/auth"
@@ -64,9 +65,21 @@ type Router struct {
 	sink          reqlog.Sink
 	version       string
 	started       time.Time
-	metrics       *routerMetrics
-	wellKnown     WellKnownConfig
-	dashConfig    DashboardConfig
+	// replica names this router instance in events and /api/overview: the
+	// hostname unless WithReplica overrides it (tests, or two instances on
+	// one host).
+	replica    string
+	metrics    *routerMetrics
+	wellKnown  WellKnownConfig
+	dashConfig DashboardConfig
+	// peers are the other replicas' event feeds (peers.go); nil until
+	// DashboardHandler runs with a Peers list.
+	peers *peerSet
+	// streamsDone is closed by StopStreams so long-lived dashboard streams
+	// (/api/events, held open by browsers and by peers for good) end at
+	// shutdown instead of eating the whole drain timeout.
+	streamsDone chan struct{}
+	streamsOnce sync.Once
 	// nodeFetcher probes one node agent for the dashboard. Defaults to the
 	// real HTTP fetchNodeMetrics; tests set a stub to stay hermetic.
 	nodeFetcher func(ctx context.Context, host string, agentPort int) nodeMetric
@@ -152,6 +165,16 @@ func WithVersion(v string) Option {
 	}
 }
 
+// WithReplica names this instance in request events and /api/overview.
+// Default is the hostname.
+func WithReplica(name string) Option {
+	return func(r *Router) {
+		if name != "" {
+			r.replica = name
+		}
+	}
+}
+
 // WithAvailability wires the health tracker that decides which of a role's
 // candidates can be routed to right now. Omitting it (or passing nil) leaves
 // every model routable, which is exactly the pre-roles behaviour: roles still
@@ -193,15 +216,27 @@ func New(registry *config.ModelRegistry, logger *slog.Logger, opts ...Option) *R
 		avail:         alwaysRoutable{},
 		reqRate:       newReqRateWindow(),
 		events:        newBroker(DefaultEventRing),
+		streamsDone:   make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
+	if r.replica == "" {
+		r.replica, _ = os.Hostname()
+	}
+	r.events.local = r.replica
 	r.active = registry.ModelsForMode(r.mode)
 	r.roles = registry.RolesForMode(r.mode)
 	r.pressure = newPressureTracker(registry.Router.Pressure, logger.With("subsys", "pressure"))
 	r.metrics = newRouterMetrics(r.version, r.started, r.active)
 	return r
+}
+
+// StopStreams ends every open /api/events stream. Register it as the
+// dashboard server's OnShutdown hook: Shutdown does not cancel request
+// contexts, and a peer feed's stream never ends on its own.
+func (rt *Router) StopStreams() {
+	rt.streamsOnce.Do(func() { close(rt.streamsDone) })
 }
 
 // Handler returns the HTTP mux. Wrap with the standard httpx middleware chain

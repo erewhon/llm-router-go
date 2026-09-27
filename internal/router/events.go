@@ -36,7 +36,12 @@ type Event struct {
 	Type      EventType `json:"type"`
 	RequestID string    `json:"request_id"`
 	TS        time.Time `json:"ts"`
-	Principal string    `json:"principal,omitempty"`
+	// Replica is the router instance that handled the request (its
+	// hostname). Stamped by the local broker on publish; preserved as-is on
+	// events fanned in from a peer (peers.go), which is what lets one
+	// replica's Activity view show the whole fleet.
+	Replica   string `json:"replica,omitempty"`
+	Principal string `json:"principal,omitempty"`
 	// Model is the name the caller sent; ResolvedVia the registry id that
 	// serves it; Role/Chain the handle it came through, if any.
 	Model       string `json:"model"`
@@ -66,7 +71,11 @@ type Event struct {
 
 // Broker fans events out to subscribers and keeps a replay ring.
 type Broker struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// local is stamped onto every published event that has no Replica yet:
+	// the router's own hostname for its broker, "" for a peer feed's broker
+	// (whose events arrive already stamped by their origin).
+	local    string
 	ring     []Event // capacity fixed at construction; oldest first after wrap
 	head     int     // next write position
 	full     bool
@@ -98,6 +107,9 @@ func newBroker(ring int) *Broker {
 func (b *Broker) Publish(e Event) {
 	if e.TS.IsZero() {
 		e.TS = time.Now()
+	}
+	if e.Replica == "" {
+		e.Replica = b.local
 	}
 	b.mu.Lock()
 	b.ring[b.head] = e
@@ -144,6 +156,44 @@ func (b *Broker) Subscribe(buf int) (<-chan Event, func()) {
 		})
 	}
 	return s.ch, cancel
+}
+
+// Reset replaces the ring and in-flight set wholesale without notifying
+// subscribers — a peer feed's broker takes the peer's snapshot this way on
+// (re)connect, so a page that opens afterwards sees the peer's recent past
+// without anyone's live stream replaying it.
+func (b *Broker) Reset(recent, inflight []Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := range b.ring {
+		b.ring[i] = Event{}
+	}
+	b.head, b.full = 0, false
+	if len(recent) > len(b.ring) {
+		recent = recent[len(recent)-len(b.ring):]
+	}
+	for _, e := range recent {
+		b.ring[b.head] = e
+		b.head = (b.head + 1) % len(b.ring)
+		if b.head == 0 {
+			b.full = true
+		}
+	}
+	b.inflight = make(map[string]Event, len(inflight))
+	for _, e := range inflight {
+		if e.RequestID != "" {
+			b.inflight[e.RequestID] = e
+		}
+	}
+}
+
+// ClearInFlight forgets every started-but-unfinished event. A peer feed does
+// this when its connection drops: it can no longer learn when those requests
+// end, and a dot that never finishes is worse than a dot that vanishes.
+func (b *Broker) ClearInFlight() {
+	b.mu.Lock()
+	b.inflight = map[string]Event{}
+	b.mu.Unlock()
 }
 
 // Dropped reports how many events were dropped across all subscribers,

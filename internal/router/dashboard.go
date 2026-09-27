@@ -22,7 +22,6 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,6 +88,13 @@ type DashboardConfig struct {
 	// TokensURL is a tokenator serve the router can reach, proxied at
 	// /tokens/* the same way; the shell's tokensUrl is "/tokens" when set.
 	TokensURL string
+	// Peers are the other replicas' dashboard listeners (base URLs, e.g.
+	// http://10.115.0.65:4011). RunPeerFeeds subscribes to each one's
+	// /api/events so this replica's Activity view covers the fleet; see
+	// peers.go. Empty = this replica alone (local dev). The list may include
+	// this replica itself — a same-list-everywhere proxy.env is the point —
+	// and a peer that turns out to be us is skipped.
+	Peers []string
 }
 
 // Browser-side paths the shell uses for the proxied tools.
@@ -182,6 +188,7 @@ func (rt *Router) DashboardHandler(cfg DashboardConfig) http.Handler {
 	mux.HandleFunc("GET /api/router-metrics", rt.handleDashRouterMetrics)
 	mux.HandleFunc("GET /api/upstream", rt.handleDashUpstream)
 	rt.dashConfig = cfg
+	rt.peers = newPeerSet(rt, cfg)
 	// Identity-bearing routes. When a secret is configured every one of
 	// these demands the proxy's identity; without one, chat and usage stay
 	// open (local dev) and tokens are refused, since minting needs a person.
@@ -704,12 +711,11 @@ func (rt *Router) handleDashOverview(w http.ResponseWriter, r *http.Request) {
 			bound++
 		}
 	}
-	host, _ := os.Hostname()
 	writeDashJSON(w, map[string]any{
 		"version":          rt.version,
 		"uptime_s":         time.Since(rt.started).Seconds(),
 		"mode":             rt.mode,
-		"replica":          host,
+		"replica":          rt.replica,
 		"models":           models,
 		"roles":            map[string]int{"total": len(bindings), "bound": bound},
 		"requests_per_min": rt.reqRate.perMinute(time.Now()),

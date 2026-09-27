@@ -136,6 +136,11 @@ func Run(ctx context.Context, args []string) error {
 		// itself there.
 		dashMonitorURL = fs.String("dashboard-monitor-url", "", "agent-monitor the router can reach (e.g. http://127.0.0.1:8070); the dashboard proxies it at /monitor/ and gains the Agents tab. Empty falls back to $PITF_MONITOR_URL, then hides the tab")
 		dashTokensURL  = fs.String("dashboard-tokens-url", "", "tokenator serve the router can reach (e.g. http://127.0.0.1:8990); the dashboard proxies it at /tokens/. Empty falls back to $PITF_TOKENS_URL, then leaves /tokens/ off")
+		// Fleet-wide Activity: the other replicas' dashboard listeners. Each
+		// replica mirrors its peers' /api/events so the Activity tab shows
+		// the whole fleet from whichever replica the LB picked. The same
+		// list may be given to every replica; a peer that is us is skipped.
+		dashPeers = fs.String("dashboard-peers", "", "comma-separated base URLs of the other replicas' dashboard listeners (e.g. http://10.115.0.65:4011,http://10.115.0.66:4011) whose request events this dashboard merges into its own. Empty falls back to $DASHBOARD_PEERS, then shows this replica alone")
 
 		// Anthropic passthrough attribution: the operator's map from an
 		// upstream credential's fingerprint (the 8 hex chars after
@@ -478,6 +483,7 @@ func Run(ctx context.Context, args []string) error {
 				Owners:         splitCSV(owners),
 				MonitorURL:     monitorURL(*dashMonitorURL),
 				TokensURL:      envFallback(*dashTokensURL, "PITF_TOKENS_URL"),
+				Peers:          splitCSV(envFallback(*dashPeers, "DASHBOARD_PEERS")),
 			}),
 			httpx.RequestID,
 			httpx.AccessLog(logger.With("svc", "dashboard")),
@@ -487,6 +493,13 @@ func Run(ctx context.Context, args []string) error {
 			Addr:              *dashboardAddr,
 			Handler:           dashHandler,
 			ReadHeaderTimeout: 10 * time.Second,
+		}
+		// Event streams (browsers, and peers permanently) never end on their
+		// own; without this every restart would wait out --shutdown-timeout.
+		dashSrv.RegisterOnShutdown(rt.StopStreams)
+		if peers := splitCSV(envFallback(*dashPeers, "DASHBOARD_PEERS")); len(peers) > 0 {
+			logger.Info("dashboard peer feeds starting", "peers", peers)
+			go rt.RunPeerFeeds(ctx)
 		}
 		go func() {
 			logger.Info("dashboard starting", "addr", *dashboardAddr, "public_url", apiBase)
