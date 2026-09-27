@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
 )
@@ -355,5 +356,64 @@ roles:
 		if m.Limit.Output != w[1] {
 			t.Errorf("%s output = %d, want %d", name, m.Limit.Output, w[1])
 		}
+	}
+}
+
+// optionsOf decodes the provider's options block generically, so the test
+// sees exactly which keys are on the wire (absent vs false vs 0 matter here).
+func optionsOf(t *testing.T, rt *Router) map[string]any {
+	t.Helper()
+	rec := getWellKnown(t, rt)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Config struct {
+			Provider map[string]struct {
+				Options map[string]any `json:"options"`
+			} `json:"provider"`
+		} `json:"config"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return doc.Config.Provider["llm"].Options
+}
+
+func TestWellKnown_PublishesClientTimeouts(t *testing.T) {
+	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
+		ProviderID:       "llm",
+		BaseURL:          "https://example.test/v1",
+		HeaderTimeout:    30 * time.Minute,
+		ChunkTimeout:     20 * time.Minute,
+		NoRequestTimeout: true,
+	}))
+	opts := optionsOf(t, rt)
+	if got := opts["headerTimeout"]; got != float64(1_800_000) {
+		t.Errorf("headerTimeout = %v, want 1800000 (milliseconds)", got)
+	}
+	if got := opts["chunkTimeout"]; got != float64(1_200_000) {
+		t.Errorf("chunkTimeout = %v, want 1200000 (milliseconds)", got)
+	}
+	if got, ok := opts["timeout"]; !ok || got != false {
+		t.Errorf("timeout = %v (present=%v), want the literal false", got, ok)
+	}
+}
+
+// Unset means "say nothing": OpenCode keeps its own defaults rather than
+// reading a 0 or a true it could misinterpret.
+func TestWellKnown_OmitsClientTimeoutsWhenUnset(t *testing.T) {
+	rt := newTestRouter(t, nil, WithWellKnown(WellKnownConfig{
+		ProviderID: "llm",
+		BaseURL:    "https://example.test/v1",
+	}))
+	opts := optionsOf(t, rt)
+	for _, k := range []string{"timeout", "headerTimeout", "chunkTimeout"} {
+		if v, ok := opts[k]; ok {
+			t.Errorf("options.%s = %v, want the key absent", k, v)
+		}
+	}
+	if opts["baseURL"] != "https://example.test/v1" {
+		t.Errorf("baseURL = %v", opts["baseURL"])
 	}
 }

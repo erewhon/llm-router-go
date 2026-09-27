@@ -3,6 +3,7 @@ package router
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/erewhon/llm-router-go/internal/config"
 )
@@ -50,6 +51,19 @@ type WellKnownConfig struct {
 	// /var/lib/opencode-wellknown deployment).
 	DefaultContext int
 	DefaultOutput  int
+	// HeaderTimeout / ChunkTimeout are published as the provider's
+	// options.headerTimeout / options.chunkTimeout. OpenCode defaults both to
+	// 300 s, and the chat stream carries no keepalive, so time-to-headers is
+	// the upstream's prefill: a cold 100K-token prompt on a seat prefilling at
+	// ~160-300 t/s (Flash-Next on delphi) cannot answer inside 300 s. Zero
+	// leaves the field out, i.e. OpenCode's own default.
+	HeaderTimeout time.Duration
+	ChunkTimeout  time.Duration
+	// NoRequestTimeout publishes options.timeout=false, disabling OpenCode's
+	// whole-request ceiling. The local seats deliver ~12-28 t/s, so a long
+	// answer is minutes of streaming; the header and chunk timeouts above are
+	// what detect a dead upstream.
+	NoRequestTimeout bool
 }
 
 // configured reports whether the endpoint should serve.
@@ -90,6 +104,11 @@ type wellKnownPrv struct {
 
 type wellKnownPrvOpts struct {
 	BaseURL string `json:"baseURL"`
+	// Timeout is only ever `false` (disable) or absent; see
+	// WellKnownConfig.NoRequestTimeout. Milliseconds for the other two.
+	Timeout       any   `json:"timeout,omitempty"`
+	HeaderTimeout int64 `json:"headerTimeout,omitempty"`
+	ChunkTimeout  int64 `json:"chunkTimeout,omitempty"`
 	// No apiKey, deliberately: see WellKnownConfig.SetupURL. OpenCode reads
 	// the key from its own auth store (`/connect` → Other → this provider
 	// id) or from the auth.env variable.
@@ -220,16 +239,28 @@ func (rt *Router) buildWellKnown() wellKnownDoc {
 			Schema: WellKnownSchemaURL,
 			Provider: map[string]wellKnownPrv{
 				cfg.ProviderID: {
-					NPM:  "@ai-sdk/openai-compatible",
-					Name: cfg.ProviderName,
-					Options: wellKnownPrvOpts{
-						BaseURL: cfg.BaseURL,
-					},
-					Models: models,
+					NPM:     "@ai-sdk/openai-compatible",
+					Name:    cfg.ProviderName,
+					Options: wellKnownOptions(cfg),
+					Models:  models,
 				},
 			},
 		},
 	}
+}
+
+// wellKnownOptions builds the provider options block: the base URL plus the
+// client-side timeouts the fleet's decode and prefill rates call for.
+func wellKnownOptions(cfg WellKnownConfig) wellKnownPrvOpts {
+	opts := wellKnownPrvOpts{
+		BaseURL:       cfg.BaseURL,
+		HeaderTimeout: cfg.HeaderTimeout.Milliseconds(),
+		ChunkTimeout:  cfg.ChunkTimeout.Milliseconds(),
+	}
+	if cfg.NoRequestTimeout {
+		opts.Timeout = false
+	}
+	return opts
 }
 
 // SetupInstructions is the human text explaining how to get a credential for

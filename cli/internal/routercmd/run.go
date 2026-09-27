@@ -90,6 +90,13 @@ func Run(ctx context.Context, args []string) error {
 		// never carries a credential. People mint a PAT on the dashboard and
 		// `/connect` it in OpenCode; the auth command prints those steps.
 		wellKnownSetupURL = fs.String("wellknown-setup-url", "", "where a person mints a personal access token, printed by the well-known's setup instructions (e.g. https://llm-dashboard.bcc.sh)")
+		// Client timeouts published to OpenCode (2026-09-27). Its defaults
+		// (300 s to headers, 300 s between chunks) assume a cloud provider;
+		// local seats prefill a cold long prompt for minutes. 0 publishes
+		// nothing and leaves OpenCode's default in force.
+		wellKnownHeaderTimeout    = fs.Duration("wellknown-header-timeout", 30*time.Minute, "options.headerTimeout published in /.well-known/opencode: how long OpenCode waits for response headers, i.e. for prefill (0 = leave OpenCode's 300 s default)")
+		wellKnownChunkTimeout     = fs.Duration("wellknown-chunk-timeout", 30*time.Minute, "options.chunkTimeout published in /.well-known/opencode: the longest gap OpenCode tolerates between streamed chunks (0 = leave OpenCode's 300 s default)")
+		wellKnownNoRequestTimeout = fs.Bool("wellknown-no-request-timeout", true, "publish options.timeout=false in /.well-known/opencode, disabling OpenCode's whole-request ceiling; the header and chunk timeouts still catch a dead upstream")
 
 		// API key auth. Empty list disables auth — anyone reachable can call
 		// /v1/*. /health, /metrics, /.well-known/opencode are always exempt.
@@ -244,6 +251,10 @@ func Run(ctx context.Context, args []string) error {
 			ProviderName: *wellKnownProviderName,
 			BaseURL:      *wellKnownBaseURL,
 			SetupURL:     *wellKnownSetupURL,
+
+			HeaderTimeout:    *wellKnownHeaderTimeout,
+			ChunkTimeout:     *wellKnownChunkTimeout,
+			NoRequestTimeout: *wellKnownNoRequestTimeout,
 		}),
 	}
 	// Request logging. Precedence: --reqlog=off disables entirely; otherwise
