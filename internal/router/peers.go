@@ -78,6 +78,11 @@ type peerSet struct {
 	self   string
 	client *http.Client
 	logger *slog.Logger
+
+	// overview probe cache; see peerOverviews.
+	ovMu sync.Mutex
+	ov   []ReplicaOverview
+	ovAt time.Time
 }
 
 func newPeerSet(rt *Router, cfg DashboardConfig) *peerSet {
@@ -310,10 +315,12 @@ func (ps *peerSet) stream(ctx context.Context, f *peerFeed) (connected bool, err
 }
 
 // identify asks the peer's (ungated) /api/overview for its replica name.
+// scope=local: the name is all that is wanted, and a fleet-wide answer would
+// have the peer probe its own peers (us included) just to say who it is.
 func (ps *peerSet) identify(ctx context.Context, f *peerFeed) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, peerDialTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url+"/api/overview", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url+"/api/overview?scope=local", nil)
 	if err != nil {
 		return "", err
 	}
@@ -385,4 +392,114 @@ func (ps *peerSet) own(f *peerFeed, evs []Event) []Event {
 		out = append(out, e)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Fleet-wide /api/overview
+// ---------------------------------------------------------------------------
+
+// ReplicaOverview is one replica's slice of the header strip: what
+// /api/overview reports about itself, as seen from here.
+type ReplicaOverview struct {
+	Replica        string  `json:"replica"`
+	URL            string  `json:"url,omitempty"` // peers only
+	Version        string  `json:"version"`
+	UptimeS        float64 `json:"uptime_s"`
+	RequestsPerMin int     `json:"requests_per_min"`
+	// Reachable is whether the peer answered /api/overview just now; Error
+	// says why not. Feed is the event-feed side of the same peer, so a
+	// replica that answers HTTP but whose stream is down still shows amber.
+	Reachable bool       `json:"reachable"`
+	Error     string     `json:"error,omitempty"`
+	Feed      *PeerState `json:"feed,omitempty"` // peers only
+}
+
+// Peer overview probes are cached briefly so the strip's poll (every 10 s
+// per open page) does not amplify into a peer call per page per poll.
+var (
+	peerOverviewTTL     = 2 * time.Second
+	peerOverviewTimeout = time.Second
+)
+
+// peerOverviews probes every non-self peer's /api/overview?scope=local,
+// concurrently, with a short cache. The scope=local is load-bearing: a
+// peer's overview would otherwise probe its own peers, including us, and
+// two replicas would chase each other until the timeouts fired.
+func (ps *peerSet) peerOverviews(ctx context.Context) []ReplicaOverview {
+	ps.ovMu.Lock()
+	if time.Since(ps.ovAt) < peerOverviewTTL && ps.ov != nil {
+		out := ps.ov
+		ps.ovMu.Unlock()
+		return out
+	}
+	ps.ovMu.Unlock()
+
+	type slot struct {
+		i  int
+		ov ReplicaOverview
+	}
+	var feeds []*peerFeed
+	for _, f := range ps.feeds {
+		f.mu.Lock()
+		self := f.state.Self
+		f.mu.Unlock()
+		if !self {
+			feeds = append(feeds, f)
+		}
+	}
+	results := make(chan slot, len(feeds))
+	for i, f := range feeds {
+		go func(i int, f *peerFeed) {
+			results <- slot{i, ps.probeOverview(ctx, f)}
+		}(i, f)
+	}
+	out := make([]ReplicaOverview, len(feeds))
+	for range feeds {
+		s := <-results
+		out[s.i] = s.ov
+	}
+	ps.ovMu.Lock()
+	ps.ov, ps.ovAt = out, time.Now()
+	ps.ovMu.Unlock()
+	return out
+}
+
+func (ps *peerSet) probeOverview(ctx context.Context, f *peerFeed) ReplicaOverview {
+	f.mu.Lock()
+	state := f.state
+	f.mu.Unlock()
+	ov := ReplicaOverview{Replica: state.Replica, URL: f.url, Feed: &state}
+	ctx, cancel := context.WithTimeout(ctx, peerOverviewTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url+"/api/overview?scope=local", nil)
+	if err != nil {
+		ov.Error = err.Error()
+		return ov
+	}
+	req.Header = f.hdr.Clone()
+	resp, err := ps.client.Do(req)
+	if err != nil {
+		ov.Error = err.Error()
+		return ov
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		ov.Error = "peer /api/overview: " + resp.Status
+		return ov
+	}
+	var body struct {
+		Replica        string  `json:"replica"`
+		Version        string  `json:"version"`
+		UptimeS        float64 `json:"uptime_s"`
+		RequestsPerMin int     `json:"requests_per_min"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		ov.Error = "peer /api/overview: " + err.Error()
+		return ov
+	}
+	if body.Replica != "" {
+		ov.Replica = body.Replica
+	}
+	ov.Version, ov.UptimeS, ov.RequestsPerMin, ov.Reachable = body.Version, body.UptimeS, body.RequestsPerMin, true
+	return ov
 }

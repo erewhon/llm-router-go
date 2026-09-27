@@ -137,11 +137,42 @@ async function refreshStrip() {
       tile(rolesV, "roles bound") +
       (m.discovered ? tile(m.discovered, "discovered") : "") +
       tile(d.requests_per_min ?? 0, "req / min") +
-      tile(`${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(d.replica || "")} · up ${fmt.fmtUptime(d.uptime_s)}`)}`, "router");
+      routerTile(d);
   } catch (e) {
     el.innerHTML = `<div class="stat"><div class="stat-value" style="color:var(--red)">—</div><div class="stat-label">${fmt.escHtml(String(e))}</div></div>`;
   }
 }
+// The "router" tile: one replica shows version · name · uptime. With peers
+// (d.replicas from the fleet-wide overview) it shows the fleet, and goes
+// amber when the replicas disagree on version (a serial deploy in flight),
+// a peer did not answer, or its event feed is down — a half view must never
+// pass for a quiet fleet. Hover lists each replica.
+export function routerTile(d) {
+  const dim = (s) => `<span style="color:var(--text-dim);font-size:0.8rem">${s}</span>`;
+  const reps = Array.isArray(d.replicas) && d.replicas.length ? d.replicas : null;
+  if (!reps || reps.length < 2) {
+    return `<div class="stat"><div class="stat-value">${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(d.replica || "")} · up ${fmt.fmtUptime(d.uptime_s)}`)}</div><div class="stat-label">router</div></div>`;
+  }
+  const problems = [];
+  const versions = new Set(reps.filter((r) => r.reachable).map((r) => r.version));
+  if (versions.size > 1) problems.push("versions differ");
+  for (const r of reps) {
+    const name = r.replica || r.url || "?";
+    if (!r.reachable) problems.push(`${name} unreachable`);
+    else if (r.feed && !r.feed.connected) problems.push(`${name} feed down`);
+  }
+  const lines = reps.map((r) => {
+    const name = r.replica || r.url || "?";
+    if (!r.reachable) return `${name}: unreachable${r.error ? ` (${r.error})` : ""}`;
+    const feed = r.feed ? (r.feed.connected ? "feed live" : "feed down") : "this replica";
+    return `${name}: ${r.version} · up ${fmt.fmtUptime(r.uptime_s)} · ${r.requests_per_min} req/min · ${feed}`;
+  });
+  const names = reps.map((r) => r.replica || r.url || "?").join(" + ");
+  const color = problems.length ? ' style="color:var(--yellow)"' : "";
+  const note = problems.length ? ` · ${problems.join(", ")}` : "";
+  return `<div class="stat" title="${fmt.escHtml(lines.join("\n"))}"><div class="stat-value"${color}>${fmt.escHtml(d.version || "?")}${dim(` · ${fmt.escHtml(names)}${fmt.escHtml(note)}`)}</div><div class="stat-label">router · ${reps.length} replicas</div></div>`;
+}
+
 refreshStrip();
 setInterval(() => {
   if (document.visibilityState === "visible") refreshStrip();

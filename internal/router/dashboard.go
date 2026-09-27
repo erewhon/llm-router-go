@@ -711,14 +711,36 @@ func (rt *Router) handleDashOverview(w http.ResponseWriter, r *http.Request) {
 			bound++
 		}
 	}
+	// The fleet: this replica first, then every peer (peers.go). The
+	// top-level rate is the fleet's; version/uptime/replica stay this
+	// replica's, and the per-replica detail is in `replicas`. Models and
+	// roles come from the shared catalog and tracker, identical on every
+	// replica, so they are not summed. A peer asking (scope=local) gets
+	// this replica alone — that is what stops two replicas probing each
+	// other in a loop.
+	self := ReplicaOverview{
+		Replica: rt.replica, Version: rt.version, UptimeS: time.Since(rt.started).Seconds(),
+		RequestsPerMin: rt.reqRate.perMinute(time.Now()), Reachable: true,
+	}
+	replicas := []ReplicaOverview{self}
+	if r.URL.Query().Get("scope") != "local" && rt.peers != nil {
+		replicas = append(replicas, rt.peers.peerOverviews(r.Context())...)
+	}
+	rate := 0
+	for _, rep := range replicas {
+		if rep.Reachable {
+			rate += rep.RequestsPerMin
+		}
+	}
 	writeDashJSON(w, map[string]any{
 		"version":          rt.version,
-		"uptime_s":         time.Since(rt.started).Seconds(),
+		"uptime_s":         self.UptimeS,
 		"mode":             rt.mode,
 		"replica":          rt.replica,
 		"models":           models,
 		"roles":            map[string]int{"total": len(bindings), "bound": bound},
-		"requests_per_min": rt.reqRate.perMinute(time.Now()),
+		"requests_per_min": rate,
+		"replicas":         replicas,
 	})
 }
 

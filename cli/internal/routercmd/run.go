@@ -140,7 +140,8 @@ func Run(ctx context.Context, args []string) error {
 		// replica mirrors its peers' /api/events so the Activity tab shows
 		// the whole fleet from whichever replica the LB picked. The same
 		// list may be given to every replica; a peer that is us is skipped.
-		dashPeers = fs.String("dashboard-peers", "", "comma-separated base URLs of the other replicas' dashboard listeners (e.g. http://10.115.0.65:4011,http://10.115.0.66:4011) whose request events this dashboard merges into its own. Empty falls back to $DASHBOARD_PEERS, then shows this replica alone")
+		replicaName = fs.String("replica", "", "name of this router instance in request events and /api/overview. Empty falls back to $ROUTER_REPLICA, then the hostname; set it when two instances share a host")
+		dashPeers   = fs.String("dashboard-peers", "", "comma-separated base URLs of the other replicas' dashboard listeners (e.g. http://10.115.0.65:4011,http://10.115.0.66:4011) whose request events this dashboard merges into its own. Empty falls back to $DASHBOARD_PEERS, then shows this replica alone")
 
 		// Anthropic passthrough attribution: the operator's map from an
 		// upstream credential's fingerprint (the 8 hex chars after
@@ -237,6 +238,7 @@ func Run(ctx context.Context, args []string) error {
 	routerOpts := []router.Option{
 		router.WithMode(*mode),
 		router.WithVersion(Version),
+		router.WithReplica(envFallback(*replicaName, "ROUTER_REPLICA")),
 		router.WithWellKnown(router.WellKnownConfig{
 			ProviderID:   *wellKnownProviderID,
 			ProviderName: *wellKnownProviderName,

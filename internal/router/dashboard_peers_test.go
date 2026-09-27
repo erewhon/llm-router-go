@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,6 +19,9 @@ type peerPair struct {
 	a, b       *Router
 	srvA, srvB *httptest.Server
 	cancel     context.CancelFunc
+	// bProbes counts overview probes of B, for the cache test. The feed's
+	// identify call is one of them, which is why the test reads a baseline.
+	bProbes atomic.Int64
 }
 
 const (
@@ -34,12 +38,12 @@ func fastPeerBackoff(t *testing.T) {
 	t.Cleanup(func() { peerBackoffMin, peerBackoffMax = oldMin, oldMax })
 }
 
-func newPeerPair(t *testing.T, includeSelf bool) *peerPair {
+func newPeerPair(t *testing.T, includeSelf bool, optsB ...Option) *peerPair {
 	t.Helper()
 	fastPeerBackoff(t)
 	p := &peerPair{
 		a:    newTestRouter(t, nil, WithReplica("replica-a")),
-		b:    newTestRouter(t, nil, WithReplica("replica-b")),
+		b:    newTestRouter(t, nil, append([]Option{WithReplica("replica-b")}, optsB...)...),
 		srvA: httptest.NewUnstartedServer(nil),
 		srvB: httptest.NewUnstartedServer(nil),
 	}
@@ -53,7 +57,13 @@ func newPeerPair(t *testing.T, includeSelf bool) *peerPair {
 		peersA, peersB = []string{urlA, urlB}, []string{urlA, urlB}
 	}
 	p.srvA.Config.Handler = p.a.DashboardHandler(cfg(peersA...))
-	p.srvB.Config.Handler = p.b.DashboardHandler(cfg(peersB...))
+	bHandler := p.b.DashboardHandler(cfg(peersB...))
+	p.srvB.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/overview" && r.URL.Query().Get("scope") == "local" {
+			p.bProbes.Add(1)
+		}
+		bHandler.ServeHTTP(w, r)
+	})
 	p.srvA.Start()
 	p.srvB.Start()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,4 +337,106 @@ func TestPeers_StopStreamsEndsOpenEventStreams(t *testing.T) {
 		t.Fatal("stream did not end after StopStreams")
 	}
 	rt.StopStreams() // idempotent
+}
+
+// overviewOf fetches a replica's /api/overview (ungated) with an optional
+// query, decoded loosely.
+func overviewOf(t *testing.T, url, query string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(url + "/api/overview" + query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func replicasOf(t *testing.T, ov map[string]any) []map[string]any {
+	t.Helper()
+	raw, _ := ov["replicas"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, r.(map[string]any))
+	}
+	return out
+}
+
+func TestPeers_OverviewDescribesTheFleet(t *testing.T) {
+	oldTTL := peerOverviewTTL
+	peerOverviewTTL = 200 * time.Millisecond
+	t.Cleanup(func() { peerOverviewTTL = oldTTL })
+	p := newPeerPair(t, false, WithVersion("v-next"))
+	waitPeer(t, p.a, p.srvB.URL, "connected", connected)
+	waitPeer(t, p.b, p.srvA.URL, "connected", connected)
+	// Anything cached while the feeds were still coming up must lapse.
+	time.Sleep(peerOverviewTTL + 50*time.Millisecond)
+	for i := 0; i < 3; i++ {
+		postChat(t, p.a, `{"model":"no-such-model","messages":[]}`)
+	}
+	for i := 0; i < 2; i++ {
+		postChat(t, p.b, `{"model":"no-such-model","messages":[]}`)
+	}
+
+	ov := overviewOf(t, p.srvA.URL, "")
+	reps := replicasOf(t, ov)
+	if len(reps) != 2 || reps[0]["replica"] != "replica-a" || reps[1]["replica"] != "replica-b" {
+		t.Fatalf("replicas = %+v, want self then peer", reps)
+	}
+	b := reps[1]
+	if b["reachable"] != true || b["version"] != "v-next" || b["url"] != p.srvB.URL {
+		t.Errorf("peer entry = %+v", b)
+	}
+	if feed, _ := b["feed"].(map[string]any); feed == nil || feed["connected"] != true {
+		t.Errorf("peer feed state missing or down: %+v", b["feed"])
+	}
+	if reps[0]["feed"] != nil || reps[0]["url"] != nil {
+		t.Errorf("self entry should carry no url/feed: %+v", reps[0])
+	}
+	if got := ov["requests_per_min"].(float64); got < 5 {
+		t.Errorf("fleet requests_per_min = %v, want >= 5 (3 on A + 2 on B)", got)
+	}
+	if ov["version"] != "dev" || ov["replica"] != "replica-a" {
+		t.Errorf("top-level identity should stay this replica's: %v %v", ov["version"], ov["replica"])
+	}
+
+	// The cache: a second call inside the TTL does not probe B again; one
+	// after it does.
+	before := p.bProbes.Load()
+	overviewOf(t, p.srvA.URL, "")
+	if got := p.bProbes.Load(); got != before {
+		t.Errorf("probe count after a cached call = %d, want %d", got, before)
+	}
+	time.Sleep(peerOverviewTTL + 50*time.Millisecond)
+	overviewOf(t, p.srvA.URL, "")
+	if got := p.bProbes.Load(); got != before+1 {
+		t.Errorf("probe count after the TTL = %d, want %d", got, before+1)
+	}
+
+	// scope=local (what a peer asks) is this replica alone and its own rate.
+	local := overviewOf(t, p.srvA.URL, "?scope=local")
+	if lr := replicasOf(t, local); len(lr) != 1 || lr[0]["replica"] != "replica-a" {
+		t.Errorf("scope=local replicas = %+v", lr)
+	}
+	if got := local["requests_per_min"].(float64); got < 3 || got >= 5 {
+		t.Errorf("scope=local requests_per_min = %v, want A's own (3)", got)
+	}
+
+	// B goes away: still listed, unreachable with a reason, and out of the sum.
+	p.srvB.Listener.Close()
+	p.srvB.CloseClientConnections()
+	p.srvB.Close()
+	waitPeer(t, p.a, p.srvB.URL, "disconnected", func(s PeerState) bool { return !s.Connected })
+	time.Sleep(peerOverviewTTL + 50*time.Millisecond)
+	ov = overviewOf(t, p.srvA.URL, "")
+	reps = replicasOf(t, ov)
+	if len(reps) != 2 || reps[1]["reachable"] != false || reps[1]["error"] == "" || reps[1]["replica"] != "replica-b" {
+		t.Errorf("after B is gone: %+v", reps)
+	}
+	if got := ov["requests_per_min"].(float64); got >= 5 {
+		t.Errorf("fleet rate still counts the unreachable peer: %v", got)
+	}
 }
