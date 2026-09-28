@@ -446,7 +446,8 @@
 .act-seat-name { fill: var(--text); font-size: 11px; }
 .act-boundary { stroke: var(--yellow); stroke-dasharray: 4 6; stroke-width: 1; opacity: 0.6; }
 .act-trail { fill: none; stroke-width: 2; opacity: 0.55; }
-.act-trail-done { opacity: 0.2; }
+.act-flow { fill: none; stroke-width: 3; stroke-linecap: round; pointer-events: none; }
+.act-flow-glow { stroke-width: 8; }
 .act-hop-failed { stroke: var(--red); stroke-width: 2; stroke-dasharray: 4 4; opacity: 0.8; }
 .act-dot { stroke: var(--bg); stroke-width: 1.5; }
 .act-dot-selected { stroke: #fff; stroke-width: 3; }

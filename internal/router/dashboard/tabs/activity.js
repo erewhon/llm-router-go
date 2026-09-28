@@ -139,6 +139,49 @@ export function dropReplicaInflight(state, replica) {
   return ids;
 }
 
+// ---- Motion -----------------------------------------------------------------
+// Timing of the two effects on a request's path; pure, so testable in Node.
+
+// A finished request holds at full strength for a moment (long enough to read
+// its label), then fades; nothing on the picture vanishes between two frames.
+export const FADE_HOLD_MS = 900;
+export const FADE_MS = 2600;
+
+// fadeOf is the opacity multiplier for a request `since` ms after it finished:
+// 1 through the hold, then an ease-out to 0 at FADE_HOLD_MS + FADE_MS.
+export function fadeOf(since, hold = FADE_HOLD_MS, fade = FADE_MS) {
+  if (!(since > hold)) return 1;
+  const t = Math.min(1, (since - hold) / fade);
+  return (1 - t) * (1 - t);
+}
+
+// The stream drawn on an in-flight path: droplets of uneven length, so it
+// reads as a flow and not as a dashed border. FLOW_PERIOD is the pattern's
+// length, which is what the offset wraps on.
+export const FLOW_DASH = [1, 9, 5, 13, 2, 20];
+export const FLOW_PERIOD = FLOW_DASH.reduce((a, b) => a + b, 0);
+// px per second along the path. A streaming request is delivering tokens
+// now; a non-streaming one is generating but hands nothing over until the
+// end, so its path moves slower and dimmer.
+export const FLOW_SPEED = { stream: 70, quiet: 24 };
+
+// flowOffset is the stroke-dashoffset at `elapsed` ms. It GROWS with time,
+// which moves the droplets toward the start of the path: tokens run from the
+// seat back to the caller, against the direction the request travelled.
+export function flowOffset(elapsed, stream) {
+  const px = (Math.max(0, elapsed) / 1000) * (stream ? FLOW_SPEED.stream : FLOW_SPEED.quiet);
+  return px % FLOW_PERIOD;
+}
+
+// When the request finishes the stream does not stop dead: the last droplets
+// keep running for FLOW_DRAIN_MS while they thin out. drainOf is the stream's
+// strength `since` ms after the finish, 1 → 0.
+export const FLOW_DRAIN_MS = 700;
+export function drainOf(since, drain = FLOW_DRAIN_MS) {
+  if (!(since > 0)) return 1;
+  return Math.max(0, 1 - since / drain);
+}
+
 // activeCallers returns principals seen within the window, most recent first.
 export function activeCallers(state, now = Date.now()) {
   const out = [];
@@ -247,6 +290,8 @@ let selected = null;
 let fleet = { self: "", names: [], missing: [] };
 let sseDown = false;
 let legendEl = null;
+// Set at mount: people who ask for less motion get the stream drawn still.
+let reduceMotion = false;
 
 const verdictColor = (m) => {
   if (!m) return "var(--text-dim)";
@@ -396,8 +441,9 @@ function callerPos(e) {
 
 const HOP_MS = 600;
 
-// Dot lifecycle: travel along path segments, then orbit the target until
-// finished, then a fading label.
+// Dot lifecycle: travel along path segments, then orbit the target while the
+// path streams (tokens coming back), then the stream drains and the whole
+// thing fades out.
 function startDot(id, e) {
   const from = callerPos(e),
     via = routerPos(e),
@@ -479,6 +525,17 @@ function finishDot(id, e) {
   d.label = labelFor(e);
   d.labelAt = performance.now();
 }
+// retireDot fades out a request whose outcome will never reach this page (its
+// replica's feed dropped). It leaves the picture the way a finished one does,
+// in grey, instead of blinking out.
+function retireDot(id) {
+  const d = dots.get(id);
+  if (!d) return;
+  d.phase = "done";
+  d.lost = true;
+  d.label = "feed lost";
+  d.labelAt = performance.now();
+}
 function labelFor(e) {
   const parts = [];
   if (e.completion_tokens != null)
@@ -492,7 +549,12 @@ function lerp(a, b, t) {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }
 
-// frame draws the dynamic layer. Cheap: tens of dots, not thousands.
+const pathOf = (pts) => pts.map((p, i) => `${i ? "L" : "M"} ${p.x} ${p.y}`).join(" ");
+const op = (v) => Math.max(0, Math.min(1, v)).toFixed(3);
+
+// frame draws the dynamic layer. Cheap: tens of dots, not thousands. The
+// layer is rebuilt every frame, so every animation here is computed from
+// `now`; a CSS animation would restart sixty times a second.
 function frame(now) {
   raf = requestAnimationFrame(frame);
   if (!dynG) return;
@@ -503,10 +565,24 @@ function frame(now) {
     const age = Math.max(0, now - d.t0);
     const segs = d.path.length - 1;
     const total = segs * HOP_MS;
-    const color = d.error ? "var(--red)" : d.overflow || d.crosses ? "var(--yellow)" : "var(--accent)";
+    const done = d.phase === "done";
+    const fade = done ? fadeOf(now - d.labelAt) : 1;
+    if (done && fade <= 0) {
+      dots.delete(id);
+      continue;
+    }
+    const color = d.lost ? "var(--text-dim)" : d.error ? "var(--red)" : d.overflow || d.crosses ? "var(--yellow)" : "var(--accent)";
     // Failed hops, drawn red and dashed.
-    for (const h of d.hops) out += `<line x1="${h.from.x}" y1="${h.from.y}" x2="${h.to.x}" y2="${h.to.y}" class="act-hop-failed"/>`;
-    // The lit path so far.
+    for (const h of d.hops)
+      out += `<line x1="${h.from.x}" y1="${h.from.y}" x2="${h.to.x}" y2="${h.to.y}" class="act-hop-failed" style="opacity:${op(0.8 * fade)}"/>`;
+    const arrived = age >= total;
+    if (arrived && d.phase === "travel") d.phase = "orbit";
+    if (d.phase === "orbit") d.flowed = true;
+    // How strong the stream is: full while in flight, draining after the
+    // finish, absent for a request this page never saw in flight.
+    const flow = segs < 1 ? 0 : d.phase === "orbit" ? 1 : done && d.flowed ? drainOf(now - d.labelAt) : 0;
+    // The lit path so far. It dims a little under the stream so the droplets
+    // carry the eye, and fades with the rest once the request is done.
     if (segs >= 1) {
       const p = Math.min(1, age / total);
       let pathD = `M ${d.path[0].x} ${d.path[0].y}`;
@@ -516,16 +592,26 @@ function frame(now) {
         pathD += ` L ${to.x} ${to.y}`;
         if (segT < 1) break;
       }
-      out += `<path d="${pathD}" class="act-trail ${d.phase === "done" ? "act-trail-done" : ""}" style="stroke:${color}"/>`;
+      out += `<path d="${pathD}" class="act-trail" style="stroke:${color};opacity:${op((0.55 - 0.23 * flow) * fade)}"/>`;
+    }
+    // The stream: droplets running back along the path while the request is
+    // in flight. Two strokes, a wide faint one under a narrow bright one, give
+    // the glow without an SVG filter.
+    if (flow > 0) {
+      const full = pathOf(d.path);
+      const off = reduceMotion ? 0 : flowOffset(now - d.t0 - total, d.stream).toFixed(1);
+      const k = (d.stream ? 1 : 0.5) * flow * fade;
+      const dash = FLOW_DASH.join(" ");
+      out += `<path d="${full}" class="act-flow act-flow-glow" style="stroke:${color};stroke-dasharray:${dash};stroke-dashoffset:${off};opacity:${op(0.22 * k)}"/>`;
+      out += `<path d="${full}" class="act-flow" style="stroke:${color};stroke-dasharray:${dash};stroke-dashoffset:${off};opacity:${op(0.95 * k)}"/>`;
     }
     let pos;
-    if (age < total) {
+    if (!arrived) {
       const p = age / total,
         i = Math.min(segs - 1, Math.floor(p * segs));
       pos = lerp(d.path[i], d.path[i + 1], p * segs - i);
     } else {
       const end = d.path[d.path.length - 1];
-      if (d.phase === "travel") d.phase = "orbit";
       if (d.phase === "orbit") {
         const a = ((now - d.t0 - total) / 900) * Math.PI * 2;
         pos = { x: end.x + Math.cos(a) * 10, y: end.y + Math.sin(a) * 10 };
@@ -536,13 +622,8 @@ function frame(now) {
     // The ring says which replica handled it, once there is more than one;
     // a selected dot keeps its white ring.
     const ring = fleet.names.length > 1 && !sel ? `;stroke:${replicaColor(replicaOf(d.e), fleet.names)};stroke-width:2` : "";
-    if (d.phase !== "done" || now - d.labelAt < 2500) {
-      out += `<circle cx="${pos.x}" cy="${pos.y}" r="${d.phase === "done" ? 4 : 6}" class="act-dot${sel}" style="fill:${color}${ring}" data-id="${esc(id)}"/>`;
-      if (d.label)
-        out += `<text x="${pos.x + 10}" y="${pos.y - 8}" class="act-label" style="fill:${color};opacity:${Math.max(0, 1 - (now - d.labelAt) / 2500)}">${esc(d.label)}</text>`;
-    } else {
-      dots.delete(id);
-    }
+    out += `<circle cx="${pos.x}" cy="${pos.y}" r="${done ? 4 : 6}" class="act-dot${sel}" style="fill:${color}${ring};opacity:${op(fade)}" data-id="${esc(id)}"/>`;
+    if (d.label) out += `<text x="${pos.x + 10}" y="${pos.y - 8}" class="act-label" style="fill:${color};opacity:${op(fade)}">${esc(d.label)}</text>`;
   }
   dynG.innerHTML = out;
 }
@@ -705,6 +786,7 @@ export default {
     legendEl = root.querySelector("#act-legend");
     fleet = { self: "", names: [], missing: [] };
     sseDown = false;
+    reduceMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
     root.addEventListener("click", onClick);
     // The fleet, every 10 s: who is in the picture, and who dropped out of
     // it. A replica whose feed has just gone takes its in-flight rows with
@@ -713,7 +795,7 @@ export default {
       const next = fleetOf(await ctx.api.get("/api/overview"));
       const newlyGone = next.missing.filter((n) => !fleet.missing.includes(n));
       fleet = next;
-      for (const n of newlyGone) for (const id of dropReplicaInflight(state, n)) dots.delete(id);
+      for (const n of newlyGone) for (const id of dropReplicaInflight(state, n)) retireDot(id);
       renderFleet();
       renderJobs();
     }, 10000);
