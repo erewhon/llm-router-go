@@ -235,6 +235,10 @@ func ProbeEnabled(m config.ModelDefinition) bool {
 // either package's concrete type.
 type statusError interface{ UpstreamStatus() int }
 
+// retryAfterError is implemented by a proxy failure that carries the
+// upstream's Retry-After, read the same way and for the same reason.
+type retryAfterError interface{ RetryAfter() time.Duration }
+
 // isWarmingSignal classifies a proxy failure as "the seat is loading" rather
 // than "the seat is broken": a 503, or a connection that was refused
 // outright. Timeouts and other 5xx are not in this class — a seat that

@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
+	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,14 +51,57 @@ func classifyTransportErr(err error) string {
 	return "transport"
 }
 
-// errUpstreamStatus marks a retryable upstream 5xx whose response the chain
-// failover path suppressed so the next provider could take the request. It
-// flows out of ModifyResponse through ReverseProxy's ErrorHandler into the
-// handleProxy retry loop.
-type errUpstreamStatus struct{ Status int }
+// errUpstreamStatus marks a retryable upstream status — a 5xx, or a 429 —
+// whose response the failover path suppressed so the next candidate could
+// take the request. It flows out of ModifyResponse through ReverseProxy's
+// ErrorHandler into the handleProxy retry loop.
+type errUpstreamStatus struct {
+	Status int
+	// After is the upstream's Retry-After, zero when it sent none (or one
+	// that did not parse). Only a 429 or a 503 carries it in practice.
+	After time.Duration
+}
 
 func (e *errUpstreamStatus) Error() string {
+	if e.After > 0 {
+		return fmt.Sprintf("upstream status %d (retry after %s)", e.Status, e.After)
+	}
 	return fmt.Sprintf("upstream status %d", e.Status)
+}
+
+// RetryAfter exposes the upstream's own cooldown to the health tracker, read
+// through a small interface like UpstreamStatus: a seat that says when it
+// will take traffic again is skipped until then, not for a guessed interval.
+func (e *errUpstreamStatus) RetryAfter() time.Duration { return e.After }
+
+// retryableStatus reports whether an upstream status is worth offering to
+// the next candidate. A 5xx is the upstream failing; a 429 is the upstream
+// refusing on capacity or budget, which says nothing against the request and
+// which another seat may well serve. Every other 4xx is the request's own
+// fault and would fail the same way anywhere.
+func retryableStatus(status int) bool {
+	return status >= 500 || status == http.StatusTooManyRequests
+}
+
+// parseRetryAfter reads a Retry-After header: delay-seconds, or an HTTP-date
+// measured against now. Absent, malformed, zero or already past is 0.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseFloat(v, 64); err == nil {
+		if secs <= 0 || secs > float64(math.MaxInt64/int64(time.Second)) {
+			return 0
+		}
+		return time.Duration(secs * float64(time.Second))
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		if d := at.Sub(now); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // UpstreamStatus exposes the status to the health tracker, which reads it
@@ -72,8 +119,11 @@ var errUpstreamEnvelope = errors.New("upstream error envelope in 2xx")
 func classifyUpstreamErr(err error) string {
 	var es *errUpstreamStatus
 	if errors.As(err, &es) {
-		if es.Status >= 500 {
+		switch {
+		case es.Status >= 500:
 			return "server_error"
+		case es.Status == http.StatusTooManyRequests:
+			return errorClassRateLimited
 		}
 		return "client_error"
 	}
@@ -106,6 +156,8 @@ func errorClassOf(transportClass string, upstreamStatus int, envelope bool) stri
 		return transportClass
 	case upstreamStatus >= 500:
 		return "server_error"
+	case upstreamStatus == http.StatusTooManyRequests:
+		return errorClassRateLimited
 	case upstreamStatus >= 400:
 		return "client_error"
 	case envelope:
@@ -115,6 +167,12 @@ func errorClassOf(transportClass string, upstreamStatus int, envelope bool) stri
 	}
 }
 
+// errorClassRateLimited marks an upstream 429. It is kept apart from
+// client_error because it is not the caller's request at fault: the seat is
+// out of capacity or budget, which is exactly what an upstream failure rate
+// is meant to show.
+const errorClassRateLimited = "rate_limited"
+
 // errorClassPrivacyRefused marks a request the privacy tier turned away
 // before any upstream was tried. It lives in the same column as the upstream
 // classes so one query covers every non-success outcome, but it is not one of
@@ -122,9 +180,10 @@ func errorClassOf(transportClass string, upstreamStatus int, envelope bool) stri
 const errorClassPrivacyRefused = "privacy_refused"
 
 // isUpstreamFailure reports whether an error class counts toward a model's
-// upstream failure rate. client_error (4xx) is excluded: it is almost always
-// the caller's request at fault (bad params, context overflow), and counting
-// it would make a healthy endpoint look degraded under a misbehaving client.
+// upstream failure rate. client_error (4xx other than 429) is excluded: it is
+// almost always the caller's request at fault (bad params, context overflow),
+// and counting it would make a healthy endpoint look degraded under a
+// misbehaving client. rate_limited counts: the seat turned work away.
 // privacy_refused is excluded because no upstream was involved at all.
 func isUpstreamFailure(class string) bool {
 	return class != "" && class != "client_error" && !isPolicyRefusal(class)

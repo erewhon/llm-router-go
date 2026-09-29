@@ -76,7 +76,8 @@ func TestErrorClassOf(t *testing.T) {
 		{"never attempted", "", 0, false, ""},
 		{"transport wins over status", "timeout", 200, false, "timeout"},
 		{"5xx", "", 500, false, "server_error"},
-		{"4xx", "", 429, false, "client_error"},
+		{"4xx", "", 400, false, "client_error"},
+		{"429", "", 429, false, "rate_limited"},
 		{"envelope in 200", "", 200, true, "error_envelope"},
 	}
 	for _, c := range cases {

@@ -537,7 +537,7 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 		}
 
 		// Forward, advancing along the role's preference order if an upstream
-		// fails to answer at all. Only role-resolved requests fail over:
+		// fails to answer, or answers 5xx / 429. Only role-resolved requests fail over:
 		// naming a model is a statement about that model.
 		// The tier the walk was held to (role ∨ caller) for a role or chain;
 		// for a directly named model there was no walk, so it is the caller's.
@@ -594,12 +594,13 @@ func (rt *Router) handleProxy(requireClass config.APIClass, forceDirect bool) ht
 				"prompt_tokens_est", res.PromptTokens, "downshift_from", res.Downshift,
 				"request_defaults", appliedDefaults)
 
-			// Chains also retry on upstream 5xx / error-envelope-in-2xx — but
-			// only while another provider could actually take the request. On
-			// the last viable candidate the response passes through untouched,
-			// so the client sees the provider's own error, not a synthetic 502.
+			// Roles and chains also retry on an upstream 5xx, a 429, or an
+			// error envelope inside a 2xx — but only while another candidate
+			// could actually take the request. On the last viable candidate
+			// the response passes through untouched, so the client sees the
+			// upstream's own error, not a synthetic 502.
 			suppressRetryable := false
-			if res.Chain != "" && rec.status == 0 && attempt < maxFailoverAttempts {
+			if (res.Role != "" || res.Chain != "") && rec.status == 0 && attempt < maxFailoverAttempts {
 				_, suppressRetryable = rt.nextRoleCandidate(res, forceDirect)
 			}
 
@@ -742,11 +743,11 @@ func coalesce(a, b string) string {
 // failure) the caller can see that via the recordingWriter's status and must
 // not retry.
 //
-// suppressRetryable, set by the chain-failover path when another provider
-// could still take the request, additionally converts a retryable upstream
-// failure — a 5xx status, or an error envelope inside a 2xx JSON body — into
+// suppressRetryable, set by the failover path when another candidate could
+// still take the request, additionally converts a retryable upstream failure
+// — a 5xx or 429 status, or an error envelope inside a 2xx JSON body — into
 // an error return WITHOUT writing anything to the client, so the caller can
-// retry the next provider. Off (the default) preserves passthrough: whatever
+// retry the next candidate. Off (the default) preserves passthrough: whatever
 // the upstream said streams to the client.
 func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backendRoot string, body []byte, authBearer, authHeader string, cap *responseCapture, suppressRetryable bool) error {
 	target, err := url.Parse(backendRoot)
@@ -783,14 +784,17 @@ func (rt *Router) reverseProxyTo(w http.ResponseWriter, r *http.Request, backend
 				return nil
 			}
 			cap.upstreamStatus = resp.StatusCode
-			if suppressRetryable && resp.StatusCode >= 500 {
-				// The next provider gets the request instead. Drain (bounded)
+			if suppressRetryable && retryableStatus(resp.StatusCode) {
+				// The next candidate gets the request instead. Drain (bounded)
 				// so the connection can be reused, then surface the status as
 				// an error: ReverseProxy routes it to ErrorHandler, which
 				// writes nothing.
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 				_ = resp.Body.Close()
-				return &errUpstreamStatus{Status: resp.StatusCode}
+				return &errUpstreamStatus{
+					Status: resp.StatusCode,
+					After:  parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+				}
 			}
 			ct := resp.Header.Get("Content-Type")
 			switch {

@@ -81,6 +81,36 @@ local-lmstudio:
   capabilities: [text, tool_calling]
 ```
 
+## Falling back to the local model
+
+A **role** is a name that resolves to the first usable entry in a list. Put the
+gateway's models first and the model on this Mac last, and callers that ask for
+the role keep working when the gateway refuses:
+
+```yaml
+roles:
+  coder:
+    require: {capabilities: [text, tool_calling]}
+    candidates: [gateway-glm, gateway-qwen, local-lmstudio]
+```
+
+A request moves to the next candidate when the one tried does not answer, or
+answers **5xx** or **429**. Any other 4xx is returned as it is: the request is
+at fault and would fail the same way on the next seat. One request tries at
+most three candidates. The last one tried is never retried past, so its own
+status and body, `Retry-After` included, reach the caller.
+
+A seat that keeps failing is skipped without being asked: three failures in a
+row take it out for 60 s, then one request is let through to test it. A 429 or
+503 that carries `Retry-After` takes the seat out at once, for as long as it
+asked, up to 10 minutes. `GET /v1/availability` shows each role's current
+target and why any candidate is out.
+
+Only a role or a chain does this. A request that names a model gets that model
+or its error. Leave a planning or review model out of any such list, or give it
+a role with one candidate: a small model answering in its place is worse than
+an error.
+
 ## Run (foreground)
 
 ```sh

@@ -65,7 +65,8 @@ type Record struct {
 	// UpstreamStatus 0.
 	UpstreamStatus int
 	// ErrorClass classifies how the final upstream attempt failed:
-	// "server_error" (5xx), "client_error" (4xx), "error_envelope" (an error
+	// "server_error" (5xx), "rate_limited" (429), "client_error" (any other
+	// 4xx), "error_envelope" (an error
 	// object inside an HTTP 2xx — the 2026-08-27 Zen incident shape),
 	// "timeout", "connect", or "transport" (other transport-level failures).
 	// Empty for successes and for requests rejected before any upstream call.

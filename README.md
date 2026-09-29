@@ -134,6 +134,21 @@ Rules worth knowing before wiring a script's `--privacy` flag to it:
 still somebody else's computer. Use `local` for anything that must not leave the
 fleet at all.
 
+### Failover
+
+A role or a chain moves a request to its next candidate when the one tried
+fails to answer, answers **5xx** or **429**, or answers 2xx with an error
+envelope in the body. Other 4xx pass through. The walk stops after two
+failovers, and only happens while nothing has been written to the client; the
+last candidate tried passes through untouched. A directly named model never
+fails over.
+
+Failed attempts feed a per-model breaker: three in a row open it for 60 s, then
+one trial request is admitted, and a failed trial reopens it. A failure that
+carries `Retry-After` opens it at once for that long, capped at 10 minutes. An
+upstream 429 is logged as `rate_limited` and counts toward a model's upstream
+failure rate; it is no longer a `client_error`.
+
 ### Per-model request defaults (`request_defaults`)
 
 An entry can fill in request-body fields the caller left unset — sampling, a

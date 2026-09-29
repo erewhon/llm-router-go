@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,6 +228,135 @@ func TestCircuitBreakerTripsAndHalfOpens(t *testing.T) {
 	}
 	if _, source, _ := tr.State("qwen3.6-hypatia"); source != SourcePoll {
 		t.Errorf("source = %q, want poll after the breaker closes", source)
+	}
+}
+
+// refusal is a proxy failure that names its own cooldown, the way the
+// router's suppressed 429 does.
+type refusal struct{ after time.Duration }
+
+func (r refusal) Error() string             { return "upstream status 429" }
+func (r refusal) UpstreamStatus() int       { return 429 }
+func (r refusal) RetryAfter() time.Duration { return r.after }
+
+func TestRetryAfterOpensTheBreakerForThatLong(t *testing.T) {
+	clock := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	tr, _ := newTestTracker(t, &fakeFleet{down: map[string]bool{}}, now)
+	tr.PollOnce(context.Background())
+
+	// One refusal is enough: the seat said when it will take traffic again.
+	tr.ReportFailure("qwen3.6-hypatia", refusal{after: 5 * time.Minute})
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Fatalf("breaker should open on a single failure that carries Retry-After")
+	}
+	if _, _, reason := tr.State("qwen3.6-hypatia"); !strings.Contains(reason, "upstream asked for 5m0s") {
+		t.Errorf("reason = %q, want it to name the upstream's cooldown", reason)
+	}
+
+	// Past the default cooldown but inside the one the upstream asked for.
+	clock = clock.Add(DefaultBreakerCooldown + time.Second)
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker closed after the default cooldown; the upstream asked for 5m")
+	}
+	clock = clock.Add(5 * time.Minute)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker should half-open once the upstream's cooldown has passed")
+	}
+
+	// A success returns the seat to the default cooldown for next time.
+	tr.ReportSuccess("qwen3.6-hypatia")
+	boom := errors.New("read: connection reset by peer")
+	for i := 0; i < DefaultBreakerTrip; i++ {
+		tr.ReportFailure("qwen3.6-hypatia", boom)
+	}
+	clock = clock.Add(DefaultBreakerCooldown + time.Second)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("an ordinary opening must use the default cooldown, not a stale Retry-After")
+	}
+}
+
+func TestRetryAfterIsCapped(t *testing.T) {
+	clock := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	tr, _ := newTestTracker(t, &fakeFleet{down: map[string]bool{}}, now)
+	tr.PollOnce(context.Background())
+
+	// "Come back tomorrow" is believed only as far as the cap.
+	tr.ReportFailure("qwen3.6-hypatia", refusal{after: 20 * time.Hour})
+	clock = clock.Add(DefaultMaxRetryAfter - time.Second)
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker should still be open just inside the cap")
+	}
+	clock = clock.Add(2 * time.Second)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker should half-open at the cap, not after 20h")
+	}
+}
+
+func TestRefusalWithoutRetryAfterCountsLikeAnyFailure(t *testing.T) {
+	tr, _ := newTestTracker(t, &fakeFleet{down: map[string]bool{}}, nil)
+	tr.PollOnce(context.Background())
+
+	for i := 0; i < DefaultBreakerTrip-1; i++ {
+		tr.ReportFailure("qwen3.6-hypatia", refusal{})
+	}
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("a 429 with no Retry-After should not open the breaker before %d failures", DefaultBreakerTrip)
+	}
+	tr.ReportFailure("qwen3.6-hypatia", refusal{})
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker should be open after %d refusals", DefaultBreakerTrip)
+	}
+}
+
+func TestFailedHalfOpenTrialReopensTheBreaker(t *testing.T) {
+	clock := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	tr, _ := newTestTracker(t, &fakeFleet{down: map[string]bool{}}, now)
+	tr.PollOnce(context.Background())
+
+	boom := errors.New("read: connection reset by peer")
+	for i := 0; i < DefaultBreakerTrip; i++ {
+		tr.ReportFailure("qwen3.6-hypatia", boom)
+	}
+	clock = clock.Add(DefaultBreakerCooldown + time.Second)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Fatalf("breaker should half-open after the cooldown")
+	}
+
+	// The trial request fails. The seat must go back out for a full cooldown
+	// instead of taking every request from here on.
+	tr.ReportFailure("qwen3.6-hypatia", boom)
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Fatalf("a failed trial must reopen the breaker")
+	}
+	clock = clock.Add(DefaultBreakerCooldown - time.Second)
+	if tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("the reopened breaker should run a fresh cooldown")
+	}
+	clock = clock.Add(2 * time.Second)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("breaker should half-open again after the fresh cooldown")
+	}
+}
+
+func TestFailuresWhileOpenDoNotExtendTheCooldown(t *testing.T) {
+	clock := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clock }
+	tr, _ := newTestTracker(t, &fakeFleet{down: map[string]bool{}}, now)
+	tr.PollOnce(context.Background())
+
+	boom := errors.New("read: connection reset by peer")
+	for i := 0; i < DefaultBreakerTrip; i++ {
+		tr.ReportFailure("qwen3.6-hypatia", boom)
+	}
+	// Requests already in flight when the breaker opened keep failing.
+	clock = clock.Add(30 * time.Second)
+	tr.ReportFailure("qwen3.6-hypatia", boom)
+	clock = clock.Add(DefaultBreakerCooldown - 30*time.Second + time.Second)
+	if !tr.Routable("qwen3.6-hypatia") {
+		t.Errorf("stragglers must not push the half-open trial back")
 	}
 }
 

@@ -109,6 +109,12 @@ const (
 	DefaultDownAfter       = 2
 	DefaultBreakerTrip     = 3
 	DefaultBreakerCooldown = 60 * time.Second
+	// DefaultMaxRetryAfter caps how long an upstream's own Retry-After can
+	// keep a seat out. A gateway whose daily budget is spent may say "come
+	// back in 20 hours"; believing that outright would strand the seat past
+	// a budget someone raised by hand. One wasted round trip per cap period
+	// is the price of noticing.
+	DefaultMaxRetryAfter = 10 * time.Minute
 )
 
 // Config configures a Tracker. The zero value of each field falls back to the
@@ -126,7 +132,10 @@ type Config struct {
 	// BreakerCooldown is how long the breaker stays open before admitting one
 	// half-open probe.
 	BreakerCooldown time.Duration
-	Logger          *slog.Logger
+	// MaxRetryAfter caps an upstream-supplied Retry-After used as a breaker
+	// cooldown. Zero means DefaultMaxRetryAfter.
+	MaxRetryAfter time.Duration
+	Logger        *slog.Logger
 	// Probe overrides the node prober (tests).
 	Probe ProbeFunc
 	// Now overrides the clock (tests).
@@ -179,6 +188,9 @@ type modelState struct {
 	breakerOpen     bool
 	breakerOpenedAt time.Time
 	halfOpen        bool
+	// breakerCooldown is this opening's own cooldown, set when the upstream
+	// named one (Retry-After). Zero means cfg.BreakerCooldown.
+	breakerCooldown time.Duration
 
 	// generation probe. probe is whether it applies to this model at all;
 	// confirmed is whether a generation has succeeded since the seat last
@@ -242,6 +254,9 @@ func NewTracker(cfg Config) *Tracker {
 	}
 	if cfg.BreakerCooldown <= 0 {
 		cfg.BreakerCooldown = DefaultBreakerCooldown
+	}
+	if cfg.MaxRetryAfter <= 0 {
+		cfg.MaxRetryAfter = DefaultMaxRetryAfter
 	}
 	if cfg.ProbeTimeout <= 0 {
 		cfg.ProbeTimeout = DefaultProbeTimeout
@@ -661,6 +676,12 @@ func (t *Tracker) applyProbeLocked(r probeResult) {
 // the seat is demoted to warming and re-probed, and the failure does not
 // count toward the breaker — the probe owns that recovery, and it is faster
 // and more specific than a 60 s cooldown.
+//
+// A failure that carries the upstream's own Retry-After opens the breaker at
+// once, for that long (capped at MaxRetryAfter): the seat has said when it
+// will take traffic again, so there is nothing to learn from two more
+// refusals. A failure on the half-open trial reopens the breaker for a fresh
+// cooldown rather than leaving it admitting traffic.
 func (t *Tracker) ReportFailure(modelID string, err error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -680,18 +701,52 @@ func (t *Tracker) ReportFailure(modelID string, err error) {
 		}
 		return
 	}
+	trial := st.breakerOpen && st.halfOpen
 	st.halfOpen = false
 	st.breakerFails++
-	if st.breakerFails >= t.cfg.BreakerTrip && !st.breakerOpen {
-		st.breakerOpen = true
-		st.breakerOpenedAt = t.now()
-		reason := ""
-		if err != nil {
-			reason = err.Error()
-		}
-		t.logger.Warn("circuit breaker opened", "model", modelID,
-			"consecutive_failures", st.breakerFails, "err", reason)
+	after := t.retryAfterOf(err)
+	if !trial && after == 0 && (st.breakerOpen || st.breakerFails < t.cfg.BreakerTrip) {
+		return
 	}
+	reopened := st.breakerOpen
+	st.breakerOpen = true
+	st.breakerOpenedAt = t.now()
+	st.breakerCooldown = after
+	reason := ""
+	if err != nil {
+		reason = err.Error()
+	}
+	msg := "circuit breaker opened"
+	if reopened {
+		msg = "circuit breaker reopened"
+	}
+	t.logger.Warn(msg, "model", modelID, "consecutive_failures", st.breakerFails,
+		"cooldown", t.cooldownOf(st).String(), "err", reason)
+}
+
+// retryAfterOf reads the upstream's own cooldown off a proxy failure, capped
+// at MaxRetryAfter. Zero when the failure carries none.
+func (t *Tracker) retryAfterOf(err error) time.Duration {
+	var ra retryAfterError
+	if err == nil || !errors.As(err, &ra) {
+		return 0
+	}
+	d := ra.RetryAfter()
+	if d <= 0 {
+		return 0
+	}
+	if d > t.cfg.MaxRetryAfter {
+		return t.cfg.MaxRetryAfter
+	}
+	return d
+}
+
+// cooldownOf is how long this opening of the breaker lasts.
+func (t *Tracker) cooldownOf(st *modelState) time.Duration {
+	if st.breakerCooldown > 0 {
+		return st.breakerCooldown
+	}
+	return t.cfg.BreakerCooldown
 }
 
 // ReportSuccess clears the breaker for a model, and confirms a warming seat:
@@ -709,6 +764,7 @@ func (t *Tracker) ReportSuccess(modelID string) {
 	st.breakerFails = 0
 	st.breakerOpen = false
 	st.halfOpen = false
+	st.breakerCooldown = 0
 	if st.probe && !st.confirmed {
 		st.confirmed = true
 		st.probeErr = ""
@@ -737,7 +793,10 @@ func (t *Tracker) stateLocked(modelID string) (Availability, Source, string) {
 	// The breaker outranks the poller: it is evidence from a real request,
 	// whereas the poll only proves the agent is answering.
 	if st.breakerOpen {
-		if t.now().Sub(st.breakerOpenedAt) < t.cfg.BreakerCooldown {
+		if t.now().Sub(st.breakerOpenedAt) < t.cooldownOf(st) {
+			if st.breakerCooldown > 0 {
+				return Unavailable, SourcePassive, fmt.Sprintf("circuit breaker open (upstream asked for %s)", st.breakerCooldown)
+			}
 			return Unavailable, SourcePassive, fmt.Sprintf("circuit breaker open (%d consecutive failures)", st.breakerFails)
 		}
 		// Cooldown elapsed: admit exactly one probe request.

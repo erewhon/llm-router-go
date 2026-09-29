@@ -107,7 +107,7 @@ func newRouterMetrics(version string, started time.Time, active map[string]confi
 	// Upstream attempt outcomes — the incident-triage counter. Grouping by
 	// api_base separates "one model is broken" from "the whole endpoint is
 	// down" (the 2026-08-27 Zen question). Outcomes: success, client_error,
-	// server_error, error_envelope, timeout, connect, transport. Failed
+	// server_error, rate_limited, error_envelope, timeout, connect, transport. Failed
 	// failover attempts count once each, against the model that failed.
 	upstream := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "router_upstream_requests_total",
